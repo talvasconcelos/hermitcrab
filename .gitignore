@@ -20,3 +20,10 @@ poetry.lock
 .pytest_cache/
 botpy.log
 tests/
+
+# AI agent data
+AGENTS.md
+CLAUDE.md
+GEMINI.md
+QWEN.md
+

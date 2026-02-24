@@ -1,11 +1,11 @@
 [project]
-name = "nanobot-ai"
-version = "0.1.4.post1"
+name = "hermitcrab"
+version = "0.1.0"
 description = "A lightweight personal AI assistant framework"
 requires-python = ">=3.11"
 license = {text = "MIT"}
 authors = [
-    {name = "nanobot contributors"}
+    {name = "hermitcrab contributors"}
 ]
 keywords = ["ai", "agent", "chatbot"]
 classifiers = [
@@ -42,6 +42,8 @@ dependencies = [
     "prompt-toolkit>=3.0.50,<4.0.0",
     "mcp>=1.26.0,<2.0.0",
     "json-repair>=0.57.0,<1.0.0",
+    "python-frontmatter>=1.1.0",
+    "pynostr>=0.7.0",
 ]
 
 [project.optional-dependencies]
@@ -52,37 +54,37 @@ dev = [
 ]
 
 [project.scripts]
-nanobot = "nanobot.cli.commands:app"
+hermitcrab = "hermitcrab.cli.commands:app"
 
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
-packages = ["nanobot"]
+packages = ["hermitcrab"]
 
 [tool.hatch.build.targets.wheel.sources]
-"nanobot" = "nanobot"
+"hermitcrab" = "hermitcrab"
 
 # Include non-Python files in skills and templates
 [tool.hatch.build]
 include = [
-    "nanobot/**/*.py",
-    "nanobot/templates/**/*.md",
-    "nanobot/skills/**/*.md",
-    "nanobot/skills/**/*.sh",
+    "hermitcrab/**/*.py",
+    "hermitcrab/templates/**/*.md",
+    "hermitcrab/skills/**/*.md",
+    "hermitcrab/skills/**/*.sh",
 ]
 
 [tool.hatch.build.targets.sdist]
 include = [
-    "nanobot/",
+    "hermitcrab/",
     "bridge/",
     "README.md",
     "LICENSE",
 ]
 
 [tool.hatch.build.targets.wheel.force-include]
-"bridge" = "nanobot/bridge"
+"bridge" = "hermitcrab/bridge"
 
 [tool.ruff]
 line-length = 100

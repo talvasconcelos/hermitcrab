@@ -1,6 +1,6 @@
 from typer.testing import CliRunner
 
-from nanobot.cli.commands import app
+from hermitcrab.cli.commands import app
 
 runner = CliRunner()
 
