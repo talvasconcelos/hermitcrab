@@ -6,9 +6,6 @@
     <a href="https://pepy.tech/project/hermitcrab-ai"><img src="https://static.pepy.tech/badge/hermitcrab-ai" alt="Downloads"></a>
     <img src="https://img.shields.io/badge/python-≥3.11-blue" alt="Python">
     <img src="https://img.shields.io/badge/license-MIT-green" alt="License">
-    <a href="./COMMUNICATION.md"><img src="https://img.shields.io/badge/Feishu-Group-E9DBFC?style=flat&logo=feishu&logoColor=white" alt="Feishu"></a>
-    <a href="./COMMUNICATION.md"><img src="https://img.shields.io/badge/WeChat-Group-C5EAB4?style=flat&logo=wechat&logoColor=white" alt="WeChat"></a>
-    <a href="https://discord.gg/MnCvHqpUGB"><img src="https://img.shields.io/badge/Discord-Community-5865F2?style=flat&logo=discord&logoColor=white" alt="Discord"></a>
   </p>
 </div> -->
 
@@ -25,8 +22,6 @@ HermitCrab adds atomic Obsidian-style memory, Nostr-first comms, distillation, h
 ## 📢 News
 
 - **2026-02-21** 🎉 Released **v0.1.4.post1** — new providers, media support across channels, and major stability improvements. See [release notes](https://github.com/HKUDS/hermitcrab/releases/tag/v0.1.4.post1) for details.
-- **2026-02-20** 🐦 Feishu now receives multimodal files from users. More reliable memory under the hood.
-- **2026-02-19** ✨ Slack now sends files, Discord splits long messages, and subagents work in CLI mode.
 - **2026-02-18** ⚡️ hermitcrab now supports VolcEngine, MCP custom auth headers, and Anthropic prompt caching.
 - **2026-02-17** 🎉 Released **v0.1.4** — MCP support, progress streaming, new providers, and multiple channel improvements. Please see [release notes](https://github.com/HKUDS/hermitcrab/releases/tag/v0.1.4) for details.
 - **2026-02-16** 🦞 hermitcrab now integrates a [ClawHub](https://clawhub.ai) skill — search and install public agent skills.
@@ -40,11 +35,8 @@ HermitCrab adds atomic Obsidian-style memory, Nostr-first comms, distillation, h
 <summary>Earlier news</summary>
 
 - **2026-02-10** 🎉 Released **v0.1.3.post6** with improvements! Check the updates [notes](https://github.com/HKUDS/hermitcrab/releases/tag/v0.1.3.post6) and our [roadmap](https://github.com/HKUDS/hermitcrab/discussions/431).
-- **2026-02-09** 💬 Added Slack, Email, and QQ support — hermitcrab now supports multiple chat platforms!
 - **2026-02-08** 🔧 Refactored Providers—adding a new LLM provider now takes just 2 simple steps! Check [here](#providers).
 - **2026-02-07** 🚀 Released **v0.1.3.post5** with Qwen support & several key improvements! Check [here](https://github.com/HKUDS/hermitcrab/releases/tag/v0.1.3.post5) for details.
-- **2026-02-06** ✨ Added Moonshot/Kimi provider, Discord integration, and enhanced security hardening!
-- **2026-02-05** ✨ Added Feishu channel, DeepSeek provider, and enhanced scheduled tasks support!
 - **2026-02-04** 🚀 Released **v0.1.3.post4** with multi-provider & Docker support! Check [here](https://github.com/HKUDS/hermitcrab/releases/tag/v0.1.3.post4) for details.
 - **2026-02-03** ⚡ Integrated vLLM for local LLM support and improved natural language task scheduling!
 - **2026-02-02** 🎉 hermitcrab officially launched! Welcome to try 🐈 hermitcrab!
@@ -162,400 +154,214 @@ That's it! You have a working AI assistant in 2 minutes.
 
 Connect hermitcrab to your favorite chat platform.
 
+**Primary Channel: Nostr** (decentralized, encrypted DMs)  
+**Fallback Channels: Telegram, Email**
+
 | Channel | What you need |
 |---------|---------------|
+| **Nostr** | Private key (nsec), optional: allowed pubkeys |
 | **Telegram** | Bot token from @BotFather |
-| **Discord** | Bot token + Message Content intent |
-| **WhatsApp** | QR code scan |
-| **Feishu** | App ID + App Secret |
-| **Mochat** | Claw token (auto-setup available) |
-| **DingTalk** | App Key + App Secret |
-| **Slack** | Bot token + App-Level token |
 | **Email** | IMAP/SMTP credentials |
-| **QQ** | App ID + App Secret |
+
+<details>
+<summary><b>Nostr</b> (Primary - Encrypted DMs via NIP-04)</summary>
+
+**Nostr** is a decentralized protocol for censorship-resistant communication. HermitCrab uses NIP-04 for encrypted direct messages.
+
+**1. Generate a Nostr keypair**
+
+```bash
+# Install pynostr if not already installed
+pip install pynostr
+
+# Generate new keypair
+python -c "from pynostr.key import PrivateKey; k = PrivateKey(); print(f'nsec: {k.bech32()}'); print(f'npub: {k.public_key.bech32()}')"
+```
+
+Save both keys:
+- **nsec** (private key) — Keep secret! Add to config
+- **npub** (public key) — Share with users who want to DM your bot
+
+**2. Configure**
+
+```json
+{
+  "channels": {
+    "nostr": {
+      "enabled": true,
+      "private_key": "nsec1...",  // Your private key (nsec or hex)
+      "relays": [
+        "wss://relay.damus.io",
+        "wss://relay.primal.net",
+        "wss://nostr-pub.wellorder.net"
+      ],
+      "protocol": "nip04",
+      "allowed_pubkeys": ["npub1...", "npub2..."]  // Optional: restrict to specific users
+    }
+  }
+}
+```
+
+> **Security:** Set `allowed_pubkeys` to restrict who can message your bot. If empty, anyone can send DMs (not recommended for production).
+
+**3. Run**
+
+```bash
+# Gateway mode (listens for DMs continuously)
+hermitcrab gateway
+
+# Or CLI listen mode (listen for DMs from specific pubkey)
+hermitcrab agent --nostr-pubkey npub1...
+```
+
+**4. Test with a Nostr client**
+
+- Install a Nostr client (Damus, Primal, Amethyst, etc.)
+- Send an encrypted DM to your bot's npub
+- Bot will respond via encrypted DM
+
+</details>
 
 <details>
 <summary><b>Telegram</b> (Recommended)</summary>
 
+
+
 **1. Create a bot**
+
 - Open Telegram, search `@BotFather`
+
 - Send `/newbot`, follow prompts
+
 - Copy the token
+
+
 
 **2. Configure**
 
+
+
 ```json
+
 {
+
   "channels": {
+
     "telegram": {
+
       "enabled": true,
+
       "token": "YOUR_BOT_TOKEN",
+
       "allowFrom": ["YOUR_USER_ID"]
+
     }
+
   }
+
 }
+
 ```
 
+
+
 > You can find your **User ID** in Telegram settings. It is shown as `@yourUserId`.
+
 > Copy this value **without the `@` symbol** and paste it into the config file.
 
 
-**3. Run**
-
-```bash
-hermitcrab gateway
-```
-
-</details>
-
-<details>
-<summary><b>Mochat (Claw IM)</b></summary>
-
-Uses **Socket.IO WebSocket** by default, with HTTP polling fallback.
-
-**1. Ask hermitcrab to set up Mochat for you**
-
-Simply send this message to hermitcrab (replace `xxx@xxx` with your real email):
-
-```
-Read https://raw.githubusercontent.com/HKUDS/MoChat/refs/heads/main/skills/hermitcrab/skill.md and register on MoChat. My Email account is xxx@xxx Bind me as your owner and DM me on MoChat.
-```
-
-hermitcrab will automatically register, configure `~/.hermitcrab/config.json`, and connect to Mochat.
-
-**2. Restart gateway**
-
-```bash
-hermitcrab gateway
-```
-
-That's it — hermitcrab handles the rest!
-
-<br>
-
-<details>
-<summary>Manual configuration (advanced)</summary>
-
-If you prefer to configure manually, add the following to `~/.hermitcrab/config.json`:
-
-> Keep `claw_token` private. It should only be sent in `X-Claw-Token` header to your Mochat API endpoint.
-
-```json
-{
-  "channels": {
-    "mochat": {
-      "enabled": true,
-      "base_url": "https://mochat.io",
-      "socket_url": "https://mochat.io",
-      "socket_path": "/socket.io",
-      "claw_token": "claw_xxx",
-      "agent_user_id": "6982abcdef",
-      "sessions": ["*"],
-      "panels": ["*"],
-      "reply_delay_mode": "non-mention",
-      "reply_delay_ms": 120000
-    }
-  }
-}
-```
-
-
-
-</details>
-
-</details>
-
-<details>
-<summary><b>Discord</b></summary>
-
-**1. Create a bot**
-- Go to https://discord.com/developers/applications
-- Create an application → Bot → Add Bot
-- Copy the bot token
-
-**2. Enable intents**
-- In the Bot settings, enable **MESSAGE CONTENT INTENT**
-- (Optional) Enable **SERVER MEMBERS INTENT** if you plan to use allow lists based on member data
-
-**3. Get your User ID**
-- Discord Settings → Advanced → enable **Developer Mode**
-- Right-click your avatar → **Copy User ID**
-
-**4. Configure**
-
-```json
-{
-  "channels": {
-    "discord": {
-      "enabled": true,
-      "token": "YOUR_BOT_TOKEN",
-      "allowFrom": ["YOUR_USER_ID"]
-    }
-  }
-}
-```
-
-**5. Invite the bot**
-- OAuth2 → URL Generator
-- Scopes: `bot`
-- Bot Permissions: `Send Messages`, `Read Message History`
-- Open the generated invite URL and add the bot to your server
-
-**6. Run**
-
-```bash
-hermitcrab gateway
-```
-
-</details>
-
-<details>
-<summary><b>WhatsApp</b></summary>
-
-Requires **Node.js ≥18**.
-
-**1. Link device**
-
-```bash
-hermitcrab channels login
-# Scan QR with WhatsApp → Settings → Linked Devices
-```
-
-**2. Configure**
-
-```json
-{
-  "channels": {
-    "whatsapp": {
-      "enabled": true,
-      "allowFrom": ["+1234567890"]
-    }
-  }
-}
-```
-
-**3. Run** (two terminals)
-
-```bash
-# Terminal 1
-hermitcrab channels login
-
-# Terminal 2
-hermitcrab gateway
-```
-
-</details>
-
-<details>
-<summary><b>Feishu (飞书)</b></summary>
-
-Uses **WebSocket** long connection — no public IP required.
-
-**1. Create a Feishu bot**
-- Visit [Feishu Open Platform](https://open.feishu.cn/app)
-- Create a new app → Enable **Bot** capability
-- **Permissions**: Add `im:message` (send messages)
-- **Events**: Add `im.message.receive_v1` (receive messages)
-  - Select **Long Connection** mode (requires running hermitcrab first to establish connection)
-- Get **App ID** and **App Secret** from "Credentials & Basic Info"
-- Publish the app
-
-**2. Configure**
-
-```json
-{
-  "channels": {
-    "feishu": {
-      "enabled": true,
-      "appId": "cli_xxx",
-      "appSecret": "xxx",
-      "encryptKey": "",
-      "verificationToken": "",
-      "allowFrom": []
-    }
-  }
-}
-```
-
-> `encryptKey` and `verificationToken` are optional for Long Connection mode.
-> `allowFrom`: Leave empty to allow all users, or add `["ou_xxx"]` to restrict access.
 
 **3. Run**
 
+
+
 ```bash
+
 hermitcrab gateway
+
 ```
 
-> [!TIP]
-> Feishu uses WebSocket to receive messages — no webhook or public IP needed!
+
 
 </details>
 
-<details>
-<summary><b>QQ (QQ单聊)</b></summary>
 
-Uses **botpy SDK** with WebSocket — no public IP required. Currently supports **private messages only**.
-
-**1. Register & create bot**
-- Visit [QQ Open Platform](https://q.qq.com) → Register as a developer (personal or enterprise)
-- Create a new bot application
-- Go to **开发设置 (Developer Settings)** → copy **AppID** and **AppSecret**
-
-**2. Set up sandbox for testing**
-- In the bot management console, find **沙箱配置 (Sandbox Config)**
-- Under **在消息列表配置**, click **添加成员** and add your own QQ number
-- Once added, scan the bot's QR code with mobile QQ → open the bot profile → tap "发消息" to start chatting
-
-**3. Configure**
-
-> - `allowFrom`: Leave empty for public access, or add user openids to restrict. You can find openids in the hermitcrab logs when a user messages the bot.
-> - For production: submit a review in the bot console and publish. See [QQ Bot Docs](https://bot.q.qq.com/wiki/) for the full publishing flow.
-
-```json
-{
-  "channels": {
-    "qq": {
-      "enabled": true,
-      "appId": "YOUR_APP_ID",
-      "secret": "YOUR_APP_SECRET",
-      "allowFrom": []
-    }
-  }
-}
-```
-
-**4. Run**
-
-```bash
-hermitcrab gateway
-```
-
-Now send a message to the bot from QQ — it should respond!
-
-</details>
 
 <details>
-<summary><b>DingTalk (钉钉)</b></summary>
 
-Uses **Stream Mode** — no public IP required.
-
-**1. Create a DingTalk bot**
-- Visit [DingTalk Open Platform](https://open-dev.dingtalk.com/)
-- Create a new app -> Add **Robot** capability
-- **Configuration**:
-  - Toggle **Stream Mode** ON
-- **Permissions**: Add necessary permissions for sending messages
-- Get **AppKey** (Client ID) and **AppSecret** (Client Secret) from "Credentials"
-- Publish the app
-
-**2. Configure**
-
-```json
-{
-  "channels": {
-    "dingtalk": {
-      "enabled": true,
-      "clientId": "YOUR_APP_KEY",
-      "clientSecret": "YOUR_APP_SECRET",
-      "allowFrom": []
-    }
-  }
-}
-```
-
-> `allowFrom`: Leave empty to allow all users, or add `["staffId"]` to restrict access.
-
-**3. Run**
-
-```bash
-hermitcrab gateway
-```
-
-</details>
-
-<details>
-<summary><b>Slack</b></summary>
-
-Uses **Socket Mode** — no public URL required.
-
-**1. Create a Slack app**
-- Go to [Slack API](https://api.slack.com/apps) → **Create New App** → "From scratch"
-- Pick a name and select your workspace
-
-**2. Configure the app**
-- **Socket Mode**: Toggle ON → Generate an **App-Level Token** with `connections:write` scope → copy it (`xapp-...`)
-- **OAuth & Permissions**: Add bot scopes: `chat:write`, `reactions:write`, `app_mentions:read`
-- **Event Subscriptions**: Toggle ON → Subscribe to bot events: `message.im`, `message.channels`, `app_mention` → Save Changes
-- **App Home**: Scroll to **Show Tabs** → Enable **Messages Tab** → Check **"Allow users to send Slash commands and messages from the messages tab"**
-- **Install App**: Click **Install to Workspace** → Authorize → copy the **Bot Token** (`xoxb-...`)
-
-**3. Configure hermitcrab**
-
-```json
-{
-  "channels": {
-    "slack": {
-      "enabled": true,
-      "botToken": "xoxb-...",
-      "appToken": "xapp-...",
-      "groupPolicy": "mention"
-    }
-  }
-}
-```
-
-**4. Run**
-
-```bash
-hermitcrab gateway
-```
-
-DM the bot directly or @mention it in a channel — it should respond!
-
-> [!TIP]
-> - `groupPolicy`: `"mention"` (default — respond only when @mentioned), `"open"` (respond to all channel messages), or `"allowlist"` (restrict to specific channels).
-> - DM policy defaults to open. Set `"dm": {"enabled": false}` to disable DMs.
-
-</details>
-
-<details>
 <summary><b>Email</b></summary>
 
-Give hermitcrab its own email account. It polls **IMAP** for incoming mail and replies via **SMTP** — like a personal email assistant.
+
+
+Give hermitcrab its own email account. It polls **IMAP** for incoming mail and replies via **SMTP**.
+
+
 
 **1. Get credentials (Gmail example)**
-- Create a dedicated Gmail account for your bot (e.g. `my-hermitcrab@gmail.com`)
+
+- Create a dedicated Gmail account for your bot
+
 - Enable 2-Step Verification → Create an [App Password](https://myaccount.google.com/apppasswords)
-- Use this app password for both IMAP and SMTP
+
+
 
 **2. Configure**
 
-> - `consentGranted` must be `true` to allow mailbox access. This is a safety gate — set `false` to fully disable.
-> - `allowFrom`: Leave empty to accept emails from anyone, or restrict to specific senders.
-> - `smtpUseTls` and `smtpUseSsl` default to `true` / `false` respectively, which is correct for Gmail (port 587 + STARTTLS). No need to set them explicitly.
-> - Set `"autoReplyEnabled": false` if you only want to read/analyze emails without sending automatic replies.
+
 
 ```json
+
 {
+
   "channels": {
+
     "email": {
+
       "enabled": true,
+
       "consentGranted": true,
+
       "imapHost": "imap.gmail.com",
+
       "imapPort": 993,
-      "imapUsername": "my-hermitcrab@gmail.com",
+
+      "imapUsername": "your-email@gmail.com",
+
       "imapPassword": "your-app-password",
+
       "smtpHost": "smtp.gmail.com",
+
       "smtpPort": 587,
-      "smtpUsername": "my-hermitcrab@gmail.com",
+
+      "smtpUsername": "your-email@gmail.com",
+
       "smtpPassword": "your-app-password",
-      "fromAddress": "my-hermitcrab@gmail.com",
-      "allowFrom": ["your-real-email@gmail.com"]
+
+      "fromAddress": "your-email@gmail.com"
+
     }
+
   }
+
 }
+
 ```
 
+
+
+**3. Run**
+
+
+
+```bash
+
+hermitcrab gateway
+
+```
+
+
+
+</details>
 
 **3. Run**
 
@@ -823,7 +629,7 @@ MCP tools are automatically discovered and registered on startup. The LLM can us
 | `hermitcrab gateway` | Start the gateway |
 | `hermitcrab status` | Show status |
 | `hermitcrab provider login openai-codex` | OAuth login for providers |
-| `hermitcrab channels login` | Link WhatsApp (scan QR) |
+| `hermitcrab channels login` | Link channels (deprecated) |
 | `hermitcrab channels status` | Show channel status |
 
 Interactive mode exits: `exit`, `quit`, `/exit`, `/quit`, `:q`, or `Ctrl+D`.
@@ -896,7 +702,7 @@ docker run -v ~/.hermitcrab:/root/.hermitcrab --rm hermitcrab onboard
 # Edit config on host to add API keys
 vim ~/.hermitcrab/config.json
 
-# Run gateway (connects to enabled channels, e.g. Telegram/Discord/Mochat)
+# Run gateway (connects to enabled channels, e.g. Telegram)
 docker run -v ~/.hermitcrab:/root/.hermitcrab -p 18790:18790 hermitcrab gateway
 
 # Or run a single command

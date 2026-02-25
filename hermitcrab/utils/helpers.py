@@ -1,7 +1,7 @@
 """Utility functions for hermitcrab."""
 
-from pathlib import Path
 from datetime import datetime
+from pathlib import Path
 
 
 def ensure_dir(path: Path) -> Path:
