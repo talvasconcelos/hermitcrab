@@ -13,8 +13,8 @@ def mock_prompt_session():
     mock_session = MagicMock()
     mock_session.prompt_async = AsyncMock()
     with (
-        patch("nanobot.cli.commands._PROMPT_SESSION", mock_session),
-        patch("nanobot.cli.commands.patch_stdout"),
+        patch("hermitcrab.cli.commands._PROMPT_SESSION", mock_session),
+        patch("hermitcrab.cli.commands.patch_stdout"),
     ):
         yield mock_session
 
@@ -47,8 +47,8 @@ def test_init_prompt_session_creates_session():
     commands._PROMPT_SESSION = None
 
     with (
-        patch("nanobot.cli.commands.PromptSession") as MockSession,
-        patch("nanobot.cli.commands.FileHistory") as MockHistory,
+        patch("hermitcrab.cli.commands.PromptSession") as MockSession,
+        patch("hermitcrab.cli.commands.FileHistory") as MockHistory,
         patch("pathlib.Path.home") as mock_home,
     ):
         mock_home.return_value = MagicMock()

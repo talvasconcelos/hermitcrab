@@ -18,10 +18,10 @@ runner = CliRunner()
 def mock_paths():
     """Mock config/workspace paths for test isolation."""
     with (
-        patch("nanobot.config.loader.get_config_path") as mock_cp,
-        patch("nanobot.config.loader.save_config") as mock_sc,
-        patch("nanobot.config.loader.load_config") as mock_lc,
-        patch("nanobot.utils.helpers.get_workspace_path") as mock_ws,
+        patch("hermitcrab.config.loader.get_config_path") as mock_cp,
+        patch("hermitcrab.config.loader.save_config") as mock_sc,
+        patch("hermitcrab.config.loader.load_config") as mock_lc,
+        patch("hermitcrab.utils.helpers.get_workspace_path") as mock_ws,
     ):
         base_dir = Path("./test_onboard_data")
         if base_dir.exists():
@@ -50,10 +50,15 @@ def test_onboard_fresh_install(mock_paths):
     assert result.exit_code == 0
     assert "Created config" in result.stdout
     assert "Created workspace" in result.stdout
-    assert "nanobot is ready" in result.stdout
+    assert "hermitcrab is ready" in result.stdout
     assert config_file.exists()
     assert (workspace_dir / "AGENTS.md").exists()
-    assert (workspace_dir / "memory" / "MEMORY.md").exists()
+    # Check category-based memory directories exist
+    assert (workspace_dir / "memory" / "facts").is_dir()
+    assert (workspace_dir / "memory" / "decisions").is_dir()
+    assert (workspace_dir / "memory" / "goals").is_dir()
+    assert (workspace_dir / "memory" / "tasks").is_dir()
+    assert (workspace_dir / "memory" / "reflections").is_dir()
 
 
 def test_onboard_existing_config_refresh(mock_paths):

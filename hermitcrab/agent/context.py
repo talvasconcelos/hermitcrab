@@ -17,14 +17,14 @@ class ContextBuilder:
     Assembles bootstrap files, memory, skills, and conversation history
     into a coherent prompt for the LLM.
     """
-    
+
     BOOTSTRAP_FILES = ["AGENTS.md", "SOUL.md", "USER.md", "TOOLS.md", "IDENTITY.md"]
-    
+
     def __init__(self, workspace: Path):
         self.workspace = workspace
         self.memory = MemoryStore(workspace)
         self.skills = SkillsLoader(workspace)
-    
+
     def build_system_prompt(self, skill_names: list[str] | None = None) -> str:
         """
         Build the system prompt from bootstrap files, memory, and skills.
@@ -36,20 +36,20 @@ class ContextBuilder:
             Complete system prompt.
         """
         parts = []
-        
+
         # Core identity
         parts.append(self._get_identity())
-        
+
         # Bootstrap files
         bootstrap = self._load_bootstrap_files()
         if bootstrap:
             parts.append(bootstrap)
-        
+
         # Memory context
         memory = self.memory.get_memory_context()
         if memory:
             parts.append(f"# Memory\n\n{memory}")
-        
+
         # Skills - progressive loading
         # 1. Always-loaded skills: include full content
         always_skills = self.skills.get_always_skills()
@@ -57,7 +57,7 @@ class ContextBuilder:
             always_content = self.skills.load_skills_for_context(always_skills)
             if always_content:
                 parts.append(f"# Active Skills\n\n{always_content}")
-        
+
         # 2. Available skills: only show summary (agent uses read_file to load)
         skills_summary = self.skills.build_skills_summary()
         if skills_summary:
@@ -67,22 +67,22 @@ The following skills extend your capabilities. To use a skill, read its SKILL.md
 Skills with available="false" need dependencies installed first - you can try installing them with apt/brew.
 
 {skills_summary}""")
-        
+
         return "\n\n---\n\n".join(parts)
-    
+
     def _get_identity(self) -> str:
         """Get the core identity section."""
-        from datetime import datetime
         import time as _time
+        from datetime import datetime
         now = datetime.now().strftime("%Y-%m-%d %H:%M (%A)")
         tz = _time.strftime("%Z") or "UTC"
         workspace_path = str(self.workspace.expanduser().resolve())
         system = platform.system()
         runtime = f"{'macOS' if system == 'Darwin' else system} {platform.machine()}, Python {platform.python_version()}"
-        
+
         return f"""# hermitcrab 🐈
 
-You are hermitcrab, a helpful AI assistant. 
+You are hermitcrab, a helpful AI assistant.
 
 ## Current Time
 {now} ({tz})
@@ -92,8 +92,12 @@ You are hermitcrab, a helpful AI assistant.
 
 ## Workspace
 Your workspace is at: {workspace_path}
-- Long-term memory: {workspace_path}/memory/MEMORY.md
-- History log: {workspace_path}/memory/HISTORY.md (grep-searchable)
+- Long-term memory: {workspace_path}/memory/ (category-based atomic notes)
+  - facts/ — Long-term truths
+  - decisions/ — Locked choices (immutable)
+  - goals/ — Outcome-oriented objectives
+  - tasks/ — Actionable items with lifecycle
+  - reflections/ — Subjective observations
 - Custom skills: {workspace_path}/skills/{{skill-name}}/SKILL.md
 
 Reply directly with text for conversations. Only use the 'message' tool to send to a specific chat channel.
@@ -106,21 +110,24 @@ Reply directly with text for conversations. Only use the 'message' tool to send 
 - If a tool call fails, analyze the error before retrying with a different approach.
 
 ## Memory
-- Remember important facts: write to {workspace_path}/memory/MEMORY.md
-- Recall past events: grep {workspace_path}/memory/HISTORY.md"""
-    
+- Remember important facts: use write_fact() to create atomic notes in memory/facts/
+- Record decisions: use write_decision() for locked choices in memory/decisions/
+- Track goals and tasks: use write_goal() and write_task() with appropriate status
+- Search memory: use search_memory(query) or read_memory(category, id)
+- Memory is category-based, atomic, and file-backed — no summarization"""
+
     def _load_bootstrap_files(self) -> str:
         """Load all bootstrap files from workspace."""
         parts = []
-        
+
         for filename in self.BOOTSTRAP_FILES:
             file_path = self.workspace / filename
             if file_path.exists():
                 content = file_path.read_text(encoding="utf-8")
                 parts.append(f"## {filename}\n\n{content}")
-        
+
         return "\n\n".join(parts) if parts else ""
-    
+
     def build_messages(
         self,
         history: list[dict[str, Any]],
@@ -165,7 +172,7 @@ Reply directly with text for conversations. Only use the 'message' tool to send 
         """Build user message content with optional base64-encoded images."""
         if not media:
             return text
-        
+
         images = []
         for path in media:
             p = Path(path)
@@ -174,11 +181,11 @@ Reply directly with text for conversations. Only use the 'message' tool to send 
                 continue
             b64 = base64.b64encode(p.read_bytes()).decode()
             images.append({"type": "image_url", "image_url": {"url": f"data:{mime};base64,{b64}"}})
-        
+
         if not images:
             return text
         return images + [{"type": "text", "text": text}]
-    
+
     def add_tool_result(
         self,
         messages: list[dict[str, Any]],
@@ -205,7 +212,7 @@ Reply directly with text for conversations. Only use the 'message' tool to send 
             "content": result
         })
         return messages
-    
+
     def add_assistant_message(
         self,
         messages: list[dict[str, Any]],

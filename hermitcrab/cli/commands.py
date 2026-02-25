@@ -2,23 +2,23 @@
 
 import asyncio
 import os
-import signal
-from pathlib import Path
 import select
+import signal
 import sys
+from pathlib import Path
+from typing import Any
 
 import typer
+from prompt_toolkit import PromptSession
+from prompt_toolkit.formatted_text import HTML
+from prompt_toolkit.history import FileHistory
+from prompt_toolkit.patch_stdout import patch_stdout
 from rich.console import Console
 from rich.markdown import Markdown
 from rich.table import Table
 from rich.text import Text
 
-from prompt_toolkit import PromptSession
-from prompt_toolkit.formatted_text import HTML
-from prompt_toolkit.history import FileHistory
-from prompt_toolkit.patch_stdout import patch_stdout
-
-from hermitcrab import __version__, __logo__
+from hermitcrab import __logo__, __version__
 from hermitcrab.config.schema import Config
 
 app = typer.Typer(
@@ -159,9 +159,9 @@ def onboard():
     from hermitcrab.config.loader import get_config_path, load_config, save_config
     from hermitcrab.config.schema import Config
     from hermitcrab.utils.helpers import get_workspace_path
-    
+
     config_path = get_config_path()
-    
+
     if config_path.exists():
         console.print(f"[yellow]Config already exists at {config_path}[/yellow]")
         console.print("  [bold]y[/bold] = overwrite with defaults (existing values will be lost)")
@@ -177,17 +177,17 @@ def onboard():
     else:
         save_config(Config())
         console.print(f"[green]✓[/green] Created config at {config_path}")
-    
+
     # Create workspace
     workspace = get_workspace_path()
-    
+
     if not workspace.exists():
         workspace.mkdir(parents=True, exist_ok=True)
         console.print(f"[green]✓[/green] Created workspace at {workspace}")
-    
+
     # Create default bootstrap files
     _create_workspace_templates(workspace)
-    
+
     console.print(f"\n{__logo__} hermitcrab is ready!")
     console.print("\nNext steps:")
     console.print("  1. Add your API key to [cyan]~/.hermitcrab/config.json[/cyan]")
@@ -212,28 +212,23 @@ def _create_workspace_templates(workspace: Path):
             dest.write_text(item.read_text(encoding="utf-8"), encoding="utf-8")
             console.print(f"  [dim]Created {item.name}[/dim]")
 
+    # Create category-based memory directories
     memory_dir = workspace / "memory"
     memory_dir.mkdir(exist_ok=True)
 
-    memory_template = templates_dir / "memory" / "MEMORY.md"
-    memory_file = memory_dir / "MEMORY.md"
-    if not memory_file.exists():
-        memory_file.write_text(memory_template.read_text(encoding="utf-8"), encoding="utf-8")
-        console.print("  [dim]Created memory/MEMORY.md[/dim]")
-
-    history_file = memory_dir / "HISTORY.md"
-    if not history_file.exists():
-        history_file.write_text("", encoding="utf-8")
-        console.print("  [dim]Created memory/HISTORY.md[/dim]")
+    for category in ["facts", "decisions", "goals", "tasks", "reflections"]:
+        category_dir = memory_dir / category
+        category_dir.mkdir(exist_ok=True)
+        console.print(f"  [dim]Created memory/{category}/[/dim]")
 
     (workspace / "skills").mkdir(exist_ok=True)
 
 
 def _make_provider(config: Config):
     """Create the appropriate LLM provider from config."""
+    from hermitcrab.providers.custom_provider import CustomProvider
     from hermitcrab.providers.litellm_provider import LiteLLMProvider
     from hermitcrab.providers.openai_codex_provider import OpenAICodexProvider
-    from hermitcrab.providers.custom_provider import CustomProvider
 
     model = config.agents.defaults.model
     provider_name = config.get_provider_name(model)
@@ -278,30 +273,30 @@ def gateway(
     verbose: bool = typer.Option(False, "--verbose", "-v", help="Verbose output"),
 ):
     """Start the hermitcrab gateway."""
-    from hermitcrab.config.loader import load_config, get_data_dir
-    from hermitcrab.bus.queue import MessageBus
     from hermitcrab.agent.loop import AgentLoop
+    from hermitcrab.bus.queue import MessageBus
     from hermitcrab.channels.manager import ChannelManager
-    from hermitcrab.session.manager import SessionManager
+    from hermitcrab.config.loader import get_data_dir, load_config
     from hermitcrab.cron.service import CronService
     from hermitcrab.cron.types import CronJob
     from hermitcrab.heartbeat.service import HeartbeatService
-    
+    from hermitcrab.session.manager import SessionManager
+
     if verbose:
         import logging
         logging.basicConfig(level=logging.DEBUG)
-    
+
     console.print(f"{__logo__} Starting hermitcrab gateway on port {port}...")
-    
+
     config = load_config()
     bus = MessageBus()
     provider = _make_provider(config)
     session_manager = SessionManager(config.workspace_path)
-    
+
     # Create cron service first (callback set after agent creation)
     cron_store_path = get_data_dir() / "cron" / "jobs.json"
     cron = CronService(cron_store_path)
-    
+
     # Create agent with cron service
     agent = AgentLoop(
         bus=bus,
@@ -320,7 +315,7 @@ def gateway(
         mcp_servers=config.tools.mcp_servers,
         channels_config=config.channels,
     )
-    
+
     # Set cron callback (needs agent)
     async def on_cron_job(job: CronJob) -> str | None:
         """Execute a cron job through the agent."""
@@ -339,7 +334,7 @@ def gateway(
             ))
         return response
     cron.on_job = on_cron_job
-    
+
     # Create channel manager
     channels = ChannelManager(config, bus)
 
@@ -393,18 +388,18 @@ def gateway(
         interval_s=hb_cfg.interval_s,
         enabled=hb_cfg.enabled,
     )
-    
+
     if channels.enabled_channels:
         console.print(f"[green]✓[/green] Channels enabled: {', '.join(channels.enabled_channels)}")
     else:
         console.print("[yellow]Warning: No channels enabled[/yellow]")
-    
+
     cron_status = cron.status()
     if cron_status["jobs"] > 0:
         console.print(f"[green]✓[/green] Cron: {cron_status['jobs']} scheduled jobs")
-    
+
     console.print(f"[green]✓[/green] Heartbeat: every {hb_cfg.interval_s}s")
-    
+
     async def run():
         try:
             await cron.start()
@@ -421,10 +416,126 @@ def gateway(
             cron.stop()
             agent.stop()
             await channels.stop_all()
-    
+
     asyncio.run(run())
 
 
+# ============================================================================
+# Nostr Listen Mode
+# ============================================================================
+
+
+def _run_nostr_mode(
+    agent_loop: Any,
+    bus: Any,
+    nostr_pubkey: str,
+    markdown: bool,
+    thinking_ctx: Any,
+) -> None:
+    """
+    Run agent in Nostr listen mode.
+
+    Listens for encrypted DMs from the specified pubkey and responds via Nostr.
+
+    Args:
+        agent_loop: AgentLoop instance for processing messages.
+        bus: MessageBus for communication.
+        nostr_pubkey: Nostr pubkey (npub or hex) to listen for.
+        markdown: Whether to render responses as Markdown.
+        thinking_ctx: Context manager for "thinking" spinner.
+    """
+
+    # Normalize pubkey to hex
+    try:
+        if nostr_pubkey.startswith("npub"):
+            from pynostr.key import PublicKey
+            hex_pubkey = PublicKey.from_npub(nostr_pubkey).hex()
+        else:
+            hex_pubkey = nostr_pubkey
+    except Exception as e:
+        console.print(f"[red]Invalid Nostr pubkey format: {e}[/red]")
+        console.print("Use npub... or hex format")
+        raise typer.Exit(1)
+
+    session_key = f"nostr:{hex_pubkey}"
+
+    console.print(f"{__logo__} Nostr listen mode")
+    console.print(f"Listening for DMs from: [cyan]{nostr_pubkey[:10]}...[/cyan]")
+    console.print(f"Session key: [dim]{session_key}[/dim]")
+    console.print("Press Ctrl+C to quit\n")
+
+    def _exit_on_sigint(signum, frame):
+        _restore_terminal()
+        console.print("\nGoodbye!")
+        os._exit(0)
+
+    signal.signal(signal.SIGINT, _exit_on_sigint)
+
+    async def run_nostr_listen():
+        bus_task = asyncio.create_task(agent_loop.run())
+        turn_done = asyncio.Event()
+        turn_done.set()
+        turn_response: list[str] = []
+
+        async def _consume_outbound():
+            """Consume outbound messages and print responses."""
+            while True:
+                try:
+                    msg = await asyncio.wait_for(bus.consume_outbound(), timeout=1.0)
+                    if msg.metadata.get("_progress"):
+                        is_tool_hint = msg.metadata.get("_tool_hint", False)
+                        ch = agent_loop.channels_config
+                        if ch and is_tool_hint and not ch.send_tool_hints:
+                            pass
+                        elif ch and not is_tool_hint and not ch.send_progress:
+                            pass
+                        else:
+                            console.print(f"  [dim]↳ {msg.content}[/dim]")
+                    elif not turn_done.is_set():
+                        if msg.content:
+                            turn_response.append(msg.content)
+                        turn_done.set()
+                    elif msg.content:
+                        console.print()
+                        _print_agent_response(msg.content, render_markdown=markdown)
+                except asyncio.TimeoutError:
+                    continue
+                except asyncio.CancelledError:
+                    break
+
+        outbound_task = asyncio.create_task(_consume_outbound())
+
+        try:
+            while True:
+                try:
+                    # Wait for inbound message via bus
+                    msg = await asyncio.wait_for(bus.consume_inbound(), timeout=1.0)
+
+                    if msg.session_key != session_key:
+                        continue
+
+                    turn_done.clear()
+                    turn_response.clear()
+
+                    console.print(f"\n[cyan]Received message from Nostr:[/cyan] {msg.content[:50]}...")
+
+                    with thinking_ctx():
+                        await turn_done.wait()
+
+                    if turn_response:
+                        _print_agent_response(turn_response[0], render_markdown=markdown)
+
+                except asyncio.TimeoutError:
+                    continue
+                except asyncio.CancelledError:
+                    break
+        finally:
+            agent_loop.stop()
+            outbound_task.cancel()
+            await asyncio.gather(bus_task, outbound_task, return_exceptions=True)
+            await agent_loop.close_mcp()
+
+    asyncio.run(run_nostr_listen())
 
 
 # ============================================================================
@@ -438,16 +549,26 @@ def agent(
     session_id: str = typer.Option("cli:direct", "--session", "-s", help="Session ID"),
     markdown: bool = typer.Option(True, "--markdown/--no-markdown", help="Render assistant output as Markdown"),
     logs: bool = typer.Option(False, "--logs/--no-logs", help="Show hermitcrab runtime logs during chat"),
+    nostr_pubkey: str | None = typer.Option(
+        None,
+        "--nostr-pubkey",
+        help="Nostr pubkey (npub or hex) to listen for DMs. If provided, starts Nostr listen loop instead of console input.",
+    ),
 ):
-    """Interact with the agent directly."""
-    from hermitcrab.config.loader import load_config, get_data_dir
-    from hermitcrab.bus.queue import MessageBus
-    from hermitcrab.agent.loop import AgentLoop
-    from hermitcrab.cron.service import CronService
+    """
+    Interact with the agent directly.
+
+    Use --nostr-pubkey to listen for Nostr DMs, or run without flags for interactive CLI mode.
+    """
     from loguru import logger
-    
+
+    from hermitcrab.agent.loop import AgentLoop
+    from hermitcrab.bus.queue import MessageBus
+    from hermitcrab.config.loader import get_data_dir, load_config
+    from hermitcrab.cron.service import CronService
+
     config = load_config()
-    
+
     bus = MessageBus()
     provider = _make_provider(config)
 
@@ -459,7 +580,7 @@ def agent(
         logger.enable("hermitcrab")
     else:
         logger.disable("hermitcrab")
-    
+
     agent_loop = AgentLoop(
         bus=bus,
         provider=provider,
@@ -476,7 +597,7 @@ def agent(
         mcp_servers=config.tools.mcp_servers,
         channels_config=config.channels,
     )
-    
+
     # Show spinner when logs are off (no output to miss); skip when logs are on
     def _thinking_ctx():
         if logs:
@@ -502,6 +623,15 @@ def agent(
             await agent_loop.close_mcp()
 
         asyncio.run(run_once())
+    elif nostr_pubkey:
+        # Nostr DM listen mode
+        _run_nostr_mode(
+            agent_loop=agent_loop,
+            bus=bus,
+            nostr_pubkey=nostr_pubkey,
+            markdown=markdown,
+            thinking_ctx=_thinking_ctx,
+        )
     else:
         # Interactive mode — route through bus like other channels
         from hermitcrab.bus.events import InboundMessage
@@ -652,7 +782,7 @@ def channels_status():
         "✓" if mc.enabled else "✗",
         mc_base
     )
-    
+
     # Telegram
     tg = config.channels.telegram
     tg_config = f"token: {tg.token[:10]}..." if tg.token else "[dim]not configured[/dim]"
@@ -705,57 +835,57 @@ def _get_bridge_dir() -> Path:
     """Get the bridge directory, setting it up if needed."""
     import shutil
     import subprocess
-    
+
     # User's bridge location
     user_bridge = Path.home() / ".hermitcrab" / "bridge"
-    
+
     # Check if already built
     if (user_bridge / "dist" / "index.js").exists():
         return user_bridge
-    
+
     # Check for npm
     if not shutil.which("npm"):
         console.print("[red]npm not found. Please install Node.js >= 18.[/red]")
         raise typer.Exit(1)
-    
+
     # Find source bridge: first check package data, then source dir
     pkg_bridge = Path(__file__).parent.parent / "bridge"  # hermitcrab/bridge (installed)
     src_bridge = Path(__file__).parent.parent.parent / "bridge"  # repo root/bridge (dev)
-    
+
     source = None
     if (pkg_bridge / "package.json").exists():
         source = pkg_bridge
     elif (src_bridge / "package.json").exists():
         source = src_bridge
-    
+
     if not source:
         console.print("[red]Bridge source not found.[/red]")
         console.print("Try reinstalling: pip install --force-reinstall hermitcrab")
         raise typer.Exit(1)
-    
+
     console.print(f"{__logo__} Setting up bridge...")
-    
+
     # Copy to user directory
     user_bridge.parent.mkdir(parents=True, exist_ok=True)
     if user_bridge.exists():
         shutil.rmtree(user_bridge)
     shutil.copytree(source, user_bridge, ignore=shutil.ignore_patterns("node_modules", "dist"))
-    
+
     # Install and build
     try:
         console.print("  Installing dependencies...")
         subprocess.run(["npm", "install"], cwd=user_bridge, check=True, capture_output=True)
-        
+
         console.print("  Building...")
         subprocess.run(["npm", "run", "build"], cwd=user_bridge, check=True, capture_output=True)
-        
+
         console.print("[green]✓[/green] Bridge ready\n")
     except subprocess.CalledProcessError as e:
         console.print(f"[red]Build failed: {e}[/red]")
         if e.stderr:
             console.print(f"[dim]{e.stderr.decode()[:500]}[/dim]")
         raise typer.Exit(1)
-    
+
     return user_bridge
 
 
@@ -763,18 +893,19 @@ def _get_bridge_dir() -> Path:
 def channels_login():
     """Link device via QR code."""
     import subprocess
+
     from hermitcrab.config.loader import load_config
-    
+
     config = load_config()
     bridge_dir = _get_bridge_dir()
-    
+
     console.print(f"{__logo__} Starting bridge...")
     console.print("Scan the QR code to connect.\n")
-    
+
     env = {**os.environ}
     if config.channels.whatsapp.bridge_token:
         env["BRIDGE_TOKEN"] = config.channels.whatsapp.bridge_token
-    
+
     try:
         subprocess.run(["npm", "start"], cwd=bridge_dir, check=True, env=env)
     except subprocess.CalledProcessError as e:
@@ -798,23 +929,23 @@ def cron_list(
     """List scheduled jobs."""
     from hermitcrab.config.loader import get_data_dir
     from hermitcrab.cron.service import CronService
-    
+
     store_path = get_data_dir() / "cron" / "jobs.json"
     service = CronService(store_path)
-    
+
     jobs = service.list_jobs(include_disabled=all)
-    
+
     if not jobs:
         console.print("No scheduled jobs.")
         return
-    
+
     table = Table(title="Scheduled Jobs")
     table.add_column("ID", style="cyan")
     table.add_column("Name")
     table.add_column("Schedule")
     table.add_column("Status")
     table.add_column("Next Run")
-    
+
     import time
     from datetime import datetime as _dt
     from zoneinfo import ZoneInfo
@@ -826,7 +957,7 @@ def cron_list(
             sched = f"{job.schedule.expr or ''} ({job.schedule.tz})" if job.schedule.tz else (job.schedule.expr or "")
         else:
             sched = "one-time"
-        
+
         # Format next run
         next_run = ""
         if job.state.next_run_at_ms:
@@ -836,11 +967,11 @@ def cron_list(
                 next_run = _dt.fromtimestamp(ts, tz).strftime("%Y-%m-%d %H:%M")
             except Exception:
                 next_run = time.strftime("%Y-%m-%d %H:%M", time.localtime(ts))
-        
+
         status = "[green]enabled[/green]" if job.enabled else "[dim]disabled[/dim]"
-        
+
         table.add_row(job.id, job.name, sched, status, next_run)
-    
+
     console.print(table)
 
 
@@ -860,7 +991,7 @@ def cron_add(
     from hermitcrab.config.loader import get_data_dir
     from hermitcrab.cron.service import CronService
     from hermitcrab.cron.types import CronSchedule
-    
+
     if tz and not cron_expr:
         console.print("[red]Error: --tz can only be used with --cron[/red]")
         raise typer.Exit(1)
@@ -877,10 +1008,10 @@ def cron_add(
     else:
         console.print("[red]Error: Must specify --every, --cron, or --at[/red]")
         raise typer.Exit(1)
-    
+
     store_path = get_data_dir() / "cron" / "jobs.json"
     service = CronService(store_path)
-    
+
     try:
         job = service.add_job(
             name=name,
@@ -904,10 +1035,10 @@ def cron_remove(
     """Remove a scheduled job."""
     from hermitcrab.config.loader import get_data_dir
     from hermitcrab.cron.service import CronService
-    
+
     store_path = get_data_dir() / "cron" / "jobs.json"
     service = CronService(store_path)
-    
+
     if service.remove_job(job_id):
         console.print(f"[green]✓[/green] Removed job {job_id}")
     else:
@@ -922,10 +1053,10 @@ def cron_enable(
     """Enable or disable a job."""
     from hermitcrab.config.loader import get_data_dir
     from hermitcrab.cron.service import CronService
-    
+
     store_path = get_data_dir() / "cron" / "jobs.json"
     service = CronService(store_path)
-    
+
     job = service.enable_job(job_id, enabled=not disable)
     if job:
         status = "disabled" if disable else "enabled"
@@ -941,11 +1072,12 @@ def cron_run(
 ):
     """Manually run a job."""
     from loguru import logger
-    from hermitcrab.config.loader import load_config, get_data_dir
+
+    from hermitcrab.agent.loop import AgentLoop
+    from hermitcrab.bus.queue import MessageBus
+    from hermitcrab.config.loader import get_data_dir, load_config
     from hermitcrab.cron.service import CronService
     from hermitcrab.cron.types import CronJob
-    from hermitcrab.bus.queue import MessageBus
-    from hermitcrab.agent.loop import AgentLoop
     logger.disable("hermitcrab")
 
     config = load_config()
@@ -1003,7 +1135,7 @@ def cron_run(
 @app.command()
 def status():
     """Show hermitcrab status."""
-    from hermitcrab.config.loader import load_config, get_config_path
+    from hermitcrab.config.loader import get_config_path, load_config
 
     config_path = get_config_path()
     config = load_config()
@@ -1018,7 +1150,7 @@ def status():
         from hermitcrab.providers.registry import PROVIDERS
 
         console.print(f"Model: {config.agents.defaults.model}")
-        
+
         # Check API keys from registry
         for spec in PROVIDERS:
             p = getattr(config.providers, spec.name, None)

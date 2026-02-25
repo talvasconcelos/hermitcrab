@@ -1,6 +1,6 @@
 ---
 name: memory
-description: Two-layer memory system with grep-based recall.
+description: Category-based atomic memory system with explicit typed operations.
 always: true
 ---
 
@@ -8,24 +8,58 @@ always: true
 
 ## Structure
 
-- `memory/MEMORY.md` — Long-term facts (preferences, project context, relationships). Always loaded into your context.
-- `memory/HISTORY.md` — Append-only event log. NOT loaded into context. Search it with grep.
+Memory is stored as atomic markdown files with YAML frontmatter in category directories:
 
-## Search Past Events
+- `memory/facts/` — Long-term truths (preferences, project context, relationships)
+- `memory/decisions/` — Locked architectural or behavioral choices (immutable)
+- `memory/goals/` — Outcome-oriented objectives
+- `memory/tasks/` — Concrete actionable items with lifecycle
+- `memory/reflections/` — Subjective observations (append-only)
 
-```bash
-grep -i "keyword" memory/HISTORY.md
-```
+Each file contains one memory item with metadata in YAML frontmatter.
 
-Use the `exec` tool to run grep. Combine patterns: `grep -iE "meeting|deadline" memory/HISTORY.md`
+## Memory Operations
 
-## When to Update MEMORY.md
+Use the typed memory functions to write durable knowledge:
 
-Write important facts immediately using `edit_file` or `write_file`:
-- User preferences ("I prefer dark mode")
-- Project context ("The API uses OAuth2")
-- Relationships ("Alice is the project lead")
+### write_fact(title, content, tags=None, confidence=None, source=None)
+Write a long-term truth. Only write if explicitly stated or unambiguous.
 
-## Auto-consolidation
+### write_decision(title, content, tags=None, supersedes=None, rationale=None)
+Record a locked choice. Decisions are immutable — never edited, only superseded.
 
-Old conversations are automatically summarized and appended to HISTORY.md when the session grows large. Long-term facts are extracted to MEMORY.md. You don't need to manage this.
+### write_goal(title, content, tags=None, priority=None, status="active")
+Define an outcome-oriented objective. May be refined or marked achieved.
+
+### write_task(title, content, tags=None, status="todo", assignee=None, deadline=None)
+Create an actionable item. Tasks have lifecycle: todo → in_progress → done.
+
+### write_reflection(title, content, tags=None, context=None)
+Record subjective observations. Append-only — never edited or deleted.
+
+## Search and Retrieval
+
+### search_memory(query, categories=None, limit=None)
+Search across memory categories. Deterministic: filenames → frontmatter → content.
+
+### read_memory(category, id=None, query=None)
+Read items from a specific category with optional filtering.
+
+### list_memories(category=None, include_archived=False)
+List all memory items, optionally filtered by category.
+
+## Category Rules
+
+**Facts**: Long-term truths. Written only if explicit. Rarely deleted.
+
+**Decisions**: Immutable choices. Never edited. Only superseded by new decisions referencing the old. Never deleted.
+
+**Goals**: Durable objectives. May be refined or marked achieved. Not silently removed.
+
+**Tasks**: Actionable items with lifecycle. State transitions only. Completed tasks archived, not deleted.
+
+**Reflections**: Subjective observations. Append-only. Never edited or deleted.
+
+## No Automatic Consolidation
+
+Memory is explicit and deterministic. No LLM summarization. No automatic extraction from conversations. Write memory only when the user explicitly states durable information.

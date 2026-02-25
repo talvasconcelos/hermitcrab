@@ -7,7 +7,6 @@ from typing import Any
 
 from loguru import logger
 
-from hermitcrab.bus.events import OutboundMessage
 from hermitcrab.bus.queue import MessageBus
 from hermitcrab.channels.base import BaseChannel
 from hermitcrab.config.schema import Config
@@ -16,24 +15,28 @@ from hermitcrab.config.schema import Config
 class ChannelManager:
     """
     Manages chat channels and coordinates message routing.
-    
+
     Responsibilities:
-    - Initialize enabled channels (Telegram, WhatsApp, etc.)
+    - Initialize enabled channels (Telegram, Email, etc.)
     - Start/stop channels
     - Route outbound messages
     """
-    
+
     def __init__(self, config: Config, bus: MessageBus):
         self.config = config
         self.bus = bus
         self.channels: dict[str, BaseChannel] = {}
         self._dispatch_task: asyncio.Task | None = None
-        
+
         self._init_channels()
-    
+
     def _init_channels(self) -> None:
         """Initialize channels based on config."""
-        
+
+        # Validate Nostr config if enabled
+        if self.config.channels.nostr.enabled:
+            self.config.channels.nostr.validate_for_use()
+
         # Telegram channel
         if self.config.channels.telegram.enabled:
             try:
@@ -46,62 +49,6 @@ class ChannelManager:
                 logger.info("Telegram channel enabled")
             except ImportError as e:
                 logger.warning("Telegram channel not available: {}", e)
-        
-        # WhatsApp channel
-        if self.config.channels.whatsapp.enabled:
-            try:
-                from hermitcrab.channels.whatsapp import WhatsAppChannel
-                self.channels["whatsapp"] = WhatsAppChannel(
-                    self.config.channels.whatsapp, self.bus
-                )
-                logger.info("WhatsApp channel enabled")
-            except ImportError as e:
-                logger.warning("WhatsApp channel not available: {}", e)
-
-        # Discord channel
-        if self.config.channels.discord.enabled:
-            try:
-                from hermitcrab.channels.discord import DiscordChannel
-                self.channels["discord"] = DiscordChannel(
-                    self.config.channels.discord, self.bus
-                )
-                logger.info("Discord channel enabled")
-            except ImportError as e:
-                logger.warning("Discord channel not available: {}", e)
-        
-        # Feishu channel
-        if self.config.channels.feishu.enabled:
-            try:
-                from hermitcrab.channels.feishu import FeishuChannel
-                self.channels["feishu"] = FeishuChannel(
-                    self.config.channels.feishu, self.bus
-                )
-                logger.info("Feishu channel enabled")
-            except ImportError as e:
-                logger.warning("Feishu channel not available: {}", e)
-
-        # Mochat channel
-        if self.config.channels.mochat.enabled:
-            try:
-                from hermitcrab.channels.mochat import MochatChannel
-
-                self.channels["mochat"] = MochatChannel(
-                    self.config.channels.mochat, self.bus
-                )
-                logger.info("Mochat channel enabled")
-            except ImportError as e:
-                logger.warning("Mochat channel not available: {}", e)
-
-        # DingTalk channel
-        if self.config.channels.dingtalk.enabled:
-            try:
-                from hermitcrab.channels.dingtalk import DingTalkChannel
-                self.channels["dingtalk"] = DingTalkChannel(
-                    self.config.channels.dingtalk, self.bus
-                )
-                logger.info("DingTalk channel enabled")
-            except ImportError as e:
-                logger.warning("DingTalk channel not available: {}", e)
 
         # Email channel
         if self.config.channels.email.enabled:
@@ -114,29 +61,21 @@ class ChannelManager:
             except ImportError as e:
                 logger.warning("Email channel not available: {}", e)
 
-        # Slack channel
-        if self.config.channels.slack.enabled:
+        # Nostr channel
+        if self.config.channels.nostr.enabled:
             try:
-                from hermitcrab.channels.slack import SlackChannel
-                self.channels["slack"] = SlackChannel(
-                    self.config.channels.slack, self.bus
-                )
-                logger.info("Slack channel enabled")
-            except ImportError as e:
-                logger.warning("Slack channel not available: {}", e)
-
-        # QQ channel
-        if self.config.channels.qq.enabled:
-            try:
-                from hermitcrab.channels.qq import QQChannel
-                self.channels["qq"] = QQChannel(
-                    self.config.channels.qq,
+                from hermitcrab.channels.nostr import NostrChannel
+                self.channels["nostr"] = NostrChannel(
+                    self.config.channels.nostr,
                     self.bus,
                 )
-                logger.info("QQ channel enabled")
+                logger.info("Nostr channel enabled (pubkey: {}...)", self.channels["nostr"].our_pubkey_hex[:8])  # type: ignore
             except ImportError as e:
-                logger.warning("QQ channel not available: {}", e)
-    
+                logger.warning("Nostr channel not available: {}", e)
+            except ValueError as e:
+                logger.error("Nostr channel configuration error: {}", e)
+                raise
+
     async def _start_channel(self, name: str, channel: BaseChannel) -> None:
         """Start a channel and log any exceptions."""
         try:
@@ -149,23 +88,23 @@ class ChannelManager:
         if not self.channels:
             logger.warning("No channels enabled")
             return
-        
+
         # Start outbound dispatcher
         self._dispatch_task = asyncio.create_task(self._dispatch_outbound())
-        
+
         # Start channels
         tasks = []
         for name, channel in self.channels.items():
             logger.info("Starting {} channel...", name)
             tasks.append(asyncio.create_task(self._start_channel(name, channel)))
-        
+
         # Wait for all to complete (they should run forever)
         await asyncio.gather(*tasks, return_exceptions=True)
-    
+
     async def stop_all(self) -> None:
         """Stop all channels and the dispatcher."""
         logger.info("Stopping all channels...")
-        
+
         # Stop dispatcher
         if self._dispatch_task:
             self._dispatch_task.cancel()
@@ -173,7 +112,7 @@ class ChannelManager:
                 await self._dispatch_task
             except asyncio.CancelledError:
                 pass
-        
+
         # Stop all channels
         for name, channel in self.channels.items():
             try:
@@ -181,24 +120,24 @@ class ChannelManager:
                 logger.info("Stopped {} channel", name)
             except Exception as e:
                 logger.error("Error stopping {}: {}", name, e)
-    
+
     async def _dispatch_outbound(self) -> None:
         """Dispatch outbound messages to the appropriate channel."""
         logger.info("Outbound dispatcher started")
-        
+
         while True:
             try:
                 msg = await asyncio.wait_for(
                     self.bus.consume_outbound(),
                     timeout=1.0
                 )
-                
+
                 if msg.metadata.get("_progress"):
                     if msg.metadata.get("_tool_hint") and not self.config.channels.send_tool_hints:
                         continue
                     if not msg.metadata.get("_tool_hint") and not self.config.channels.send_progress:
                         continue
-                
+
                 channel = self.channels.get(msg.channel)
                 if channel:
                     try:
@@ -207,16 +146,16 @@ class ChannelManager:
                         logger.error("Error sending to {}: {}", msg.channel, e)
                 else:
                     logger.warning("Unknown channel: {}", msg.channel)
-                    
+
             except asyncio.TimeoutError:
                 continue
             except asyncio.CancelledError:
                 break
-    
+
     def get_channel(self, name: str) -> BaseChannel | None:
         """Get a channel by name."""
         return self.channels.get(name)
-    
+
     def get_status(self) -> dict[str, Any]:
         """Get status of all channels."""
         return {
@@ -226,7 +165,7 @@ class ChannelManager:
             }
             for name, channel in self.channels.items()
         }
-    
+
     @property
     def enabled_channels(self) -> list[str]:
         """Get list of enabled channel names."""
