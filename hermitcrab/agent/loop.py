@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING, Awaitable, Callable
 from loguru import logger
 
 from hermitcrab.agent.context import ContextBuilder
+from hermitcrab.agent.journal import JournalStore
 from hermitcrab.agent.subagent import SubagentManager
 from hermitcrab.agent.tools.cron import CronTool
 from hermitcrab.agent.tools.filesystem import EditFileTool, ListDirTool, ReadFileTool, WriteFileTool
@@ -77,6 +78,7 @@ class AgentLoop:
 
         self.context = ContextBuilder(workspace)
         self.sessions = session_manager or SessionManager(workspace)
+        self.journal = JournalStore(workspace)
         self.tools = ToolRegistry()
         self.subagents = SubagentManager(
             provider=provider,
@@ -342,7 +344,7 @@ class AgentLoop:
                 channel=msg.channel, chat_id=msg.chat_id, content=content, metadata=meta,
             ))
 
-        final_content, _, all_msgs = await self._run_agent_loop(
+        final_content, tools_used, all_msgs = await self._run_agent_loop(
             initial_messages, on_progress=on_progress or _bus_progress,
         )
 
@@ -355,6 +357,9 @@ class AgentLoop:
         self._save_turn(session, all_msgs, 1 + len(history))
         self.sessions.save(session)
 
+        # Write journal entry for this turn (non-blocking, failures ignored)
+        self._write_journal_entry(session, final_content, tools_used)
+
         if message_tool := self.tools.get("message"):
             if isinstance(message_tool, MessageTool) and message_tool._sent_in_turn:
                 return None
@@ -365,6 +370,49 @@ class AgentLoop:
         )
 
     _TOOL_RESULT_MAX_CHARS = 500
+
+    def _write_journal_entry(
+        self,
+        session: Session,
+        response_content: str,
+        tools_used: list[str],
+    ) -> None:
+        """
+        Write a journal entry for the current session turn.
+
+        Journal entries are narrative logs of what happened today.
+        They are separate from memory and never affect facts/decisions/goals/tasks/reflections.
+
+        This method is non-blocking - failures are logged but don't affect agent operation.
+
+        Args:
+            session: Current session object.
+            response_content: Agent's response content.
+            tools_used: List of tool names used in this turn.
+        """
+        try:
+            # Build a concise journal entry
+            tool_summary = f"Used tools: {', '.join(tools_used)}" if tools_used else "No tools used"
+
+            # Create a brief narrative entry
+            entry_lines = [
+                f"## Session: {session.key}",
+                "",
+                f"{response_content[:500]}{'...' if len(response_content) > 500 else ''}",
+                "",
+                f"*{tool_summary}*",
+            ]
+
+            content = "\n".join(entry_lines)
+
+            self.journal.write_entry(
+                content=content,
+                session_keys=[session.key],
+                tags=["session"],
+            )
+        except Exception as e:
+            # Journal failures never block agent operation
+            logger.warning("Failed to write journal entry: {}", e)
 
     def _save_turn(self, session: Session, messages: list[dict], skip: int) -> None:
         """Save new-turn messages into session, truncating large tool results."""
