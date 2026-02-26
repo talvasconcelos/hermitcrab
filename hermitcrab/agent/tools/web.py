@@ -16,6 +16,21 @@ USER_AGENT = "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_7_2) AppleWebKit/537.36"
 MAX_REDIRECTS = 5  # Limit redirects to prevent DoS attacks
 
 
+def _search_with_ddgs(query: str, count: int) -> list[dict[str, str]]:
+    """Search using DuckDuckGo (ddgs) - no API key required."""
+    from ddgs import DDGS
+
+    try:
+        with DDGS() as ddgs:
+            results = list(ddgs.text(query, max_results=count))
+        return [
+            {"title": r.get("title", ""), "url": r.get("href", ""), "description": r.get("body", "")}
+            for r in results
+        ]
+    except Exception as e:
+        raise RuntimeError(f"DuckDuckGo search failed: {e}")
+
+
 def _strip_tags(text: str) -> str:
     """Remove HTML tags and decode entities."""
     text = re.sub(r'<script[\s\S]*?</script>', '', text, flags=re.I)
@@ -44,48 +59,61 @@ def _validate_url(url: str) -> tuple[bool, str]:
 
 
 class WebSearchTool(Tool):
-    """Search the web using Brave Search API."""
-
-    name = "web_search"
-    description = "Search the web. Returns titles, URLs, and snippets."
-    parameters = {
-        "type": "object",
-        "properties": {
-            "query": {"type": "string", "description": "Search query"},
-            "count": {"type": "integer", "description": "Results (1-10)", "minimum": 1, "maximum": 10}
-        },
-        "required": ["query"]
-    }
+    """Search the web using DuckDuckGo (default) or Brave Search API."""
 
     def __init__(self, api_key: str | None = None, max_results: int = 5):
         self._init_api_key = api_key
         self.max_results = max_results
 
     @property
-    def api_key(self) -> str:
+    def name(self) -> str:
+        return "web_search"
+
+    @property
+    def description(self) -> str:
+        return "Search the web. Returns titles, URLs, and snippets."
+
+    @property
+    def parameters(self) -> dict[str, Any]:
+        return {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string", "description": "Search query"},
+                "count": {"type": "integer", "description": "Results (1-10)", "minimum": 1, "maximum": 10}
+            },
+            "required": ["query"]
+        }
+
+    @property
+    def api_key(self) -> str | None:
         """Resolve API key at call time so env/config changes are picked up."""
-        return self._init_api_key or os.environ.get("BRAVE_API_KEY", "")
+        return self._init_api_key or os.environ.get("BRAVE_API_KEY")
 
     async def execute(self, query: str, count: int | None = None, **kwargs: Any) -> str:
-        if not self.api_key:
-            return (
-                "Error: Brave Search API key not configured. "
-                "Set it in ~/.hermitcrab/config.json under tools.web.search.apiKey "
-                "(or export BRAVE_API_KEY), then restart the gateway."
-            )
-
         try:
             n = min(max(count or self.max_results, 1), 10)
-            async with httpx.AsyncClient() as client:
-                r = await client.get(
-                    "https://api.search.brave.com/res/v1/web/search",
-                    params={"q": query, "count": n},
-                    headers={"Accept": "application/json", "X-Subscription-Token": api_key},
-                    timeout=10.0
-                )
-                r.raise_for_status()
 
-            results = r.json().get("web", {}).get("results", [])
+            # Use Brave API if configured, otherwise use DuckDuckGo (ddgs)
+            if self.api_key:
+                # Brave Search API
+                async with httpx.AsyncClient() as client:
+                    r = await client.get(
+                        "https://api.search.brave.com/res/v1/web/search",
+                        params={"q": query, "count": n},
+                        headers={"Accept": "application/json", "X-Subscription-Token": self.api_key},
+                        timeout=10.0
+                    )
+                    r.raise_for_status()
+
+                results = r.json().get("web", {}).get("results", [])
+                results = [
+                    {"title": item.get("title", ""), "url": item.get("url", ""), "description": item.get("description", "")}
+                    for item in results
+                ]
+            else:
+                # DuckDuckGo via ddgs (no API key needed)
+                results = _search_with_ddgs(query, n)
+
             if not results:
                 return f"No results for: {query}"
 
@@ -102,25 +130,33 @@ class WebSearchTool(Tool):
 class WebFetchTool(Tool):
     """Fetch and extract content from a URL using Readability."""
 
-    name = "web_fetch"
-    description = "Fetch URL and extract readable content (HTML → markdown/text)."
-    parameters = {
-        "type": "object",
-        "properties": {
-            "url": {"type": "string", "description": "URL to fetch"},
-            "extractMode": {"type": "string", "enum": ["markdown", "text"], "default": "markdown"},
-            "maxChars": {"type": "integer", "minimum": 100}
-        },
-        "required": ["url"]
-    }
-
     def __init__(self, max_chars: int = 50000):
         self.max_chars = max_chars
 
-    async def execute(self, url: str, extractMode: str = "markdown", maxChars: int | None = None, **kwargs: Any) -> str:
+    @property
+    def name(self) -> str:
+        return "web_fetch"
+
+    @property
+    def description(self) -> str:
+        return "Fetch URL and extract readable content (HTML → markdown/text)."
+
+    @property
+    def parameters(self) -> dict[str, Any]:
+        return {
+            "type": "object",
+            "properties": {
+                "url": {"type": "string", "description": "URL to fetch"},
+                "extract_mode": {"type": "string", "enum": ["markdown", "text"], "default": "markdown"},
+                "max_chars": {"type": "integer", "minimum": 100}
+            },
+            "required": ["url"]
+        }
+
+    async def execute(self, url: str, extract_mode: str = "markdown", max_chars: int | None = None, **kwargs: Any) -> str:
         from readability import Document
 
-        max_chars = maxChars or self.max_chars
+        max_chars = max_chars or self.max_chars
 
         # Validate URL before fetching
         is_valid, error_msg = _validate_url(url)
@@ -144,7 +180,7 @@ class WebFetchTool(Tool):
             # HTML
             elif "text/html" in ctype or r.text[:256].lower().startswith(("<!doctype", "<html")):
                 doc = Document(r.text)
-                content = self._to_markdown(doc.summary()) if extractMode == "markdown" else _strip_tags(doc.summary())
+                content = self._to_markdown(doc.summary()) if extract_mode == "markdown" else _strip_tags(doc.summary())
                 text = f"# {doc.title()}\n\n{content}" if doc.title() else content
                 extractor = "readability"
             else:
