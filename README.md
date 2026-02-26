@@ -1,6 +1,6 @@
 # 🦀 HermitCrab
 
-**Ultra-lightweight personal AI agent with persistent memory**
+**A local-first AI agent with deterministic memory and real self-improvement**
 
 [![PyPI](https://img.shields.io/pypi/v/hermitcrab-ai)](https://pypi.org/project/hermitcrab-ai/)
 [![Python](https://img.shields.io/badge/python-≥3.11-blue)](https://python.org)
@@ -8,22 +8,32 @@
 
 ---
 
-## What is HermitCrab?
+## What Is HermitCrab?
 
-HermitCrab is a **personal AI assistant** that remembers everything, runs on your hardware, and connects to your favorite chat apps.
+HermitCrab is a **personal AI agent** that runs on your hardware, remembers what matters, and improves over time.
 
-Think of it as a **second brain** that:
-- 💬 Converses naturally via Nostr, Telegram, or Email
-- 🧠 Remembers facts, decisions, goals, and tasks across sessions
-- 📝 Keeps a daily journal of what you accomplished
-- 🔧 Executes tools (web search, file operations, shell commands)
-- 🏠 Runs locally on your machine (privacy-first)
+It is not a chatbot wrapper.
+It is not a cloud SaaS.
+It is not a 300k-line framework.
 
-**Same crab, new shell** — Your AI assistant stays the same when you change hardware. Just copy your workspace folder and config to a new machine, and your hermitcrab picks up right where it left off.
+It is a focused, readable, extensible agent core — **6,891 lines of code** — that you can audit yourself with a simple bash script.
+
+Think of it as a **portable second brain**:
+
+* 💬 Converses via Nostr, Telegram, Email, or CLI
+* 🧠 Stores structured, atomic memory across sessions
+* 📝 Generates narrative journal entries automatically
+* 🔍 Distills knowledge and extracts tasks
+* 🪞 Reflects on mistakes and patterns
+* 🔧 Executes tools safely under Python control
+* 🏠 Runs fully offline with local LLMs
+
+**Same crab, new shell.**
+Move your `workspace/` folder and config to a new machine, and your agent continues exactly where it left off.
 
 ---
 
-## ⚡ Quick Start (2 Minutes)
+# ⚡ Quick Start
 
 ### 1. Install
 
@@ -37,7 +47,7 @@ pip install hermitcrab-ai
 hermitcrab onboard
 ```
 
-### 3. Set API Key
+### 3. Configure a Model
 
 Edit `~/.hermitcrab/config.json`:
 
@@ -56,31 +66,86 @@ Edit `~/.hermitcrab/config.json`:
 }
 ```
 
-Get API keys: [OpenRouter](https://openrouter.ai/keys) · [Anthropic](https://console.anthropic.com/)
-
-### 4. Chat
+### 4. Run
 
 ```bash
 hermitcrab agent
 ```
 
-**Done!** You now have a personal AI assistant.
+You now have a persistent personal AI agent.
 
 ---
 
-## 🎯 Key Features
+# 🔁 Agent Lifecycle
 
-### Persistent Memory
+HermitCrab is not a stateless chat loop.
+It runs a structured lifecycle.
 
-HermitCrab remembers across sessions using **atomic markdown notes** (Obsidian-compatible):
+Each session follows:
 
-- **Facts** — User preferences, project context
-- **Decisions** — Architectural choices (immutable)
-- **Goals** — Long-term objectives
-- **Tasks** — Actionable items with lifecycle
-- **Reflections** — Meta-observations about agent behavior
+1. **Interactive Phase**
 
-Example memory file:
+   * LLM response
+   * Tool execution
+   * Context includes last interactions + relevant memory
+
+2. **Session End Detection**
+
+   * Manual exit, or
+   * 30 minutes of inactivity
+
+3. **Journal Synthesis**
+
+   * Narrative summary of what happened
+   * Includes key takeaways and tool usage
+   * Appends to daily journal file
+
+4. **Distillation**
+
+   * Extract atomic facts, tasks, decisions, goals
+   * Store as structured markdown notes
+
+5. **Reflection**
+
+   * Identify mistakes
+   * Detect patterns
+   * Suggest internal improvements
+
+Interactive and background phases can use different models.
+Cheap local models handle synthesis. Premium models handle reasoning.
+
+This separation keeps costs low and architecture clean.
+
+---
+
+# 🧠 Deterministic Memory
+
+HermitCrab uses **atomic markdown files**, not databases and not opaque embeddings.
+
+Memory lives inside your `workspace/` folder:
+
+```
+workspace/
+├── memory/
+│   ├── facts/
+│   ├── decisions/
+│   ├── goals/
+│   ├── tasks/
+│   └── reflections/
+├── journal/
+└── sessions/
+```
+
+All files are:
+
+* Human-readable
+* Git-friendly
+* Obsidian-compatible
+* YAML-frontmatter structured
+* Wikilink enabled
+
+Example:
+
 ```markdown
 ---
 title: "User prefers dark mode"
@@ -93,37 +158,69 @@ confidence: 0.95
 User explicitly stated preference for dark mode UI.
 ```
 
-### Daily Journal
+Memory mutation is deterministic.
+LLMs propose. Python validates and writes.
 
-Automatic narrative summaries of what happened each session:
+No hallucinated state. No hidden vectors. No silent corruption.
+
+---
+
+# 📝 Narrative Journal
+
+HermitCrab automatically generates session summaries.
+
+Journal entries:
+
+* Are narrative, not atomic
+* Are appended per session end
+* Use the session end timestamp
+* Include key interactions and tools used
+* Have no authoritative power over memory
+
+Example:
 
 ```markdown
 ---
 date: 2026-02-25
 session_keys:
   - cli:default
-tags:
-  - session
+tags: [session]
 ---
 
-User explored memory lifecycle design. Identified issues with provider fallback logic.
-
-*Used tools: read_file, web_search*
+User redesigned memory lifecycle. Identified improvements in provider fallback logic.
+Used tools: read_file, web_search.
 ```
 
-Journal is **non-authoritative** — helps you review, doesn't affect decisions.
+The journal helps:
 
-### Self-Improvement
+* Humans review progress
+* The agent reflect over time
+* Detect patterns in behavior
 
-HermitCrab learns from experience:
+It is an aid, not a source of truth.
 
-- **Distillation** — Extracts atomic knowledge from sessions
-- **Reflection** — Identifies mistakes, patterns, improvements
-- **Job-class routing** — Uses cheap local models for background tasks
+---
 
-### Multi-Model Support
+# 🪞 Self-Improvement Engine
 
-Route different tasks to different models:
+HermitCrab improves over time through:
+
+### Distillation
+
+Extracts structured knowledge from sessions.
+
+### Reflection
+
+Analyzes:
+
+* Repeated mistakes
+* Failed tool usage
+* Decision inconsistencies
+* Model misrouting
+
+### Model Routing
+
+Different tasks use different models:
 
 ```json
 {
@@ -132,7 +229,7 @@ Route different tasks to different models:
       "model": "anthropic/claude-opus-4-5",
       "job_models": {
         "interactive_response": "anthropic/claude-opus-4-5",
-        "journal_synthesis": "ollama/llama-3.2-3b",
+        "journal_synthesis": "ollama/llama3.2:3b",
         "distillation": "ollama/phi-3-mini"
       }
     }
@@ -140,15 +237,23 @@ Route different tasks to different models:
 }
 ```
 
-**Result:** Quality when it matters, cheap/free for background tasks.
+If a job-class model is unavailable, HermitCrab falls back to the default provider.
+
+Result:
+
+* High quality where needed
+* Cheap local processing for background work
+* Predictable behavior
 
 ---
 
-## 💬 Chat Channels
+# 💬 Channels
 
-### Nostr (Primary) 🆕
+## Nostr (Primary)
 
-Decentralized, encrypted DMs via NIP-04:
+Encrypted DMs via NIP-04.
+
+Decentralized. Censorship-resistant. No central server.
 
 ```json
 {
@@ -157,101 +262,81 @@ Decentralized, encrypted DMs via NIP-04:
       "enabled": true,
       "private_key": "nsec1...",
       "relays": ["wss://relay.damus.io"],
-      "allowed_pubkeys": ["npub1..."]
+      "allowedPubkeys": ["USER_PUBKEY"]
     }
   }
 }
 ```
 
-**Benefits:** Censorship-resistant, encrypted, no central server
-
-### Telegram
+## Telegram
 
 ```json
 {
   "channels": {
     "telegram": {
       "enabled": true,
-      "token": "BOT_TOKEN_FROM_BOTFATHER",
-      "allowFrom": ["YOUR_USER_ID"]
+      "token": "BOT_TOKEN",
+      "allowFrom": ["USER_ID"]
     }
   }
 }
 ```
 
-### Email
+## Email
+
+IMAP + SMTP integration supported.
+
+---
+
+# 🛠 Tools
+
+HermitCrab includes:
+
+| Tool         | Description             |
+| ------------ | ----------------------- |
+| `read_file`  | Read workspace files    |
+| `write_file` | Create or modify files  |
+| `edit_file`  | Structured edits        |
+| `list_dir`   | Browse directories      |
+| `exec`       | Run shell commands      |
+| `web_search` | Brave search            |
+| `web_fetch`  | Retrieve page content   |
+| `message`    | Send outbound messages  |
+| `spawn`      | Launch subagents        |
+| `cron`       | Schedule recurring jobs |
+
+Tool execution is controlled by Python.
+LLMs cannot mutate state directly.
+
+Workspace restriction can be enforced via:
 
 ```json
-{
-  "channels": {
-    "email": {
-      "enabled": true,
-      "imapHost": "imap.gmail.com",
-      "smtpHost": "smtp.gmail.com",
-      "imapUsername": "your@gmail.com",
-      "imapPassword": "app-password"
-    }
-  }
+"tools": {
+  "restrict_to_workspace": true
 }
 ```
 
 ---
 
-## 🛠️ Tools
+# 🏠 Fully Offline Mode
 
-HermitCrab comes with built-in tools:
-
-| Tool | Description |
-|------|-------------|
-| `read_file` | Read files from workspace |
-| `write_file` | Create/modify files |
-| `edit_file` | Surgical edits (search/replace) |
-| `list_dir` | Browse directories |
-| `exec` | Run shell commands |
-| `web_search` | Brave web search |
-| `web_fetch` | Fetch webpage content |
-| `message` | Send messages to chat channels |
-| `spawn` | Create subagents for background tasks |
-| `cron` | Schedule recurring tasks |
-
-### MCP (Model Context Protocol)
-
-Connect to external MCP servers:
-
-```json
-{
-  "tools": {
-    "mcpServers": {
-      "filesystem": {
-        "command": "npx",
-        "args": ["-y", "@modelcontextprotocol/server-filesystem", "/path/to/share"]
-      }
-    }
-  }
-}
-```
-
----
-
-## 🏠 Local LLM Deployment
-
-Run HermitCrab entirely offline with local models:
-
-### 1. Install Ollama
+Install Ollama:
 
 ```bash
 curl -fsSL https://ollama.com/install.sh | sh
 ollama pull llama3.2:3b
 ```
 
-### 2. Configure
+Configure:
 
 ```json
 {
   "providers": {
-    "ollama": {
-      "api_base": "http://localhost:11434"
-    }
+    "vllm": {
+        "apiKey": "ollama",
+        "apiBase": "http://localhost:11434/v1",
+        "extraHeaders": null
+    },
   },
   "agents": {
     "defaults": {
@@ -261,213 +346,135 @@ ollama pull llama3.2:3b
 }
 ```
 
-### 3. Run
+HermitCrab now runs entirely on your machine.
+
+Start small models for:
+
+* Journal
+* Distillation
+* Reflection
+
+Use larger models only when necessary.
+
+---
+
+# 🏗 Architecture
+
+HermitCrab is **6,891 lines of core agent code**.
+
+You can verify this yourself:
 
 ```bash
-hermitcrab agent
+./core_agent_lines.sh
 ```
 
-**Tip:** Start with small models (3B parameters) for background tasks like journal synthesis and distillation. Use larger models only for interactive responses when quality matters.
-
----
-
-## 📚 Documentation
-
-| Guide | Description |
-|-------|-------------|
-| [`SECURITY.md`](SECURITY.md) | Security policy |
-
-**Developer Notes:** Architecture details, API references, and debugging guides are available in the source code and developer documentation files.
-
----
-
-## 🏗️ Architecture
-
-HermitCrab is **~7,000 lines** of core agent code — 99% smaller than alternatives.
+Structure:
 
 ```
 hermitcrab/
-├── agent/           # Core logic (loop, memory, tools)
-├── channels/        # Chat integrations (Nostr, Telegram, Email)
-├── providers/       # LLM providers (OpenAI, Anthropic, Ollama, etc.)
-├── config/          # Configuration system
-├── cli/             # Command-line interface
-└── utils/           # Helpers
+├── agent/
+├── channels/
+├── providers/
+├── config/
+├── cli/
+└── utils/
 ```
 
-**Design principles:**
-- Python is authoritative (LLMs propose, Python decides)
-- Memory mutation is deterministic (Tier 0 only)
-- External LLMs are optional and untrusted
-- Works on weak local hardware
+Design principles:
+
+* Python is authoritative
+* Memory mutation is deterministic
+* External LLMs are optional and untrusted
+* Works on weak hardware
+* No hidden databases
+* No forced cloud dependency
+
+Readable. Hackable. Forkable.
 
 ---
 
-## 📦 Installation
+# 📊 Philosophy Comparison
 
-### From PyPI (Stable)
+| Feature      | HermitCrab      | Typical Agent Framework |
+| ------------ | --------------- | ----------------------- |
+| Core Code    | 6,891 lines     | 100k+ lines             |
+| Memory       | Atomic markdown | Vector DB               |
+| Portability  | Copy workspace  | Cloud-tied              |
+| Local LLM    | First-class     | Optional                |
+| Transparency | Fully auditable | Opaque                  |
+| Control      | Python governs  | LLM-driven              |
 
-```bash
-pip install hermitcrab-ai
-```
-
-### From Source (Latest)
-
-```bash
-git clone https://github.com/HKUDS/hermitcrab.git
-cd hermitcrab
-pip install -e .
-```
-
-### With uv (Fast)
-
-```bash
-uv tool install hermitcrab-ai
-```
+HermitCrab favors clarity over complexity.
 
 ---
 
-## 🔧 Configuration
+# 🗺 Roadmap
 
-Config file: `~/.hermitcrab/config.json`
+### Completed
 
-### Essential Sections
-
-```json
-{
-  "agents": {
-    "defaults": {
-      "model": "anthropic/claude-opus-4-5",
-      "max_tokens": 8192,
-      "temperature": 0.1
-    }
-  },
-  "providers": {
-    "anthropic": { "apiKey": "..." },
-    "openrouter": { "apiKey": "..." },
-    "ollama": { "api_base": "http://localhost:11434" }
-  },
-  "channels": {
-    "nostr": { "enabled": true, "private_key": "nsec1..." },
-    "telegram": { "enabled": true, "token": "..." }
-  },
-  "tools": {
-    "web": { "braveApiKey": "..." },
-    "exec": { "timeout": 60 },
-    "restrict_to_workspace": true
-  }
-}
-```
-
-**Note:** Full configuration schema with all options is available in the source code (`hermitcrab/config/schema.py`).
-
----
-
-## 📊 Comparison
-
-| Feature | HermitCrab | Alternatives |
-|---------|------------|--------------|
-| **Code Size** | ~7,000 lines | 100k-400k+ lines |
-| **Memory** | Atomic markdown files | Database / LLM summaries |
-| **Local LLM** | First-class support | Afterthought |
-| **Privacy** | Runs entirely offline | Cloud-dependent |
-| **Extensibility** | Readable, modifiable | Black box |
-| **Deployment** | `pip install` | Docker, Kubernetes |
-
----
-
-## 🤝 Acknowledgments
-
-**HermitCrab is a fork of [nanobot](https://github.com/HKUDS/nanobot)** by [HKUDS](https://github.com/HKUDS).
-
-We stand on the shoulders of giants:
-- Original nanobot architecture © HKUDS (MIT License)
-- Inspired by [OpenClaw](https://github.com/openclaw/openclaw)
-- Built with [LiteLLM](https://github.com/BerriAI/litellm) for multi-provider support
-
-**Thank you** to the nanobot team for creating the foundation that made HermitCrab possible.
-
----
-
-## 🗺️ Roadmap
-
-### Completed (2026-02-25)
-- ✅ Journal system (daily narrative logs)
-- ✅ AgentLoop refactor (phase-separated lifecycle)
-- ✅ Model configuration (job-class routing)
-- ✅ Distillation (atomic knowledge extraction)
-- ✅ Reflection (pattern detection, meta-analysis)
-- ✅ Nostr channel (NIP-04 encrypted DMs)
-- ✅ Session timeout (30-min inactivity)
-- ✅ Local LLM documentation
-- ✅ Observability plan
+* Journal system
+* Phase-separated AgentLoop
+* Model routing
+* Distillation
+* Reflection
+* Nostr integration
+* Session timeout
+* Local-first deployment
 
 ### In Progress
-- ⏳ Observability implementation (structured logging + metrics)
+
+* Observability and structured metrics
 
 ### Planned
-- 🔜 Integration tests (end-to-end flows)
-- 🔜 Journal search functionality
-- 🔜 Journal export/backup utilities
-- 🔜 Health check endpoint (optional)
+
+* Integration tests
+* Journal search
+* Backup utilities
+* Optional health endpoint
 
 ---
 
-## 🐛 Troubleshooting
+# 🦀 Why HermitCrab Exists
 
-### "No module named 'hermitcrab'"
+Modern AI tools are:
 
-```bash
-pip install --upgrade hermitcrab-ai
-```
+* Cloud-bound
+* Opaque
+* Ephemeral
+* Hard to audit
+* Expensive to run continuously
 
-### "API key not configured"
+HermitCrab exists to prove something simpler:
 
-Edit `~/.hermitcrab/config.json` and add your API key:
+A personal AI agent can be:
 
-```json
-{
-  "providers": {
-    "openrouter": {
-      "apiKey": "sk-or-v1-xxx"
-    }
-  }
-}
-```
+* Local
+* Deterministic
+* Understandable
+* Evolvable
+* Small enough to audit
 
-### "Connection refused" (Ollama)
-
-```bash
-ollama serve  # Start Ollama server
-```
-
-### More Help
-
-- [GitHub Issues](https://github.com/talvasconcelos/hermitcrab/issues)
-- Source code documentation (inline comments and type hints)
+And still powerful.
 
 ---
 
-## 📄 License
+# License
 
-MIT License — see [LICENSE](LICENSE) for details.
+MIT License.
 
-**HermitCrab** is a fork of **nanobot** (MIT License).
-Original work © [HKUDS](https://github.com/HKUDS).
+HermitCrab is a fork of nanobot by HKUDS.
+Built with gratitude to the original architecture.
 
 ---
 
-## 🎉 Get Started
+# Get Started
 
 ```bash
-# Install
 pip install hermitcrab-ai
-
-# Initialize
 hermitcrab onboard
-
-# Chat
-hermitcrab agent
+hermitcrab gateway
 ```
 
-**Welcome to the hermitcrab community! 🦀**
+Build your second brain.
+Keep it local.
+Make it yours. 🦀
