@@ -1,4 +1,26 @@
-"""Agent loop: the core processing engine."""
+"""Agent loop: the core processing engine.
+
+Phase Separation:
+- Phase A: Input handling + session retrieval (Tier 0, deterministic)
+- Phase B: Interactive response (LLM allowed, policy gated)
+- Phase C: Deterministic session save (Tier 0)
+- Phase D: Session end detection (explicit reset or inactivity timeout)
+- Phase E: Deferred journal + background cognition (non-blocking, optional)
+
+Job Classes (LLM routing):
+- interactive_response: Latency-sensitive, user-facing (uses configured model)
+- journal_synthesis: Narrative summary, prefer weak local (1-3B)
+- distillation: Atomic extraction, local only, skip if unavailable
+- reflection: Meta-analysis, local preferred
+
+Core Principles:
+- Journal is narrative, lossy, non-authoritative
+- Journal runs only on session end / inactivity (30 min)
+- Distillation and reflection are async and optional
+- Memory correctness independent of LLMs
+- External models never affect correctness
+- Background cognition failures never block main loop
+"""
 
 from __future__ import annotations
 
@@ -6,13 +28,18 @@ import asyncio
 import json
 import re
 from contextlib import AsyncExitStack
+from datetime import datetime, timezone
+from enum import Enum
 from pathlib import Path
 from typing import TYPE_CHECKING, Awaitable, Callable
 
 from loguru import logger
 
 from hermitcrab.agent.context import ContextBuilder
+from hermitcrab.agent.distillation import AtomicCandidate
 from hermitcrab.agent.journal import JournalStore
+from hermitcrab.agent.memory import MemoryStore
+from hermitcrab.agent.reflection import ReflectionCandidate
 from hermitcrab.agent.subagent import SubagentManager
 from hermitcrab.agent.tools.cron import CronTool
 from hermitcrab.agent.tools.filesystem import EditFileTool, ListDirTool, ReadFileTool, WriteFileTool
@@ -31,6 +58,28 @@ if TYPE_CHECKING:
     from hermitcrab.cron.service import CronService
 
 
+class JobClass(str, Enum):
+    """
+    Job class for LLM routing.
+
+    Each job class has different:
+    - Latency requirements
+    - Model preferences (local vs external)
+    - Trust levels
+    - Cost constraints
+    """
+
+    INTERACTIVE_RESPONSE = "interactive_response"  # User-facing, latency sensitive
+    JOURNAL_SYNTHESIS = "journal_synthesis"  # Narrative, prefer weak local
+    DISTILLATION = "distillation"  # Atomic extraction, local only
+    REFLECTION = "reflection"  # Meta-analysis, local preferred
+    SUMMARISATION = "summarisation"  # Content summarization, flexible
+
+
+# Session inactivity timeout (30 minutes)
+INACTIVITY_TIMEOUT_S = 30 * 60
+
+
 class AgentLoop:
     """
     The agent loop is the core processing engine.
@@ -38,9 +87,17 @@ class AgentLoop:
     It:
     1. Receives messages from the bus
     2. Builds context with history, memory, skills
-    3. Calls the LLM
+    3. Calls the LLM (job-class routed)
     4. Executes tool calls
     5. Sends responses back
+    6. Manages session lifecycle (timeout detection)
+    7. Triggers background cognition (journal, distillation, reflection)
+
+    Session Lifecycle:
+    - Sessions tracked via last activity timestamp
+    - Inactivity timeout: 30 minutes (configurable)
+    - Session end triggers journal synthesis (non-blocking)
+    - Background cognition never blocks main loop
     """
 
     def __init__(
@@ -60,6 +117,8 @@ class AgentLoop:
         session_manager: SessionManager | None = None,
         mcp_servers: dict | None = None,
         channels_config: ChannelsConfig | None = None,
+        # Optional: override job models (usually loaded from config)
+        job_models: dict[JobClass, str | None] | None = None,
     ):
         from hermitcrab.config.schema import ExecToolConfig
         self.bus = bus
@@ -76,9 +135,24 @@ class AgentLoop:
         self.cron_service = cron_service
         self.restrict_to_workspace = restrict_to_workspace
 
+        # Model routing by job class
+        # If job_models dict provided, use it; otherwise build from defaults
+        if job_models is not None:
+            self._job_models: dict[JobClass, str | None] = job_models
+        else:
+            # Default: all jobs use primary model (distillation skips if None)
+            self._job_models = {
+                JobClass.INTERACTIVE_RESPONSE: self.model,
+                JobClass.JOURNAL_SYNTHESIS: self.model,
+                JobClass.DISTILLATION: None,  # Skip by default
+                JobClass.REFLECTION: self.model,
+                JobClass.SUMMARISATION: self.model,
+            }
+
         self.context = ContextBuilder(workspace)
         self.sessions = session_manager or SessionManager(workspace)
         self.journal = JournalStore(workspace)
+        self.memory = MemoryStore(workspace)
         self.tools = ToolRegistry()
         self.subagents = SubagentManager(
             provider=provider,
@@ -97,6 +171,10 @@ class AgentLoop:
         self._mcp_stack: AsyncExitStack | None = None
         self._mcp_connected = False
         self._mcp_connecting = False
+        # Track background tasks for cleanup (fire-and-forget, but track for shutdown)
+        self._background_tasks: set[asyncio.Task] = set()
+        # Session timeout tracking (checked on each message)
+        self._session_timers: dict[str, datetime] = {}
         self._register_default_tools()
 
     def _register_default_tools(self) -> None:
@@ -113,6 +191,21 @@ class AgentLoop:
         self.tools.register(WebFetchTool())
         self.tools.register(MessageTool(send_callback=self.bus.publish_outbound))
         self.tools.register(SpawnTool(manager=self.subagents))
+
+        # Memory tools - typed APIs for saving knowledge
+        from hermitcrab.agent.tools.memory import (
+            WriteDecisionTool,
+            WriteFactTool,
+            WriteGoalTool,
+            WriteReflectionTool,
+            WriteTaskTool,
+        )
+        self.tools.register(WriteFactTool(self.memory))
+        self.tools.register(WriteDecisionTool(self.memory))
+        self.tools.register(WriteGoalTool(self.memory))
+        self.tools.register(WriteTaskTool(self.memory))
+        self.tools.register(WriteReflectionTool(self.memory))
+
         if self.cron_service:
             self.tools.register(CronTool(self.cron_service))
 
@@ -169,16 +262,667 @@ class AgentLoop:
             return f'{tc.name}("{val[:40]}…")' if len(val) > 40 else f'{tc.name}("{val}")'
         return ", ".join(_fmt(tc) for tc in tool_calls)
 
+    def _get_model_for_job(self, job_class: JobClass) -> str | None:
+        """
+        Get model for a job class.
+
+        Routing rules (mechanical, not heuristic):
+        1. Use job-specific model if configured
+        2. Fall back to primary model
+        3. Return None to skip (for distillation when unavailable)
+
+        Args:
+            job_class: The job class to route.
+
+        Returns:
+            Model string or None (skip if unavailable).
+        """
+        model = self._job_models.get(job_class)
+        # For distillation, None means "skip" (local only, don't escalate)
+        # For other jobs, fall back to primary model
+        if model is None and job_class != JobClass.DISTILLATION:
+            return self.model
+        return model
+
+    def _schedule_background(
+        self,
+        coro: Awaitable,
+        task_name: str,
+    ) -> None:
+        """
+        Schedule a background task (fire-and-forget).
+
+        Background tasks:
+        - Never block the main loop
+        - Failures are logged, never fatal
+        - Tracked for cleanup on shutdown
+
+        Args:
+            coro: Async coroutine to run.
+            task_name: Human-readable name for logging.
+        """
+        async def _wrapped():
+            try:
+                await coro
+            except asyncio.CancelledError:
+                logger.debug("Background task cancelled: {}", task_name)
+            except Exception as e:
+                # Background cognition failures never affect correctness
+                logger.warning("Background task failed (non-fatal): {}: {}", task_name, e)
+            finally:
+                self._background_tasks.discard(asyncio.current_task())
+
+        task = asyncio.create_task(_wrapped(), name=task_name)
+        self._background_tasks.add(task)
+
+    def _check_session_timeout(self, session_key: str) -> bool:
+        """
+        Check if a session has timed out due to inactivity.
+
+        Timeout threshold: INACTIVITY_TIMEOUT_S (30 minutes)
+
+        Args:
+            session_key: Session identifier.
+
+        Returns:
+            True if session timed out, False otherwise.
+        """
+        last_activity = self._session_timers.get(session_key)
+        if last_activity is None:
+            return False
+
+        elapsed = (datetime.now(timezone.utc) - last_activity).total_seconds()
+        timed_out = elapsed > INACTIVITY_TIMEOUT_S
+
+        if timed_out:
+            logger.info("Session timed out ({}s inactivity): {}", elapsed, session_key)
+
+        return timed_out
+
+    def _update_session_timer(self, session_key: str) -> None:
+        """
+        Update the last activity timestamp for a session.
+
+        Called on every message to reset the inactivity timer.
+
+        Args:
+            session_key: Session identifier.
+        """
+        self._session_timers[session_key] = datetime.now(timezone.utc)
+
+    async def _on_session_end(
+        self,
+        session: Session,
+        reason: str = "explicit",
+    ) -> None:
+        """
+        Handle session end (explicit reset or timeout).
+
+        Triggers:
+        1. Journal synthesis (narrative summary)
+        2. Optional distillation (atomic extraction)
+        3. Optional reflection (meta-analysis)
+
+        All background tasks are non-blocking.
+        Failures logged, never fatal.
+
+        Args:
+            session: The session that ended.
+            reason: "explicit" (user reset) or "timeout" (inactivity).
+        """
+        logger.info("Session ended ({}): {}", reason, session.key)
+
+        # Clean up timer
+        self._session_timers.pop(session.key, None)
+
+        # Phase E: Deferred journal synthesis (non-blocking)
+        # Journal is narrative, lossy, non-authoritative
+        self._schedule_background(
+            self._synthesize_journal(session),
+            f"journal:{session.key}",
+        )
+
+        # Optional: distillation (atomic extraction, local only)
+        # Skip if no local model available
+        distillation_model = self._get_model_for_job(JobClass.DISTILLATION)
+        if distillation_model:
+            self._schedule_background(
+                self._distill_session(session),
+                f"distill:{session.key}",
+            )
+        else:
+            logger.debug("Distillation skipped (no local model): {}", session.key)
+
+        # Optional: reflection (meta-analysis)
+        reflection_model = self._get_model_for_job(JobClass.REFLECTION)
+        if reflection_model:
+            self._schedule_background(
+                self._reflect_on_session(session),
+                f"reflect:{session.key}",
+            )
+
+    async def _synthesize_journal(self, session: Session) -> None:
+        """
+        Synthesize journal entry from session.
+
+        Journal is:
+        - Narrative summary of what happened
+        - Lossy by design
+        - Non-authoritative (never affects memory directly)
+        - Human readable
+
+        Uses weak local LLM if available, escalates only if unavailable.
+        Falls back to deterministic summary if no LLM.
+
+        Args:
+            session: Session to synthesize.
+        """
+        try:
+            # Gather session data for synthesis
+            messages = session.messages
+            if not messages:
+                return  # Empty session, no journal needed
+
+            # Extract tool call names (not raw outputs) for context
+            tool_names = set()
+            for msg in messages:
+                if msg.get("role") == "tool":
+                    tool_names.add(msg.get("name", "unknown"))
+
+            # Build synthesis prompt
+            user_messages = [m for m in messages if m.get("role") == "user"]
+            assistant_messages = [m for m in messages if m.get("role") == "assistant"]
+
+            prompt = (
+                f"Summarize this agent session as a brief narrative.\n"
+                f"User messages: {len(user_messages)}\n"
+                f"Assistant responses: {len(assistant_messages)}\n"
+                f"Tools used: {', '.join(tool_names) if tool_names else 'none'}\n\n"
+                f"Write 2-3 sentences about what was accomplished."
+            )
+
+            # Try LLM synthesis if model available
+            model = self._get_model_for_job(JobClass.JOURNAL_SYNTHESIS)
+            if model:
+                try:
+                    response = await self.provider.chat(
+                        messages=[{"role": "user", "content": prompt}],
+                        model=model,
+                        temperature=0.05,
+                        max_tokens=256,
+                    )
+                    content = self._strip_think(response.content)
+                    if content:
+                        self.journal.write_entry(
+                            content=content,
+                            session_keys=[session.key],
+                            tags=["session", "synthesis"],
+                        )
+                        logger.info("Journal synthesized (LLM): {}", session.key)
+                        return
+                except Exception as e:
+                    logger.warning("Journal LLM failed, using fallback: {}", e)
+
+            # Fallback: deterministic summary
+            fallback = (
+                f"## Session: {session.key}\n\n"
+                f"User sent {len(user_messages)} message(s). "
+                f"Agent responded {len(assistant_messages)} time(s). "
+                f"Tools: {', '.join(sorted(tool_names)) if tool_names else 'none'}."
+            )
+            self.journal.write_entry(
+                content=fallback,
+                session_keys=[session.key],
+                tags=["session", "fallback"],
+            )
+            logger.info("Journal written (fallback): {}", session.key)
+
+        except Exception as e:
+            # Journal failures never block agent operation
+            logger.warning("Journal synthesis failed (non-fatal): {}: {}", session.key, e)
+
+    async def _distill_session(self, session: Session) -> None:
+        """
+        Extract atomic candidates from session (fact, task, goal, decision, reflection).
+
+        Distillation:
+        - Produces proposals only (not authoritative)
+        - Uses strict JSON schema
+        - Validation and commit happen elsewhere (Tier 0)
+        - Local only, skip if unavailable
+
+        Args:
+            session: Session to distill.
+        """
+        try:
+            from hermitcrab.agent.distillation import (
+                AtomicCandidate,
+            )
+
+            messages = session.messages
+            if not messages:
+                return  # Empty session, nothing to distill
+
+            # Build distillation prompt
+            prompt = (
+                "Extract atomic knowledge candidates from this agent session.\n\n"
+                "Look for:\n"
+                "- FACTS: User preferences, project context, established truths\n"
+                "- DECISIONS: Architectural choices, trade-offs, locked decisions\n"
+                "- GOALS: Objectives, outcomes the user wants to achieve\n"
+                "- TASKS: Action items, todos, things to do\n"
+                "- REFLECTIONS: Insights, patterns, observations about the work\n\n"
+                "Session content:\n"
+            )
+
+            for msg in messages[:50]:  # Limit to first 50 messages
+                role = msg.get("role", "unknown")
+                content = msg.get("content", "")[:500]  # Truncate each message
+                if role == "user":
+                    prompt += f"User: {content}\n"
+                elif role == "assistant":
+                    prompt += f"Assistant: {content}\n"
+
+            prompt += (
+                "\n\nReturn candidates as a JSON object with 'candidates' array.\n"
+                "Each candidate must have: type, title, content.\n"
+                "Optional: confidence (0-1), tags, and type-specific fields.\n"
+                "Be conservative - only extract clear, atomic knowledge."
+            )
+
+            # Try LLM distillation
+            model = self._get_model_for_job(JobClass.DISTILLATION)
+            if not model:
+                logger.debug("Distillation skipped (no model): {}", session.key)
+                return
+
+            try:
+                response = await self.provider.chat(
+                    messages=[{"role": "user", "content": prompt}],
+                    model=model,
+                    temperature=0.1,
+                    max_tokens=2048,
+                    # TODO: Add JSON schema enforcement when provider supports it
+                    # json_schema=DISTILLATION_JSON_SCHEMA,
+                )
+
+                # Parse response (expecting JSON)
+                import json
+
+                content = self._strip_think(response.content)
+                if not content:
+                    return
+
+                # Try to extract JSON from response
+                json_start = content.find("{")
+                json_end = content.rfind("}") + 1
+                if json_start >= 0 and json_end > json_start:
+                    json_str = content[json_start:json_end]
+                    data = json.loads(json_str)
+
+                    candidates = data.get("candidates", [])
+                    validated_count = 0
+
+                    for candidate_data in candidates:
+                        try:
+                            candidate = AtomicCandidate.from_dict(candidate_data)
+                            candidate.source_session = session.key
+
+                            # Validate candidate
+                            errors = candidate.validate()
+                            if errors:
+                                logger.warning(
+                                    "Candidate validation failed: {}: {}",
+                                    candidate.title,
+                                    errors,
+                                )
+                                continue
+
+                            # Commit to memory via Tier 0 path
+                            # This is the authoritative write - distillation proposes, memory decides
+                            self._commit_candidate_to_memory(candidate)
+                            validated_count += 1
+
+                        except Exception as e:
+                            logger.warning(
+                                "Failed to parse candidate: {}: {}",
+                                candidate_data.get("title", "unknown"),
+                                e,
+                            )
+
+                    if validated_count > 0:
+                        logger.info(
+                            "Distillation complete: {} candidates from {}",
+                            validated_count,
+                            session.key,
+                        )
+                    else:
+                        logger.debug("No valid candidates distilled: {}", session.key)
+
+            except json.JSONDecodeError as e:
+                logger.warning("Distillation response not valid JSON: {}: {}", session.key, e)
+            except Exception as e:
+                logger.warning("Distillation LLM failed: {}: {}", session.key, e)
+
+        except Exception as e:
+            # Distillation failures never block agent operation
+            logger.warning("Distillation failed (non-fatal): {}: {}", session.key, e)
+
+    def _commit_candidate_to_memory(self, candidate: AtomicCandidate) -> None:
+        """
+        Commit a validated candidate to memory (Tier 0 operation).
+
+        This is the authoritative write path. Distillation proposes,
+        but this method decides what actually gets stored.
+
+        Args:
+            candidate: Validated atomic candidate to commit.
+
+        Note:
+            - Failures are logged but don't raise (called from background task)
+            - Each candidate type maps to specific memory.write_*() method
+            - This is Tier 0 logic - deterministic, Python-authoritative
+        """
+        try:
+            from hermitcrab.agent.distillation import CandidateType
+
+            params = candidate.to_memory_params()
+
+            if candidate.type == CandidateType.FACT:
+                self.memory.write_fact(**params)
+                logger.info("Memory commit: fact '{}'", candidate.title)
+
+            elif candidate.type == CandidateType.DECISION:
+                self.memory.write_decision(**params)
+                logger.info("Memory commit: decision '{}'", candidate.title)
+
+            elif candidate.type == CandidateType.GOAL:
+                self.memory.write_goal(**params)
+                logger.info("Memory commit: goal '{}'", candidate.title)
+
+            elif candidate.type == CandidateType.TASK:
+                # Ensure assignee is set (required field)
+                if not params.get("assignee"):
+                    params["assignee"] = "distilled"  # Default for distilled tasks
+                self.memory.write_task(**params)
+                logger.info("Memory commit: task '{}'", candidate.title)
+
+            elif candidate.type == CandidateType.REFLECTION:
+                self.memory.write_reflection(**params)
+                logger.info("Memory commit: reflection '{}'", candidate.title)
+
+        except Exception as e:
+            # Memory commit failures logged but don't propagate
+            # (called from background task, must not affect main loop)
+            logger.error(
+                "Failed to commit candidate to memory: {}: {}",
+                candidate.title,
+                e,
+            )
+
+    async def _reflect_on_session(self, session: Session) -> None:
+        """
+        Meta-analysis of agent behavior.
+
+        Reflection:
+        - Identifies mistakes, uncertainty, patterns
+        - Never mutates memory directly (proposes reflections)
+        - Used to improve future behavior
+        - Local preferred, external optional
+
+        Args:
+            session: Session to reflect on.
+        """
+        try:
+
+            messages = session.messages
+            if not messages:
+                return  # Empty session, nothing to reflect on
+
+            # Analyze session for reflection triggers
+            reflections = await self._analyze_session_for_reflections(session)
+
+            if not reflections:
+                logger.debug("No reflections generated: {}", session.key)
+                return
+
+            # Commit valid reflections to memory
+            committed = 0
+            for reflection in reflections:
+                reflection.source_session = session.key
+
+                errors = reflection.validate()
+                if errors:
+                    logger.warning(
+                        "Reflection validation failed: {}: {}",
+                        reflection.title,
+                        errors,
+                    )
+                    continue
+
+                self._commit_reflection_to_memory(reflection)
+                committed += 1
+
+            if committed > 0:
+                logger.info(
+                    "Reflection complete: {} insights from {}",
+                    committed,
+                    session.key,
+                )
+
+        except Exception as e:
+            # Reflection failures never block agent operation
+            logger.warning("Reflection failed (non-fatal): {}: {}", session.key, e)
+
+    async def _analyze_session_for_reflections(
+        self,
+        session: Session,
+    ) -> list[ReflectionCandidate]:
+        """
+        Analyze session for reflection candidates.
+
+        Looks for:
+        - Tool errors and failures
+        - User corrections
+        - Repeated attempts
+        - Uncertainty markers
+        - Inefficiencies
+
+        Args:
+            session: Session to analyze.
+
+        Returns:
+            List of reflection candidates.
+        """
+        from hermitcrab.agent.reflection import ReflectionCandidate, ReflectionType
+
+        reflections: list[ReflectionCandidate] = []
+        messages = session.messages
+
+        # Analyze tool results for errors
+        tool_errors = self._extract_tool_errors(messages)
+        for error in tool_errors:
+            reflections.append(
+                ReflectionCandidate(
+                    type=ReflectionType.MISTAKE,
+                    title=f"Tool failure: {error['tool']}",
+                    content=f"Tool {error['tool']} failed with: {error['error'][:200]}",
+                    tool_involved=error['tool'],
+                    error_pattern=error['error'][:100],
+                    impact="high" if "error" in error['error'].lower() else "medium",
+                    session_context=error.get('context', ''),
+                )
+            )
+
+        # Analyze for user corrections (look for patterns like "no, I meant" or "that's wrong")
+        corrections = self._extract_user_corrections(messages)
+        for correction in corrections:
+            reflections.append(
+                ReflectionCandidate(
+                    type=ReflectionType.MISTAKE,
+                    title="User correction required",
+                    content=f"User corrected agent: {correction['text'][:200]}",
+                    user_correction=True,
+                    session_context=correction.get('context', ''),
+                    suggestion="Review context before responding",
+                )
+            )
+
+        # Analyze for repeated tool calls (potential inefficiency)
+        repeated_tools = self._find_repeated_tool_calls(messages)
+        for tool_info in repeated_tools:
+            reflections.append(
+                ReflectionCandidate(
+                    type=ReflectionType.PATTERN,
+                    title=f"Repeated tool usage: {tool_info['tool']}",
+                    content=f"Tool {tool_info['tool']} called {tool_info['count']} times in session",
+                    tool_involved=tool_info['tool'],
+                    frequency=f"{tool_info['count']} times in one session",
+                    impact="medium",
+                    suggestion="Consider caching or batching requests",
+                )
+            )
+
+        # Analyze for uncertainty markers in assistant responses
+        uncertainties = self._extract_uncertainty_markers(messages)
+        for uncertainty in uncertainties:
+            reflections.append(
+                ReflectionCandidate(
+                    type=ReflectionType.UNCERTAINTY,
+                    title=f"Uncertainty in {uncertainty['topic']}",
+                    content=f"Agent expressed uncertainty: {uncertainty['text'][:200]}",
+                    session_context=uncertainty.get('context', ''),
+                    suggestion="Consider adding knowledge or clarifying questions",
+                )
+            )
+
+        # If we have multiple mistakes, add an improvement suggestion
+        mistakes = [r for r in reflections if r.type == ReflectionType.MISTAKE]
+        if len(mistakes) >= 2:
+            reflections.append(
+                ReflectionCandidate(
+                    type=ReflectionType.IMPROVEMENT,
+                    title="Multiple failures detected",
+                    content=f"Session had {len(mistakes)} mistakes - review error handling",
+                    impact="high",
+                    suggestion="Improve error recovery or add validation",
+                )
+            )
+
+        return reflections
+
+    def _extract_tool_errors(self, messages: list[dict]) -> list[dict]:
+        """Extract tool errors from messages."""
+        errors = []
+        for msg in messages:
+            if msg.get("role") == "tool":
+                content = msg.get("content", "")
+                tool_name = msg.get("name", "unknown")
+                # Look for error indicators
+                if any(indicator in content.lower() for indicator in
+                       ["error:", "failed", "exception", "traceback"]):
+                    errors.append({
+                        "tool": tool_name,
+                        "error": content,
+                        "context": f"Tool call: {tool_name}",
+                    })
+        return errors
+
+    def _extract_user_corrections(self, messages: list[dict]) -> list[dict]:
+        """Extract user corrections from messages."""
+        corrections = []
+        correction_patterns = ["no,", "that's wrong", "i meant", "actually,", "not ", "wrong"]
+
+        for msg in messages:
+            if msg.get("role") == "user":
+                content = msg.get("content", "").lower()
+                if any(pattern in content for pattern in correction_patterns):
+                    corrections.append({
+                        "text": msg.get("content", ""),
+                        "context": "User correction",
+                    })
+        return corrections
+
+    def _find_repeated_tool_calls(self, messages: list[dict]) -> list[dict]:
+        """Find repeatedly called tools."""
+        tool_counts: dict[str, int] = {}
+        for msg in messages:
+            if msg.get("role") == "tool":
+                tool_name = msg.get("name", "unknown")
+                tool_counts[tool_name] = tool_counts.get(tool_name, 0) + 1
+
+        repeated = []
+        for tool, count in tool_counts.items():
+            if count >= 3:  # Threshold for "repeated"
+                repeated.append({"tool": tool, "count": count})
+        return repeated
+
+    def _extract_uncertainty_markers(self, messages: list[dict]) -> list[dict]:
+        """Extract uncertainty markers from assistant responses."""
+        uncertainties = []
+        uncertainty_patterns = [
+            "i'm not sure", "i don't know", "might be", "could be",
+            "possibly", "perhaps", "i think", "i believe", "uncertain"
+        ]
+
+        for msg in messages:
+            if msg.get("role") == "assistant":
+                content = msg.get("content", "").lower()
+                if any(pattern in content for pattern in uncertainty_patterns):
+                    uncertainties.append({
+                        "text": msg.get("content", ""),
+                        "topic": "General",
+                        "context": "Assistant uncertainty",
+                    })
+        return uncertainties
+
+    def _commit_reflection_to_memory(self, reflection: ReflectionCandidate) -> None:
+        """
+        Commit a validated reflection to memory (Tier 0 operation).
+
+        Args:
+            reflection: Validated reflection candidate to commit.
+        """
+        try:
+            params = reflection.to_memory_params()
+            self.memory.write_reflection(**params)
+            logger.info("Memory commit: reflection '{}'", reflection.title)
+        except Exception as e:
+            logger.error(
+                "Failed to commit reflection to memory: {}: {}",
+                reflection.title,
+                e,
+            )
+
     async def _run_agent_loop(
         self,
         initial_messages: list[dict],
         on_progress: Callable[..., Awaitable[None]] | None = None,
+        job_class: JobClass = JobClass.INTERACTIVE_RESPONSE,
     ) -> tuple[str | None, list[str], list[dict]]:
-        """Run the agent iteration loop. Returns (final_content, tools_used, messages)."""
+        """
+        Run the agent iteration loop.
+
+        Phase B: Interactive response (LLM allowed, policy gated).
+
+        Args:
+            initial_messages: Initial message list for LLM context.
+            on_progress: Optional callback for progress updates.
+            job_class: Job class for model routing.
+
+        Returns:
+            Tuple of (final_content, tools_used, all_messages).
+        """
         messages = initial_messages
         iteration = 0
         final_content = None
         tools_used: list[str] = []
+
+        # Get model for this job class
+        model = self._get_model_for_job(job_class)
+        if model is None:
+            # No model available (distillation case) - skip gracefully
+            return None, [], []
 
         while iteration < self.max_iterations:
             iteration += 1
@@ -186,7 +930,7 @@ class AgentLoop:
             response = await self.provider.chat(
                 messages=messages,
                 tools=self.tools.get_definitions(),
-                model=self.model,
+                model=model,
                 temperature=self.temperature,
                 max_tokens=self.max_tokens,
             )
@@ -285,7 +1029,28 @@ class AgentLoop:
         session_key: str | None = None,
         on_progress: Callable[[str], Awaitable[None]] | None = None,
     ) -> OutboundMessage | None:
-        """Process a single inbound message and return the response."""
+        """
+        Process a single inbound message with explicit phase separation.
+
+        Phases:
+        - Phase A: Input handling + session retrieval (Tier 0, deterministic)
+        - Phase B: Interactive response (LLM allowed, policy gated)
+        - Phase C: Deterministic session save (Tier 0)
+        - Phase D: Session end detection (explicit reset or inactivity timeout)
+        - Phase E: Deferred journal + background cognition (non-blocking, optional)
+
+        Args:
+            msg: Inbound message to process.
+            session_key: Optional session key override.
+            on_progress: Optional progress callback.
+
+        Returns:
+            OutboundMessage or None.
+        """
+        # ====================================================================
+        # Phase A: Input handling + session retrieval (Tier 0, deterministic)
+        # ====================================================================
+
         # System messages: parse origin from chat_id ("channel:chat_id")
         if msg.channel == "system":
             channel, chat_id = (msg.chat_id.split(":", 1) if ":" in msg.chat_id
@@ -294,34 +1059,58 @@ class AgentLoop:
             key = f"{channel}:{chat_id}"
             session = self.sessions.get_or_create(key)
             self._set_tool_context(channel, chat_id, msg.metadata.get("message_id"))
+
+            # Update session timer (reset inactivity clock)
+            self._update_session_timer(key)
+
             history = session.get_history(max_messages=self.memory_window)
             messages = self.context.build_messages(
                 history=history,
                 current_message=msg.content, channel=channel, chat_id=chat_id,
             )
-            final_content, _, all_msgs = await self._run_agent_loop(messages)
+            # Phase B happens inside _run_agent_loop
+            final_content, _, all_msgs = await self._run_agent_loop(
+                messages, job_class=JobClass.INTERACTIVE_RESPONSE,
+            )
+            # Phase C: Deterministic save
             self._save_turn(session, all_msgs, 1 + len(history))
             self.sessions.save(session)
             return OutboundMessage(channel=channel, chat_id=chat_id,
                                   content=final_content or "Background task completed.")
 
+        # Regular user message
         preview = msg.content[:80] + "..." if len(msg.content) > 80 else msg.content
         logger.info("Processing message from {}:{}: {}", msg.channel, msg.sender_id, preview)
 
         key = session_key or msg.session_key
         session = self.sessions.get_or_create(key)
 
+        # Update session timer (reset inactivity clock)
+        self._update_session_timer(key)
+
+        # ====================================================================
+        # Phase D (early): Session end detection - explicit reset
+        # ====================================================================
+
         # Slash commands
         cmd = msg.content.strip().lower()
         if cmd == "/new":
+            # Explicit session end - trigger journal before clearing
+            await self._on_session_end(session, reason="explicit")
+
             session.clear()
             self.sessions.save(session)
             self.sessions.invalidate(session.key)
             return OutboundMessage(channel=msg.channel, chat_id=msg.chat_id,
                                   content="New session started.")
+
         if cmd == "/help":
             return OutboundMessage(channel=msg.channel, chat_id=msg.chat_id,
                                   content="🐈 hermitcrab commands:\n/new — Start a new conversation\n/help — Show available commands")
+
+        # ====================================================================
+        # Phase A (continued): Tool context setup
+        # ====================================================================
 
         self._set_tool_context(msg.channel, msg.chat_id, msg.metadata.get("message_id"))
         if message_tool := self.tools.get("message"):
@@ -344,8 +1133,13 @@ class AgentLoop:
                 channel=msg.channel, chat_id=msg.chat_id, content=content, metadata=meta,
             ))
 
+        # ====================================================================
+        # Phase B: Interactive response (LLM allowed, policy gated)
+        # ====================================================================
+
         final_content, tools_used, all_msgs = await self._run_agent_loop(
             initial_messages, on_progress=on_progress or _bus_progress,
+            job_class=JobClass.INTERACTIVE_RESPONSE,
         )
 
         if final_content is None:
@@ -354,11 +1148,37 @@ class AgentLoop:
         preview = final_content[:120] + "..." if len(final_content) > 120 else final_content
         logger.info("Response to {}:{}: {}", msg.channel, msg.sender_id, preview)
 
+        # ====================================================================
+        # Phase C: Deterministic session save (Tier 0)
+        # ====================================================================
+
         self._save_turn(session, all_msgs, 1 + len(history))
         self.sessions.save(session)
 
-        # Write journal entry for this turn (non-blocking, failures ignored)
-        self._write_journal_entry(session, final_content, tools_used)
+        # ====================================================================
+        # Phase D: Session end detection - inactivity timeout check
+        # ====================================================================
+
+        # Check if any other sessions have timed out
+        timed_out_sessions = [
+            k for k in list(self._session_timers.keys())
+            if self._check_session_timeout(k)
+        ]
+        for timed_out_key in timed_out_sessions:
+            timed_out_session = self.sessions.get_or_create(timed_out_key)
+            # Trigger session end asynchronously (non-blocking)
+            self._schedule_background(
+                self._on_session_end(timed_out_session, reason="timeout"),
+                f"session_end:{timed_out_key}",
+            )
+
+        # ====================================================================
+        # Phase E: Deferred journal + background cognition (non-blocking)
+        # ====================================================================
+
+        # NOTE: Journal is NOT written per-turn anymore.
+        # Journal synthesis happens only on session end (explicit or timeout).
+        # This is intentional: journal is narrative, not authoritative.
 
         if message_tool := self.tools.get("message"):
             if isinstance(message_tool, MessageTool) and message_tool._sent_in_turn:
@@ -371,61 +1191,29 @@ class AgentLoop:
 
     _TOOL_RESULT_MAX_CHARS = 500
 
-    def _write_journal_entry(
-        self,
-        session: Session,
-        response_content: str,
-        tools_used: list[str],
-    ) -> None:
+    def _save_turn(self, session: Session, messages: list[dict], skip: int) -> None:
         """
-        Write a journal entry for the current session turn.
+        Save new-turn messages into session, truncating large tool results.
 
-        Journal entries are narrative logs of what happened today.
-        They are separate from memory and never affect facts/decisions/goals/tasks/reflections.
-
-        This method is non-blocking - failures are logged but don't affect agent operation.
+        Also updates the session timer for inactivity timeout tracking.
 
         Args:
-            session: Current session object.
-            response_content: Agent's response content.
-            tools_used: List of tool names used in this turn.
+            session: Session to save.
+            messages: New messages to append.
+            skip: Number of messages to skip from the start.
         """
-        try:
-            # Build a concise journal entry
-            tool_summary = f"Used tools: {', '.join(tools_used)}" if tools_used else "No tools used"
-
-            # Create a brief narrative entry
-            entry_lines = [
-                f"## Session: {session.key}",
-                "",
-                f"{response_content[:500]}{'...' if len(response_content) > 500 else ''}",
-                "",
-                f"*{tool_summary}*",
-            ]
-
-            content = "\n".join(entry_lines)
-
-            self.journal.write_entry(
-                content=content,
-                session_keys=[session.key],
-                tags=["session"],
-            )
-        except Exception as e:
-            # Journal failures never block agent operation
-            logger.warning("Failed to write journal entry: {}", e)
-
-    def _save_turn(self, session: Session, messages: list[dict], skip: int) -> None:
-        """Save new-turn messages into session, truncating large tool results."""
-        from datetime import datetime
         for m in messages[skip:]:
             entry = {k: v for k, v in m.items() if k != "reasoning_content"}
             if entry.get("role") == "tool" and isinstance(entry.get("content"), str):
                 content = entry["content"]
                 if len(content) > self._TOOL_RESULT_MAX_CHARS:
                     entry["content"] = content[:self._TOOL_RESULT_MAX_CHARS] + "\n... (truncated)"
-            entry.setdefault("timestamp", datetime.now().isoformat())
+            entry.setdefault("timestamp", datetime.now(timezone.utc).isoformat())
             session.messages.append(entry)
-        session.updated_at = datetime.now()
+        session.updated_at = datetime.now(timezone.utc)
+
+        # Update session timer for inactivity tracking
+        self._update_session_timer(session.key)
 
     async def process_direct(
         self,

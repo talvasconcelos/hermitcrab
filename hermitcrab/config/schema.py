@@ -97,11 +97,72 @@ class ChannelsConfig(Base):
     nostr: NostrConfig = Field(default_factory=NostrConfig)
 
 
+class AgentJobModels(Base):
+    """
+    Model configuration per job class.
+
+    Fallback scheme (explicit, not heuristic):
+    1. Use job-specific model if configured (non-empty string)
+    2. For INTERACTIVE_RESPONSE: never fall back (must be configured)
+    3. For JOURNAL_SYNTHESIS/REFLECTION: fall back to primary model
+    4. For DISTILLATION: None means "skip" (local only, don't escalate)
+    5. For SUMMARISATION: fall back to primary model
+
+    Configuration examples:
+    ```json
+    {
+      "interactive_response": "anthropic/claude-opus-4-5",  // Primary
+      "journal_synthesis": "ollama/llama-3.2-3b",          // Weak local
+      "distillation": "ollama/phi-3-mini",                 // Local only
+      "reflection": "",                                     // Empty = use primary
+      "summarisation": null                                 // Null = use primary
+    }
+    ```
+    """
+
+    interactive_response: str = ""  # Required (falls back to primary if empty)
+    journal_synthesis: str | None = None  # None = use primary
+    distillation: str | None = None  # None = skip (local only, don't escalate)
+    reflection: str | None = None  # None = use primary
+    summarisation: str | None = None  # None = use primary
+
+    def get_model(self, job_class: str, primary_model: str) -> str | None:
+        """
+        Get model for a job class with explicit fallback logic.
+
+        Args:
+            job_class: Job class name (e.g., "interactive_response").
+            primary_model: Primary/interactive model as ultimate fallback.
+
+        Returns:
+            Model string, or None to skip (distillation only).
+
+        Fallback rules:
+        - Empty string ("") → use primary_model
+        - None → use primary_model (except distillation)
+        - Distillation with None → return None (skip, local only)
+        """
+        # Get the job-specific model
+        job_model = getattr(self, job_class, None)
+
+        # Case 1: Explicitly configured (non-empty string)
+        if job_model and isinstance(job_model, str) and job_model.strip():
+            return job_model.strip()
+
+        # Case 2: Distillation with None/empty → skip (local only policy)
+        if job_class == "distillation":
+            return None  # Don't escalate to external model
+
+        # Case 3: All other jobs → fall back to primary model
+        return primary_model
+
+
 class AgentDefaults(Base):
     """Default agent configuration."""
 
     workspace: str = "~/.hermitcrab/workspace"
-    model: str = "anthropic/claude-opus-4-5"
+    model: str = "anthropic/claude-opus-4-5"  # Primary model for interactive responses
+    job_models: AgentJobModels = Field(default_factory=AgentJobModels)
     max_tokens: int = 8192
     temperature: float = 0.1
     max_tool_iterations: int = 40

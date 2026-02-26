@@ -13,7 +13,7 @@ from hermitcrab.agent.skills import SkillsLoader
 class ContextBuilder:
     """
     Builds the context (system prompt + messages) for the agent.
-    
+
     Assembles bootstrap files, memory, skills, and conversation history
     into a coherent prompt for the LLM.
     """
@@ -28,10 +28,10 @@ class ContextBuilder:
     def build_system_prompt(self, skill_names: list[str] | None = None) -> str:
         """
         Build the system prompt from bootstrap files, memory, and skills.
-        
+
         Args:
             skill_names: Optional list of skills to include.
-        
+
         Returns:
             Complete system prompt.
         """
@@ -74,15 +74,14 @@ Skills with available="false" need dependencies installed first - you can try in
         """Get the core identity section."""
         import time as _time
         from datetime import datetime
+
         now = datetime.now().strftime("%Y-%m-%d %H:%M (%A)")
         tz = _time.strftime("%Z") or "UTC"
         workspace_path = str(self.workspace.expanduser().resolve())
         system = platform.system()
         runtime = f"{'macOS' if system == 'Darwin' else system} {platform.machine()}, Python {platform.python_version()}"
 
-        return f"""# hermitcrab 🐈
-
-You are hermitcrab, a helpful AI assistant.
+        return f"""# hermitcrab
 
 ## Current Time
 {now} ({tz})
@@ -114,7 +113,8 @@ Reply directly with text for conversations. Only use the 'message' tool to send 
 - Record decisions: use write_decision() for locked choices in memory/decisions/
 - Track goals and tasks: use write_goal() and write_task() with appropriate status
 - Search memory: use search_memory(query) or read_memory(category, id)
-- Memory is category-based, atomic, and file-backed — no summarization"""
+- Memory is category-based, atomic, and file-backed — no summarization
+- Before answering questions, ask yourself: “Does answering this correctly require user-specific, project-specific, or historical information that may exist in memory?” If the answer is yes, or maybe, search memory first and use the results to inform your answer. Never guess, fabricate, or assume memory content."""
 
     def _load_bootstrap_files(self) -> str:
         """Load all bootstrap files from workspace."""
@@ -159,8 +159,8 @@ Reply directly with text for conversations. Only use the 'message' tool to send 
             system_prompt += f"\n\n## Current Session\nChannel: {channel}\nChat ID: {chat_id}"
         messages.append({"role": "system", "content": system_prompt})
 
-        # History
-        messages.extend(history)
+        # History (last N messages, for conversation context and to limit token usage)
+        messages.extend(history[-5:])
 
         # Current message (with optional image attachments)
         user_content = self._build_user_content(current_message, media)
@@ -187,30 +187,23 @@ Reply directly with text for conversations. Only use the 'message' tool to send 
         return images + [{"type": "text", "text": text}]
 
     def add_tool_result(
-        self,
-        messages: list[dict[str, Any]],
-        tool_call_id: str,
-        tool_name: str,
-        result: str
+        self, messages: list[dict[str, Any]], tool_call_id: str, tool_name: str, result: str
     ) -> list[dict[str, Any]]:
         """
         Add a tool result to the message list.
-        
+
         Args:
             messages: Current message list.
             tool_call_id: ID of the tool call.
             tool_name: Name of the tool.
             result: Tool execution result.
-        
+
         Returns:
             Updated message list.
         """
-        messages.append({
-            "role": "tool",
-            "tool_call_id": tool_call_id,
-            "name": tool_name,
-            "content": result
-        })
+        messages.append(
+            {"role": "tool", "tool_call_id": tool_call_id, "name": tool_name, "content": result}
+        )
         return messages
 
     def add_assistant_message(
@@ -222,13 +215,13 @@ Reply directly with text for conversations. Only use the 'message' tool to send 
     ) -> list[dict[str, Any]]:
         """
         Add an assistant message to the message list.
-        
+
         Args:
             messages: Current message list.
             content: Message content.
             tool_calls: Optional tool calls.
             reasoning_content: Thinking output (Kimi, DeepSeek-R1, etc.).
-        
+
         Returns:
             Updated message list.
         """
