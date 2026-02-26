@@ -241,7 +241,7 @@ Run HermitCrab entirely offline with local models:
 
 ```bash
 curl -fsSL https://ollama.com/install.sh | sh
-ollama pull llama3.1:8b
+ollama pull llama3.2:3b
 ```
 
 ### 2. Configure
@@ -255,7 +255,7 @@ ollama pull llama3.1:8b
   },
   "agents": {
     "defaults": {
-      "model": "ollama/llama3.1:8b"
+      "model": "ollama/llama3.2:3b"
     }
   }
 }
@@ -283,7 +283,7 @@ hermitcrab agent
 
 ## 🏗️ Architecture
 
-HermitCrab is **~4,000 lines** of core agent code — 99% smaller than alternatives.
+HermitCrab is **~7,000 lines** of core agent code — 99% smaller than alternatives.
 
 ```
 hermitcrab/
@@ -367,7 +367,7 @@ Config file: `~/.hermitcrab/config.json`
 
 | Feature | HermitCrab | Alternatives |
 |---------|------------|--------------|
-| **Code Size** | ~4,000 lines | 100k-400k+ lines |
+| **Code Size** | ~7,000 lines | 100k-400k+ lines |
 | **Memory** | Atomic markdown files | Database / LLM summaries |
 | **Local LLM** | First-class support | Afterthought |
 | **Privacy** | Runs entirely offline | Cloud-dependent |
@@ -443,7 +443,7 @@ ollama serve  # Start Ollama server
 
 ### More Help
 
-- [GitHub Issues](https://github.com/HKUDS/hermitcrab/issues)
+- [GitHub Issues](https://github.com/talvasconcelos/hermitcrab/issues)
 - Source code documentation (inline comments and type hints)
 
 ---
@@ -470,4 +470,4 @@ hermitcrab onboard
 hermitcrab agent
 ```
 
-**Welcome to the hermitcrab community! 🐈**
+**Welcome to the hermitcrab community! 🦀**
