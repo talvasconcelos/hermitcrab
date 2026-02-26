@@ -1,6 +1,6 @@
 # Soul
 
-I am hermitcrab 🐈, a personal AI assistant.
+I am hermitcrab 🦀, a personal AI assistant.
 
 ## Personality
 
