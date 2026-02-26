@@ -1,19 +1,24 @@
 [project]
-name = "hermitcrab"
-version = "0.1.0"
-description = "A lightweight personal AI assistant framework"
+name = "hermitcrab-ai"
+version = "0.1.0a1"
+description = "A lightweight, memory-first, Nostr-primary personal AI assistant"
 requires-python = ">=3.11"
+readme = "README.md"
 license = {text = "MIT"}
 authors = [
-    {name = "hermitcrab contributors"}
+    {name = "Tiago Vasconcelos"},
+    {name = "HermitCrab contributors"},
 ]
-keywords = ["ai", "agent", "chatbot"]
+keywords = ["ai", "agent", "assistant", "nostr", "memory"]
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Intended Audience :: Developers",
     "License :: OSI Approved :: MIT License",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Topic :: Communications :: Chat",
+    "Framework :: AsyncIO",
 ]
 
 dependencies = [
@@ -49,6 +54,11 @@ dev = [
 [project.scripts]
 hermitcrab = "hermitcrab.cli.commands:app"
 
+[project.urls]
+Homepage = "https://github.com/talvasconcelos/hermitcrab"
+Repository = "https://github.com/talvasconcelos/hermitcrab"
+Documentation = "https://github.com/talvasconcelos/hermitcrab#readme"
+
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
@@ -63,9 +73,8 @@ packages = ["hermitcrab"]
 [tool.hatch.build]
 include = [
     "hermitcrab/**/*.py",
-    "hermitcrab/templates/**/*.md",
-    "hermitcrab/skills/**/*.md",
-    "hermitcrab/skills/**/*.sh",
+    "hermitcrab/**/*.md",
+    "hermitcrab/**/*.sh",
 ]
 
 [tool.hatch.build.targets.sdist]
