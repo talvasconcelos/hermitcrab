@@ -5,6 +5,16 @@
 [![Python ≥3.11](https://img.shields.io/badge/python-≥3.11-blue)](https://python.org)
 [![MIT License](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 
+## 🤝 Acknowledgments
+
+**HermitCrab is a fork of [nanobot](https://github.com/HKUDS/nanobot)** by [HKUDS](https://github.com/HKUDS).
+
+We stand on the shoulders of giants:
+- Original nanobot architecture © HKUDS (MIT License)
+- Inspired by [OpenClaw](https://github.com/openclaw/openclaw)
+
+**Thank you** to the nanobot team for creating the foundation that made HermitCrab possible.
+
 ### What is HermitCrab, really?
 
 HermitCrab is a **personal AI agent** you run on your own machine.  
