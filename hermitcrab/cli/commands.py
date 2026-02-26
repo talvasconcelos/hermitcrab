@@ -38,6 +38,54 @@ _PROMPT_SESSION: PromptSession | None = None
 _SAVED_TERM_ATTRS = None  # original termios settings, restored on exit
 
 
+def _build_job_models_from_config(config: Config) -> dict | None:
+    """
+    Build job_models dict from config for AgentLoop initialization.
+
+    Args:
+        config: Root configuration object.
+
+    Returns:
+        Dict mapping JobClass to model string (or None to skip).
+        Returns None if no job models configured (use defaults).
+    """
+    from hermitcrab.agent.loop import JobClass
+
+    job_models_config = config.agents.defaults.job_models
+
+    # Check if any job models are actually configured
+    has_config = (
+        job_models_config.interactive_response
+        or job_models_config.journal_synthesis is not None
+        or job_models_config.distillation is not None
+        or job_models_config.reflection is not None
+        or job_models_config.summarisation is not None
+    )
+
+    if not has_config:
+        return None  # Use AgentLoop defaults
+
+    primary_model = config.agents.defaults.model
+
+    return {
+        JobClass.INTERACTIVE_RESPONSE: job_models_config.get_model(
+            "interactive_response", primary_model
+        ),
+        JobClass.JOURNAL_SYNTHESIS: job_models_config.get_model(
+            "journal_synthesis", primary_model
+        ),
+        JobClass.DISTILLATION: job_models_config.get_model(
+            "distillation", primary_model
+        ),
+        JobClass.REFLECTION: job_models_config.get_model(
+            "reflection", primary_model
+        ),
+        JobClass.SUMMARISATION: job_models_config.get_model(
+            "summarisation", primary_model
+        ),
+    }
+
+
 def _flush_pending_tty_input() -> None:
     """Drop unread keypresses typed while the model was generating output."""
     try:
@@ -297,6 +345,9 @@ def gateway(
     cron_store_path = get_data_dir() / "cron" / "jobs.json"
     cron = CronService(cron_store_path)
 
+    # Build job models from config (with fallback logic)
+    job_models = _build_job_models_from_config(config)
+
     # Create agent with cron service
     agent = AgentLoop(
         bus=bus,
@@ -314,6 +365,7 @@ def gateway(
         session_manager=session_manager,
         mcp_servers=config.tools.mcp_servers,
         channels_config=config.channels,
+        job_models=job_models,  # Pass job models (or None for defaults)
     )
 
     # Set cron callback (needs agent)
@@ -581,6 +633,9 @@ def agent(
     else:
         logger.disable("hermitcrab")
 
+    # Build job models from config (with fallback logic)
+    job_models = _build_job_models_from_config(config)
+
     agent_loop = AgentLoop(
         bus=bus,
         provider=provider,
@@ -596,6 +651,7 @@ def agent(
         restrict_to_workspace=config.tools.restrict_to_workspace,
         mcp_servers=config.tools.mcp_servers,
         channels_config=config.channels,
+        job_models=job_models,  # Pass job models (or None for defaults)
     )
 
     # Show spinner when logs are off (no output to miss); skip when logs are on
@@ -1083,6 +1139,10 @@ def cron_run(
     config = load_config()
     provider = _make_provider(config)
     bus = MessageBus()
+
+    # Build job models from config (with fallback logic)
+    job_models = _build_job_models_from_config(config)
+
     agent_loop = AgentLoop(
         bus=bus,
         provider=provider,
@@ -1097,6 +1157,7 @@ def cron_run(
         restrict_to_workspace=config.tools.restrict_to_workspace,
         mcp_servers=config.tools.mcp_servers,
         channels_config=config.channels,
+        job_models=job_models,  # Pass job models (or None for defaults)
     )
 
     store_path = get_data_dir() / "cron" / "jobs.json"
