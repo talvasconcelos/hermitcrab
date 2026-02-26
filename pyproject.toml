@@ -42,6 +42,7 @@ dependencies = [
     "json-repair>=0.57.0,<1.0.0",
     "python-frontmatter>=1.1.0",
     "pynostr>=0.7.0",
+    "ddgs>=9.10.0",
 ]
 
 [project.optional-dependencies]
