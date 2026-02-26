@@ -1,473 +1,192 @@
-# 🦀 HermitCrab
+# 🦀 HermitCrab  
+**Your local, private AI companion that actually remembers — and gets better over time**
 
-**A local-first AI agent with deterministic memory and real self-improvement**
+[![PyPI version](https://img.shields.io/pypi/v/hermitcrab-ai)](https://pypi.org/project/hermitcrab-ai/)
+[![Python ≥3.11](https://img.shields.io/badge/python-≥3.11-blue)](https://python.org)
+[![MIT License](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 
-[![PyPI](https://img.shields.io/pypi/v/hermitcrab-ai)](https://pypi.org/project/hermitcrab-ai/)
-[![Python](https://img.shields.io/badge/python-≥3.11-blue)](https://python.org)
-[![License](https://img.shields.io/badge/license-MIT-green)](LICENSE)
+### What is HermitCrab, really?
 
----
+HermitCrab is a **personal AI agent** you run on your own machine.  
+It’s not another cloud wrapper, not a bloated framework, not yet another SaaS subscription trap.  
 
-## What Is HermitCrab?
+It’s small (under 7,000 lines of core code), readable, auditable, and built around one simple idea:  
+**Your AI should remember what matters to you — forever — without turning into a black box.**
 
-HermitCrab is a **personal AI agent** that runs on your hardware, remembers what matters, and improves over time.
+Think of it as a **second brain** you can carry in your pocket (or copy to a new laptop/VPS in seconds).  
+Just move the `workspace/` folder and you’re back in business — same memories, same personality, same progress.
 
-It is not a chatbot wrapper.
-It is not a cloud SaaS.
-It is not a 300k-line framework.
+### Why people may be drawn to it
 
-It is a focused, readable, extensible agent core — **6,891 lines of code** — that you can audit yourself with a simple bash script.
+- Runs **fully offline** with local models (Ollama default)  
+- Remembers things in **plain, human-readable Markdown files** (Obsidian compatible, git-friendly)  
+- Automatically **distills** conversations into facts, tasks, decisions, goals, reflections  
+- **Reflects** on itself — spots patterns, mistakes, contradictions, and suggests improvements  
+- Talks via **Nostr** (primary), Telegram, email, or plain CLI — your choice  
+- Stays tiny, fast, and cheap — no 100k+ line monolith
 
-Think of it as a **portable second brain**:
+**Same crab, new shell.**  
+Move your workspace anywhere. The agent picks up exactly where it left off.
 
-* 💬 Converses via Nostr, Telegram, Email, or CLI
-* 🧠 Stores structured, atomic memory across sessions
-* 📝 Generates narrative journal entries automatically
-* 🔍 Distills knowledge and extracts tasks
-* 🪞 Reflects on mistakes and patterns
-* 🔧 Executes tools safely under Python control
-* 🏠 Runs fully offline with local LLMs
+### Quick Start (3 commands)
 
-**Same crab, new shell.**
-Move your `workspace/` folder and config to a new machine, and your agent continues exactly where it left off.
+1. **Install**  
+   ```bash
+   pip install hermitcrab-ai
+   ```
 
----
+2. **Set up your workspace & config**  
+   ```bash
+   hermitcrab onboard
+   ```
+   (creates `~/.hermitcrab/` with config and empty workspace)
 
-# ⚡ Quick Start
+3. **Pick a model & run**  
+   Edit `~/.hermitcrab/config.json` to point to your favorite model (local or cloud).  
+   Then just:
+   ```bash
+   hermitcrab agent
+   ```
 
-### 1. Install
+You’re now talking to your own persistent, memory-aware agent.
 
-```bash
-pip install hermitcrab-ai
-```
+### How the agent actually thinks & remembers
 
-### 2. Initialize
+HermitCrab is **not** a stateless chat loop.  
+Every session follows a clean lifecycle:
 
-```bash
-hermitcrab onboard
-```
+1. You talk → agent responds → tools run if needed  
+2. Session ends (you exit, or 30 min of silence)  
+3. **Journal synthesis** — narrative summary of what happened (cheap model)  
+4. **Distillation** — extracts new facts, tasks, goals, decisions (cheap model)  
+5. **Reflection** — looks for mistakes, contradictions, patterns (smarter model)
 
-### 3. Configure a Model
-
-Edit `~/.hermitcrab/config.json`:
-
-```json
-{
-  "providers": {
-    "openrouter": {
-      "apiKey": "sk-or-v1-xxx"
-    }
-  },
-  "agents": {
-    "defaults": {
-      "model": "anthropic/claude-opus-4-5"
-    }
-  }
-}
-```
-
-### 4. Run
-
-```bash
-hermitcrab agent
-```
-
-You now have a persistent personal AI agent.
-
----
-
-# 🔁 Agent Lifecycle
-
-HermitCrab is not a stateless chat loop.
-It runs a structured lifecycle.
-
-Each session follows:
-
-1. **Interactive Phase**
-
-   * LLM response
-   * Tool execution
-   * Context includes last interactions + relevant memory
-
-2. **Session End Detection**
-
-   * Manual exit, or
-   * 30 minutes of inactivity
-
-3. **Journal Synthesis**
-
-   * Narrative summary of what happened
-   * Includes key takeaways and tool usage
-   * Appends to daily journal file
-
-4. **Distillation**
-
-   * Extract atomic facts, tasks, decisions, goals
-   * Store as structured markdown notes
-
-5. **Reflection**
-
-   * Identify mistakes
-   * Detect patterns
-   * Suggest internal improvements
-
-Interactive and background phases can use different models.
-Cheap local models handle synthesis. Premium models handle reasoning.
-
-This separation keeps costs low and architecture clean.
-
----
-
-# 🧠 Deterministic Memory
-
-HermitCrab uses **atomic markdown files**, not databases and not opaque embeddings.
-
-Memory lives inside your `workspace/` folder:
+All extracted knowledge lands as tiny, atomic Markdown notes in `workspace/memory/`:
 
 ```
 workspace/
 ├── memory/
-│   ├── facts/
-│   ├── decisions/
-│   ├── goals/
-│   ├── tasks/
-│   └── reflections/
-├── journal/
-└── sessions/
+│   ├── facts/          # preferences, hard truths
+│   ├── decisions/      # choices & reasoning
+│   ├── goals/          # long-term objectives
+│   ├── tasks/          # things to do (with deadlines & status)
+│   └── reflections/    # self-analysis, cleanups
+├── journal/            # narrative session summaries
+└── sessions/           # raw chat logs (for debugging)
 ```
 
-All files are:
+Everything is:
+- Human-readable & editable (open in Obsidian, Vim, Notepad)
+- Structured with YAML frontmatter
+- Wikilink-friendly
+- Deterministic — Python, not the LLM, writes the files
 
-* Human-readable
-* Git-friendly
-* Obsidian-compatible
-* YAML-frontmatter structured
-* Wikilink enabled
+No vector databases. No silent embeddings. No hidden state corruption.
 
-Example:
+### Channels — where you talk to your crab
 
-```markdown
----
-title: "User prefers dark mode"
-type: fact
-category: facts
-tags: [preference, ui]
-confidence: 0.95
----
+- **Nostr** (default / primary) — encrypted DMs (NIP-04 + NIP-17 groups coming)  
+- **Telegram** — classic bot  
+- **Email** — IMAP/SMTP  
+- **CLI** — quick local chats
 
-User explicitly stated preference for dark mode UI.
-```
+All channels feed into the same memory & reflection engine.
 
-Memory mutation is deterministic.
-LLMs propose. Python validates and writes.
+### Tools — what the agent can actually do
 
-No hallucinated state. No hidden vectors. No silent corruption.
+| Tool              | What it does                              |
+|-------------------|-------------------------------------------|
+| read_file         | Peek at files in workspace                |
+| write_file        | Create / overwrite files                  |
+| edit_file         | Precise replacements                      |
+| list_dir          | Browse directories                        |
+| exec              | Run safe shell commands                   |
+| web_search        | DuckDuckGo search (no API key needed)     |
+| message           | Reply to you                              |
+| spawn             | Launch sub-agents           |
+| cron              | Schedule recurring jobs                   |
 
----
+Execution is **always** gated by Python — the LLM can only propose.
 
-# 📝 Narrative Journal
+### Self-Improvement — the part that actually matters
 
-HermitCrab automatically generates session summaries.
+HermitCrab gets smarter over time by:
 
-Journal entries:
+- **Distilling** conversations → new facts/tasks/goals/reflections
+- **Reflecting** on patterns → mistakes, contradictions, model misbehavior
+- **Routing** jobs to the right model:
+  - Interactive replies → strong model (Claude, GPT-4o, etc.)
+  - Journal + distillation → cheap local (Llama 3.2 3B, Phi-3-mini)
+  - Reflection → medium model
 
-* Are narrative, not atomic
-* Are appended per session end
-* Use the session end timestamp
-* Include key interactions and tools used
-* Have no authoritative power over memory
+This keeps costs low while letting the agent learn without constant supervision.
 
-Example:
+### Architecture at a glance
 
-```markdown
----
-date: 2026-02-25
-session_keys:
-  - cli:default
-tags: [session]
----
-
-User redesigned memory lifecycle. Identified improvements in provider fallback logic.
-Used tools: read_file, web_search.
-```
-
-The journal helps:
-
-* Humans review progress
-* The agent reflect over time
-* Detect patterns in behavior
-
-It is an aid, not a source of truth.
-
----
-
-# 🪞 Self-Improvement Engine
-
-HermitCrab improves over time through:
-
-### Distillation
-
-Extracts structured knowledge from sessions.
-
-### Reflection
-
-Analyzes:
-
-* Repeated mistakes
-* Failed tool usage
-* Decision inconsistencies
-* Model misrouting
-
-### Model Routing
-
-Different tasks use different models:
-
-```json
-{
-  "agents": {
-    "defaults": {
-      "model": "anthropic/claude-opus-4-5",
-      "job_models": {
-        "interactive_response": "anthropic/claude-opus-4-5",
-        "journal_synthesis": "ollama/llama3.2:3b",
-        "distillation": "ollama/phi-3-mini"
-      }
-    }
-  }
-}
-```
-
-If a job-class model is unavailable, HermitCrab falls back to the default provider.
-
-Result:
-
-* High quality where needed
-* Cheap local processing for background work
-* Predictable behavior
-
----
-
-# 💬 Channels
-
-## Nostr (Primary)
-
-Encrypted DMs via NIP-04.
-
-Decentralized. Censorship-resistant. No central server.
-
-```json
-{
-  "channels": {
-    "nostr": {
-      "enabled": true,
-      "private_key": "nsec1...",
-      "relays": ["wss://relay.damus.io"],
-      "allowedPubkeys": ["USER_PUBKEY"]
-    }
-  }
-}
-```
-
-## Telegram
-
-```json
-{
-  "channels": {
-    "telegram": {
-      "enabled": true,
-      "token": "BOT_TOKEN",
-      "allowFrom": ["USER_ID"]
-    }
-  }
-}
-```
-
-## Email
-
-IMAP + SMTP integration supported.
-
----
-
-# 🛠 Tools
-
-HermitCrab includes:
-
-| Tool         | Description             |
-| ------------ | ----------------------- |
-| `read_file`  | Read workspace files    |
-| `write_file` | Create or modify files  |
-| `edit_file`  | Structured edits        |
-| `list_dir`   | Browse directories      |
-| `exec`       | Run shell commands      |
-| `web_search` | Brave search            |
-| `web_fetch`  | Retrieve page content   |
-| `message`    | Send outbound messages  |
-| `spawn`      | Launch subagents        |
-| `cron`       | Schedule recurring jobs |
-
-Tool execution is controlled by Python.
-LLMs cannot mutate state directly.
-
-Workspace restriction can be enforced via:
-
-```json
-"tools": {
-  "restrict_to_workspace": true
-}
-```
-
----
-
-# 🏠 Fully Offline Mode
-
-Install Ollama:
-
-```bash
-curl -fsSL https://ollama.com/install.sh | sh
-ollama pull llama3.2:3b
-```
-
-Configure:
-
-```json
-{
-  "providers": {
-    "vllm": {
-        "apiKey": "ollama",
-        "apiBase": "http://localhost:11434/v1",
-        "extraHeaders": null
-    },
-  },
-  "agents": {
-    "defaults": {
-      "model": "ollama/llama3.2:3b"
-    }
-  }
-}
-```
-
-HermitCrab now runs entirely on your machine.
-
-Start small models for:
-
-* Journal
-* Distillation
-* Reflection
-
-Use larger models only when necessary.
-
----
-
-# 🏗 Architecture
-
-HermitCrab is **6,891 lines of core agent code**.
-
-You can verify this yourself:
-
-```bash
-./core_agent_lines.sh
-```
-
-Structure:
+Total core agent code: 6,927 lines (run `./core_agent_lines.sh` to verify).
 
 ```
 hermitcrab/
-├── agent/
-├── channels/
-├── providers/
-├── config/
-├── cli/
-└── utils/
+├── agent/         # loop, tools, memory handling
+├── channels/      # Nostr, Telegram, email, CLI
+├── providers/     # LLM abstraction (litellm + fallbacks)
+├── config/        # typed config loading
+├── cli/           # typer-based interface
+└── utils/         # helpers
 ```
 
-Design principles:
+Design rules we live by:
+- Python is the source of truth — LLM is untrusted
+- Memory is deterministic & auditable
+- Local-first by default
+- Small enough to read in a weekend
+- Forkable, hackable, understandable
 
-* Python is authoritative
-* Memory mutation is deterministic
-* External LLMs are optional and untrusted
-* Works on weak hardware
-* No hidden databases
-* No forced cloud dependency
+### Comparison — why this feels different
 
-Readable. Hackable. Forkable.
+| Aspect              | HermitCrab                          | Typical AI Framework / Chatbot      |
+|---------------------|-------------------------------------|-------------------------------------|
+| Core code size      | ~7k lines                           | 50k–300k+ lines                     |
+| Memory              | Atomic Markdown                     | Vector DB or forgotten             |
+| Portability         | Copy workspace → works              | Cloud account locked                |
+| Transparency        | Fully auditable                     | Opaque internals                    |
+| Cost                | Local models cheap                  | API calls add up fast               |
+| Self-improvement    | Built-in distillation & reflection  | Rare or manual                      |
 
----
+### Roadmap (where we're going)
 
-# 📊 Philosophy Comparison
+**Done**
+- Atomic memory system
+- Journal + distillation
+- Reflection basics
+- Nostr integration
+- Local-first deployment
 
-| Feature      | HermitCrab      | Typical Agent Framework |
-| ------------ | --------------- | ----------------------- |
-| Core Code    | 6,891 lines     | 100k+ lines             |
-| Memory       | Atomic markdown | Vector DB               |
-| Portability  | Copy workspace  | Cloud-tied              |
-| Local LLM    | First-class     | Optional                |
-| Transparency | Fully auditable | Opaque                  |
-| Control      | Python governs  | LLM-driven              |
+**In progress**
+- Observability / metrics
+- Full integration tests
 
-HermitCrab favors clarity over complexity.
+**Planned**
+- Journal search
+- Backup & migration helpers
+- Optional health-check endpoint
+- Web chat companion (static HTML + Nostr)
 
----
+### Why I built this
 
-# 🗺 Roadmap
+Most AI tools today are:
+- Tied to someone else’s cloud
+- Forget everything after 4k tokens
+- Impossible to truly understand or audit
+- Expensive to run 24/7
 
-### Completed
+HermitCrab exists to prove a quieter truth:
 
-* Journal system
-* Phase-separated AgentLoop
-* Model routing
-* Distillation
-* Reflection
-* Nostr integration
-* Session timeout
-* Local-first deployment
+A personal AI can be **small**, **local**, **private**, **deterministic**, and still **grow with you** — without turning into a 200k-line monster or a subscription bill.
 
-### In Progress
+Keep it yours. Keep it local. Keep it simple. 🦀
 
-* Observability and structured metrics
-
-### Planned
-
-* Integration tests
-* Journal search
-* Backup utilities
-* Optional health endpoint
-
----
-
-# 🦀 Why HermitCrab Exists
-
-Modern AI tools are:
-
-* Cloud-bound
-* Opaque
-* Ephemeral
-* Hard to audit
-* Expensive to run continuously
-
-HermitCrab exists to prove something simpler:
-
-A personal AI agent can be:
-
-* Local
-* Deterministic
-* Understandable
-* Evolvable
-* Small enough to audit
-
-And still powerful.
-
----
-
-# License
-
-MIT License.
-
-HermitCrab is a fork of nanobot by HKUDS.
-Built with gratitude to the original architecture.
-
----
-
-# Get Started
+### Get started
 
 ```bash
 pip install hermitcrab-ai
@@ -475,6 +194,7 @@ hermitcrab onboard
 hermitcrab gateway
 ```
 
-Build your second brain.
-Keep it local.
-Make it yours. 🦀
+Welcome to your own second brain.  
+Let’s make it remember everything that matters.
+
+
