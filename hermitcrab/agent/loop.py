@@ -36,13 +36,21 @@ from typing import TYPE_CHECKING, Any, Awaitable, Callable
 from loguru import logger
 
 from hermitcrab.agent.context import ContextBuilder
-from hermitcrab.agent.distillation import AtomicCandidate
+from hermitcrab.agent.distillation import AtomicCandidate, CandidateType
 from hermitcrab.agent.journal import JournalStore
 from hermitcrab.agent.memory import MemoryStore
-from hermitcrab.agent.reflection import ReflectionCandidate
+from hermitcrab.agent.reflection import ReflectionCandidate, ReflectionPromoter, ReflectionType
 from hermitcrab.agent.subagent import SubagentManager
 from hermitcrab.agent.tools.cron import CronTool
 from hermitcrab.agent.tools.filesystem import EditFileTool, ListDirTool, ReadFileTool, WriteFileTool
+from hermitcrab.agent.tools.mcp import connect_mcp_servers
+from hermitcrab.agent.tools.memory import (
+    WriteDecisionTool,
+    WriteFactTool,
+    WriteGoalTool,
+    WriteReflectionTool,
+    WriteTaskTool,
+)
 from hermitcrab.agent.tools.message import MessageTool
 from hermitcrab.agent.tools.registry import ToolRegistry
 from hermitcrab.agent.tools.shell import ExecTool
@@ -50,11 +58,12 @@ from hermitcrab.agent.tools.spawn import SpawnTool
 from hermitcrab.agent.tools.web import WebFetchTool, WebSearchTool
 from hermitcrab.bus.events import InboundMessage, OutboundMessage
 from hermitcrab.bus.queue import MessageBus
+from hermitcrab.config.schema import ExecToolConfig
 from hermitcrab.providers.base import LLMProvider
 from hermitcrab.session.manager import Session, SessionManager
 
 if TYPE_CHECKING:
-    from hermitcrab.config.schema import ChannelsConfig, ExecToolConfig
+    from hermitcrab.config.schema import ChannelsConfig
     from hermitcrab.cron.service import CronService
 
 
@@ -122,7 +131,6 @@ class AgentLoop:
         # Optional: reflection promotion config
         reflection_config: dict[str, Any] | None = None,
     ):
-        from hermitcrab.config.schema import ExecToolConfig
         self.bus = bus
         self.channels_config = channels_config
         self.provider = provider
@@ -167,9 +175,6 @@ class AgentLoop:
             exec_config=self.exec_config,
             restrict_to_workspace=restrict_to_workspace,
         )
-
-        # Reflection promoter for bootstrap file updates
-        from hermitcrab.agent.reflection import ReflectionPromoter
 
         if reflection_config:
             self._reflection_promoter = ReflectionPromoter(
@@ -217,14 +222,6 @@ class AgentLoop:
         self.tools.register(MessageTool(send_callback=self.bus.publish_outbound))
         self.tools.register(SpawnTool(manager=self.subagents))
 
-        # Memory tools - typed APIs for saving knowledge
-        from hermitcrab.agent.tools.memory import (
-            WriteDecisionTool,
-            WriteFactTool,
-            WriteGoalTool,
-            WriteReflectionTool,
-            WriteTaskTool,
-        )
         self.tools.register(WriteFactTool(self.memory))
         self.tools.register(WriteDecisionTool(self.memory))
         self.tools.register(WriteGoalTool(self.memory))
@@ -239,7 +236,6 @@ class AgentLoop:
         if self._mcp_connected or self._mcp_connecting or not self._mcp_servers:
             return
         self._mcp_connecting = True
-        from hermitcrab.agent.tools.mcp import connect_mcp_servers
         try:
             self._mcp_stack = AsyncExitStack()
             await self._mcp_stack.__aenter__()
@@ -548,10 +544,6 @@ class AgentLoop:
             session: Session to distill.
         """
         try:
-            from hermitcrab.agent.distillation import (
-                AtomicCandidate,
-            )
-
             messages = session.messages
             if not messages:
                 return  # Empty session, nothing to distill
@@ -598,9 +590,6 @@ class AgentLoop:
                     # TODO: Add JSON schema enforcement when provider supports it
                     # json_schema=DISTILLATION_JSON_SCHEMA,
                 )
-
-                # Parse response (expecting JSON)
-                import json
 
                 content = self._strip_think(response.content)
                 if not content:
@@ -699,8 +688,6 @@ class AgentLoop:
             - This is Tier 0 logic - deterministic, Python-authoritative
         """
         try:
-            from hermitcrab.agent.distillation import CandidateType
-
             params = candidate.to_memory_params()
 
             if candidate.type == CandidateType.FACT:
@@ -839,8 +826,6 @@ class AgentLoop:
         Returns:
             List of reflection candidates.
         """
-        from hermitcrab.agent.reflection import ReflectionCandidate, ReflectionType
-
         reflections: list[ReflectionCandidate] = []
         messages = session.messages
 

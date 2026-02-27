@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import asyncio
 import json
+import time as _time
 import uuid
+from datetime import datetime
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
 from loguru import logger
 
@@ -16,10 +18,8 @@ from hermitcrab.agent.tools.shell import ExecTool
 from hermitcrab.agent.tools.web import WebFetchTool, WebSearchTool
 from hermitcrab.bus.events import InboundMessage
 from hermitcrab.bus.queue import MessageBus
+from hermitcrab.config.schema import ExecToolConfig
 from hermitcrab.providers.base import LLMProvider
-
-if TYPE_CHECKING:
-    from hermitcrab.config.schema import ExecToolConfig
 
 
 class SubagentManager:
@@ -43,7 +43,6 @@ class SubagentManager:
         exec_config: ExecToolConfig | None = None,
         restrict_to_workspace: bool = False,
     ):
-        from hermitcrab.config.schema import ExecToolConfig
         self.provider = provider
         self.workspace = workspace
         self.bus = bus
@@ -222,8 +221,6 @@ Summarize this naturally for the user. Keep it brief (1-2 sentences). Do not men
 
     def _build_subagent_prompt(self, task: str) -> str:
         """Build a focused system prompt for the subagent."""
-        import time as _time
-        from datetime import datetime
         now = datetime.now().strftime("%Y-%m-%d %H:%M (%A)")
         tz = _time.strftime("%Z") or "UTC"
 

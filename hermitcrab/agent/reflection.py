@@ -20,6 +20,7 @@ is about the agent's own behavior and performance.
 from __future__ import annotations
 
 import json
+import shutil
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
@@ -569,9 +570,6 @@ class ReflectionPromoter:
             return  # No archiving needed
 
         # Archive old content
-        import shutil
-        from datetime import datetime
-
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         archive_name = f"{filename}.archived.{timestamp}"
         archive_path = self.workspace / archive_name

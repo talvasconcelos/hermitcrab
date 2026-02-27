@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+import re
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import Enum
@@ -146,7 +147,6 @@ class MemoryStore:
 
     def _slugify(self, text: str) -> str:
         """Convert text to a safe URL-friendly slug."""
-        import re
         text = text.lower().strip()
         text = re.sub(r"[^\w\s-]", "", text)
         text = re.sub(r"[-\s]+", "-", text)

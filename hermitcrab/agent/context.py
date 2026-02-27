@@ -3,6 +3,8 @@
 import base64
 import mimetypes
 import platform
+import time as _time
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -72,9 +74,6 @@ Skills with available="false" need dependencies installed first - you can try in
 
     def _get_identity(self) -> str:
         """Get the core identity section."""
-        import time as _time
-        from datetime import datetime
-
         now = datetime.now().strftime("%Y-%m-%d %H:%M (%A)")
         tz = _time.strftime("%Z") or "UTC"
         workspace_path = str(self.workspace.expanduser().resolve())
