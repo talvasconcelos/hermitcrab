@@ -1,10 +1,12 @@
 """Subagent manager for background task execution."""
 
+from __future__ import annotations
+
 import asyncio
 import json
 import uuid
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from loguru import logger
 
@@ -16,11 +18,14 @@ from hermitcrab.bus.events import InboundMessage
 from hermitcrab.bus.queue import MessageBus
 from hermitcrab.providers.base import LLMProvider
 
+if TYPE_CHECKING:
+    from hermitcrab.config.schema import ExecToolConfig
+
 
 class SubagentManager:
     """
     Manages background subagent execution.
-    
+
     Subagents are lightweight agent instances that run in the background
     to handle specific tasks. They share the same LLM provider but have
     isolated context and a focused system prompt.
@@ -35,7 +40,7 @@ class SubagentManager:
         temperature: float = 0.7,
         max_tokens: int = 4096,
         brave_api_key: str | None = None,
-        exec_config: "ExecToolConfig | None" = None,
+        exec_config: ExecToolConfig | None = None,
         restrict_to_workspace: bool = False,
     ):
         from hermitcrab.config.schema import ExecToolConfig
@@ -59,13 +64,13 @@ class SubagentManager:
     ) -> str:
         """
         Spawn a subagent to execute a task in the background.
-        
+
         Args:
             task: The task description for the subagent.
             label: Optional human-readable label for the task.
             origin_channel: The channel to announce results to.
             origin_chat_id: The chat ID to announce results to.
-        
+
         Returns:
             Status message indicating the subagent was started.
         """

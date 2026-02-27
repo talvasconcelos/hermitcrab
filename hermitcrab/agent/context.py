@@ -136,6 +136,7 @@ Reply directly with text for conversations. Only use the 'message' tool to send 
         media: list[str] | None = None,
         channel: str | None = None,
         chat_id: str | None = None,
+        max_history: int | None = None,
     ) -> list[dict[str, Any]]:
         """
         Build the complete message list for an LLM call.
@@ -147,6 +148,7 @@ Reply directly with text for conversations. Only use the 'message' tool to send 
             media: Optional list of local file paths for images/media.
             channel: Current channel (telegram, feishu, etc.).
             chat_id: Current chat/user ID.
+            max_history: Maximum number of history messages to include (default: all).
 
         Returns:
             List of messages including system prompt.
@@ -160,7 +162,10 @@ Reply directly with text for conversations. Only use the 'message' tool to send 
         messages.append({"role": "system", "content": system_prompt})
 
         # History (last N messages, for conversation context and to limit token usage)
-        messages.extend(history[-5:])
+        if max_history is not None:
+            messages.extend(history[-max_history:])
+        else:
+            messages.extend(history)
 
         # Current message (with optional image attachments)
         user_content = self._build_user_content(current_message, media)

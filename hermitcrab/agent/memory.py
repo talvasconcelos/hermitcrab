@@ -278,8 +278,27 @@ class MemoryStore:
             logger.error("Failed to read memory file {}: {}", file_path, e)
             return None
 
-    def _write_file(self, item: MemoryItem) -> Path:
-        """Write a memory item to file."""
+    def _write_file(self, item: MemoryItem, overwrite: bool = False) -> Path:
+        """Write a memory item to file.
+
+        Args:
+            item: Memory item to write.
+            overwrite: If True and item has existing file path, overwrite it directly.
+
+        Returns:
+            Path to written file.
+        """
+        # If overwriting and item has existing file path, use it directly
+        if overwrite and item.metadata.get("_file_path"):
+            file_path = Path(item.metadata["_file_path"])
+            if file_path.exists():
+                # Write the file
+                post = item.to_frontmatter()
+                file_path.write_text(frontmatter.dumps(post), encoding="utf-8")
+
+                logger.info("Overwrote memory item: {}:{} -> {}", item.category.value, item.id, file_path)
+                return file_path
+
         # Generate unique filename with timestamp, UUID, category, and slug
         filename = self._generate_filename(item.title, item.category, item.created_at)
         file_path = self.category_dirs[item.category] / filename
@@ -599,7 +618,9 @@ class MemoryStore:
         if not category_path.exists():
             return results
 
-        for file_path in category_path.glob("*.md"):
+        # Collect all items first, then sort deterministically by updated_at (newest first)
+        all_items: list[MemoryItem] = []
+        for file_path in sorted(category_path.glob("*.md")):  # Sort paths for deterministic iteration
             item = self._read_file(file_path)
             if item is None:
                 continue
@@ -614,9 +635,23 @@ class MemoryStore:
                 if query_lower not in item.title.lower() and query_lower not in item.content.lower():
                     continue
 
-            results.append(item)
+            all_items.append(item)
 
-        return results
+        # Sort by updated_at descending (newest first) for deterministic ordering
+        all_items.sort(key=lambda x: x.updated_at, reverse=True)
+
+        # If searching by ID, assert uniqueness and return single item
+        if id:
+            matching = [item for item in all_items if item.id == id]
+            if len(matching) > 1:
+                logger.warning(
+                    "Duplicate IDs detected for '{}': {} items found. Returning newest.",
+                    id,
+                    len(matching),
+                )
+            return matching[:1] if matching else []
+
+        return all_items
 
     def search_memory(
         self,
@@ -778,7 +813,7 @@ class MemoryStore:
                 new_status = metadata_updates["status"]
                 logger.info("Task {} status changed: {} -> {}", id, old_status, new_status)
 
-        self._write_file(item)
+        self._write_file(item, overwrite=True)
         logger.info("Updated memory item: {}:{} ", category.value, id)
 
         return item
