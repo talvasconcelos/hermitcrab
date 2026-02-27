@@ -37,6 +37,11 @@ class MessageTool(Tool):
         self._sent_in_turn = False
 
     @property
+    def has_sent_in_turn(self) -> bool:
+        """Check if a message was sent in the current turn."""
+        return self._sent_in_turn
+
+    @property
     def name(self) -> str:
         return "message"
 

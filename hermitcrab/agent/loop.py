@@ -36,13 +36,21 @@ from typing import TYPE_CHECKING, Any, Awaitable, Callable
 from loguru import logger
 
 from hermitcrab.agent.context import ContextBuilder
-from hermitcrab.agent.distillation import AtomicCandidate
+from hermitcrab.agent.distillation import AtomicCandidate, CandidateType
 from hermitcrab.agent.journal import JournalStore
 from hermitcrab.agent.memory import MemoryStore
-from hermitcrab.agent.reflection import ReflectionCandidate
+from hermitcrab.agent.reflection import ReflectionCandidate, ReflectionPromoter, ReflectionType
 from hermitcrab.agent.subagent import SubagentManager
 from hermitcrab.agent.tools.cron import CronTool
 from hermitcrab.agent.tools.filesystem import EditFileTool, ListDirTool, ReadFileTool, WriteFileTool
+from hermitcrab.agent.tools.mcp import connect_mcp_servers
+from hermitcrab.agent.tools.memory import (
+    WriteDecisionTool,
+    WriteFactTool,
+    WriteGoalTool,
+    WriteReflectionTool,
+    WriteTaskTool,
+)
 from hermitcrab.agent.tools.message import MessageTool
 from hermitcrab.agent.tools.registry import ToolRegistry
 from hermitcrab.agent.tools.shell import ExecTool
@@ -50,11 +58,12 @@ from hermitcrab.agent.tools.spawn import SpawnTool
 from hermitcrab.agent.tools.web import WebFetchTool, WebSearchTool
 from hermitcrab.bus.events import InboundMessage, OutboundMessage
 from hermitcrab.bus.queue import MessageBus
+from hermitcrab.config.schema import ExecToolConfig
 from hermitcrab.providers.base import LLMProvider
 from hermitcrab.session.manager import Session, SessionManager
 
 if TYPE_CHECKING:
-    from hermitcrab.config.schema import ChannelsConfig, ExecToolConfig
+    from hermitcrab.config.schema import ChannelsConfig
     from hermitcrab.cron.service import CronService
 
 
@@ -122,7 +131,6 @@ class AgentLoop:
         # Optional: reflection promotion config
         reflection_config: dict[str, Any] | None = None,
     ):
-        from hermitcrab.config.schema import ExecToolConfig
         self.bus = bus
         self.channels_config = channels_config
         self.provider = provider
@@ -167,9 +175,6 @@ class AgentLoop:
             exec_config=self.exec_config,
             restrict_to_workspace=restrict_to_workspace,
         )
-
-        # Reflection promoter for bootstrap file updates
-        from hermitcrab.agent.reflection import ReflectionPromoter
 
         if reflection_config:
             self._reflection_promoter = ReflectionPromoter(
@@ -217,14 +222,6 @@ class AgentLoop:
         self.tools.register(MessageTool(send_callback=self.bus.publish_outbound))
         self.tools.register(SpawnTool(manager=self.subagents))
 
-        # Memory tools - typed APIs for saving knowledge
-        from hermitcrab.agent.tools.memory import (
-            WriteDecisionTool,
-            WriteFactTool,
-            WriteGoalTool,
-            WriteReflectionTool,
-            WriteTaskTool,
-        )
         self.tools.register(WriteFactTool(self.memory))
         self.tools.register(WriteDecisionTool(self.memory))
         self.tools.register(WriteGoalTool(self.memory))
@@ -239,7 +236,6 @@ class AgentLoop:
         if self._mcp_connected or self._mcp_connecting or not self._mcp_servers:
             return
         self._mcp_connecting = True
-        from hermitcrab.agent.tools.mcp import connect_mcp_servers
         try:
             self._mcp_stack = AsyncExitStack()
             await self._mcp_stack.__aenter__()
@@ -379,6 +375,7 @@ class AgentLoop:
         self,
         session: Session,
         reason: str = "explicit",
+        messages_snapshot: list[dict] | None = None,
     ) -> None:
         """
         Handle session end (explicit reset or timeout).
@@ -394,16 +391,20 @@ class AgentLoop:
         Args:
             session: The session that ended.
             reason: "explicit" (user reset) or "timeout" (inactivity).
+            messages_snapshot: Optional immutable copy of session messages for background tasks.
         """
         logger.info("Session ended ({}): {}", reason, session.key)
 
         # Clean up timer
         self._session_timers.pop(session.key, None)
 
+        # Use snapshot if provided (for explicit reset before clear), otherwise use session
+        messages_for_background = messages_snapshot if messages_snapshot is not None else list(session.messages)
+
         # Phase E: Deferred journal synthesis (non-blocking)
         # Journal is narrative, lossy, non-authoritative
         self._schedule_background(
-            self._synthesize_journal(session),
+            self._synthesize_journal_from_messages(messages_for_background, session.key),
             f"journal:{session.key}",
         )
 
@@ -412,7 +413,7 @@ class AgentLoop:
         distillation_model = self._get_model_for_job(JobClass.DISTILLATION)
         if distillation_model:
             self._schedule_background(
-                self._distill_session(session),
+                self._distill_session_from_messages(messages_for_background, session.key),
                 f"distill:{session.key}",
             )
         else:
@@ -422,7 +423,7 @@ class AgentLoop:
         reflection_model = self._get_model_for_job(JobClass.REFLECTION)
         if reflection_model:
             self._schedule_background(
-                self._reflect_on_session(session),
+                self._reflect_on_session_from_messages(messages_for_background, session.key),
                 f"reflect:{session.key}",
             )
 
@@ -506,6 +507,29 @@ class AgentLoop:
             # Journal failures never block agent operation
             logger.warning("Journal synthesis failed (non-fatal): {}: {}", session.key, e)
 
+    async def _synthesize_journal_from_messages(
+        self,
+        messages: list[dict],
+        session_key: str,
+    ) -> None:
+        """
+        Synthesize journal from message list (for use with session snapshots).
+
+        Wrapper around _synthesize_journal that works with a message list instead of Session.
+
+        Args:
+            messages: List of session messages.
+            session_key: Session identifier.
+        """
+        # Create minimal session-like object
+        class _SessionSnapshot:
+            def __init__(self, messages: list[dict], key: str):
+                self.messages = messages
+                self.key = key
+
+        snapshot = _SessionSnapshot(messages, session_key)
+        await self._synthesize_journal(snapshot)
+
     async def _distill_session(self, session: Session) -> None:
         """
         Extract atomic candidates from session (fact, task, goal, decision, reflection).
@@ -520,10 +544,6 @@ class AgentLoop:
             session: Session to distill.
         """
         try:
-            from hermitcrab.agent.distillation import (
-                AtomicCandidate,
-            )
-
             messages = session.messages
             if not messages:
                 return  # Empty session, nothing to distill
@@ -570,9 +590,6 @@ class AgentLoop:
                     # TODO: Add JSON schema enforcement when provider supports it
                     # json_schema=DISTILLATION_JSON_SCHEMA,
                 )
-
-                # Parse response (expecting JSON)
-                import json
 
                 content = self._strip_think(response.content)
                 if not content:
@@ -633,6 +650,28 @@ class AgentLoop:
             # Distillation failures never block agent operation
             logger.warning("Distillation failed (non-fatal): {}: {}", session.key, e)
 
+    async def _distill_session_from_messages(
+        self,
+        messages: list[dict],
+        session_key: str,
+    ) -> None:
+        """
+        Distill session from message list (for use with session snapshots).
+
+        Wrapper around _distill_session that works with a message list instead of Session.
+
+        Args:
+            messages: List of session messages.
+            session_key: Session identifier.
+        """
+        class _SessionSnapshot:
+            def __init__(self, messages: list[dict], key: str):
+                self.messages = messages
+                self.key = key
+
+        snapshot = _SessionSnapshot(messages, session_key)
+        await self._distill_session(snapshot)
+
     def _commit_candidate_to_memory(self, candidate: AtomicCandidate) -> None:
         """
         Commit a validated candidate to memory (Tier 0 operation).
@@ -649,8 +688,6 @@ class AgentLoop:
             - This is Tier 0 logic - deterministic, Python-authoritative
         """
         try:
-            from hermitcrab.agent.distillation import CandidateType
-
             params = candidate.to_memory_params()
 
             if candidate.type == CandidateType.FACT:
@@ -747,6 +784,28 @@ class AgentLoop:
             # Reflection failures never block agent operation
             logger.warning("Reflection failed (non-fatal): {}: {}", session.key, e)
 
+    async def _reflect_on_session_from_messages(
+        self,
+        messages: list[dict],
+        session_key: str,
+    ) -> None:
+        """
+        Reflect on session from message list (for use with session snapshots).
+
+        Wrapper around _reflect_on_session that works with a message list instead of Session.
+
+        Args:
+            messages: List of session messages.
+            session_key: Session identifier.
+        """
+        class _SessionSnapshot:
+            def __init__(self, messages: list[dict], key: str):
+                self.messages = messages
+                self.key = key
+
+        snapshot = _SessionSnapshot(messages, session_key)
+        await self._reflect_on_session(snapshot)
+
     async def _analyze_session_for_reflections(
         self,
         session: Session,
@@ -767,8 +826,6 @@ class AgentLoop:
         Returns:
             List of reflection candidates.
         """
-        from hermitcrab.agent.reflection import ReflectionCandidate, ReflectionType
-
         reflections: list[ReflectionCandidate] = []
         messages = session.messages
 
@@ -1186,8 +1243,9 @@ class AgentLoop:
         # Slash commands
         cmd = msg.content.strip().lower()
         if cmd == "/new":
-            # Explicit session end - trigger journal before clearing
-            await self._on_session_end(session, reason="explicit")
+            # Explicit session end - pass snapshot before clearing to preserve data for background tasks
+            messages_snapshot = list(session.messages)
+            await self._on_session_end(session, reason="explicit", messages_snapshot=messages_snapshot)
 
             session.clear()
             self.sessions.save(session)
@@ -1272,7 +1330,7 @@ class AgentLoop:
         # This is intentional: journal is narrative, not authoritative.
 
         if message_tool := self.tools.get("message"):
-            if isinstance(message_tool, MessageTool) and message_tool._sent_in_turn:
+            if isinstance(message_tool, MessageTool) and message_tool.has_sent_in_turn:
                 return None
 
         return OutboundMessage(

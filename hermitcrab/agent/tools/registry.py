@@ -8,7 +8,7 @@ from hermitcrab.agent.tools.base import Tool
 class ToolRegistry:
     """
     Registry for agent tools.
-    
+
     Allows dynamic registration and execution of tools.
     """
 
@@ -37,7 +37,7 @@ class ToolRegistry:
 
     async def execute(self, name: str, params: dict[str, Any]) -> str:
         """Execute a tool by name with given parameters."""
-        _HINT = "\n\n[Analyze the error above and try a different approach.]"
+        _HINT = "\n\n[Analyze the error above and try a different approach.]"  # noqa: N806
 
         tool = self._tools.get(name)
         if not tool:

@@ -1,8 +1,12 @@
 """Subagent manager for background task execution."""
 
+from __future__ import annotations
+
 import asyncio
 import json
+import time as _time
 import uuid
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -14,13 +18,14 @@ from hermitcrab.agent.tools.shell import ExecTool
 from hermitcrab.agent.tools.web import WebFetchTool, WebSearchTool
 from hermitcrab.bus.events import InboundMessage
 from hermitcrab.bus.queue import MessageBus
+from hermitcrab.config.schema import ExecToolConfig
 from hermitcrab.providers.base import LLMProvider
 
 
 class SubagentManager:
     """
     Manages background subagent execution.
-    
+
     Subagents are lightweight agent instances that run in the background
     to handle specific tasks. They share the same LLM provider but have
     isolated context and a focused system prompt.
@@ -35,10 +40,9 @@ class SubagentManager:
         temperature: float = 0.7,
         max_tokens: int = 4096,
         brave_api_key: str | None = None,
-        exec_config: "ExecToolConfig | None" = None,
+        exec_config: ExecToolConfig | None = None,
         restrict_to_workspace: bool = False,
     ):
-        from hermitcrab.config.schema import ExecToolConfig
         self.provider = provider
         self.workspace = workspace
         self.bus = bus
@@ -59,13 +63,13 @@ class SubagentManager:
     ) -> str:
         """
         Spawn a subagent to execute a task in the background.
-        
+
         Args:
             task: The task description for the subagent.
             label: Optional human-readable label for the task.
             origin_channel: The channel to announce results to.
             origin_chat_id: The chat ID to announce results to.
-        
+
         Returns:
             Status message indicating the subagent was started.
         """
@@ -217,8 +221,6 @@ Summarize this naturally for the user. Keep it brief (1-2 sentences). Do not men
 
     def _build_subagent_prompt(self, task: str) -> str:
         """Build a focused system prompt for the subagent."""
-        import time as _time
-        from datetime import datetime
         now = datetime.now().strftime("%Y-%m-%d %H:%M (%A)")
         tz = _time.strftime("%Z") or "UTC"
 

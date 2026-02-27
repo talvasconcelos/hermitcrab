@@ -92,10 +92,10 @@ class SessionManager:
     def get_or_create(self, key: str) -> Session:
         """
         Get an existing session or create a new one.
-        
+
         Args:
             key: Session key (usually channel:chat_id).
-        
+
         Returns:
             The session.
         """
@@ -178,7 +178,7 @@ class SessionManager:
     def list_sessions(self) -> list[dict[str, Any]]:
         """
         List all sessions.
-        
+
         Returns:
             List of session info dicts.
         """
