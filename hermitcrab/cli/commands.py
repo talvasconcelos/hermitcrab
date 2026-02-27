@@ -366,6 +366,12 @@ def gateway(
         mcp_servers=config.tools.mcp_servers,
         channels_config=config.channels,
         job_models=job_models,  # Pass job models (or None for defaults)
+        reflection_config={
+            "auto_promote": config.reflection.promotion.auto_promote,
+            "target_files": config.reflection.promotion.target_files,
+            "max_file_lines": config.reflection.promotion.max_file_lines,
+            "notify_user": config.reflection.promotion.notify_user,
+        },
     )
 
     # Set cron callback (needs agent)
@@ -652,6 +658,12 @@ def agent(
         mcp_servers=config.tools.mcp_servers,
         channels_config=config.channels,
         job_models=job_models,  # Pass job models (or None for defaults)
+        reflection_config={
+            "auto_promote": config.reflection.promotion.auto_promote,
+            "target_files": config.reflection.promotion.target_files,
+            "max_file_lines": config.reflection.promotion.max_file_lines,
+            "notify_user": config.reflection.promotion.notify_user,
+        },
     )
 
     # Show spinner when logs are off (no output to miss); skip when logs are on
@@ -1158,6 +1170,12 @@ def cron_run(
         mcp_servers=config.tools.mcp_servers,
         channels_config=config.channels,
         job_models=job_models,  # Pass job models (or None for defaults)
+        reflection_config={
+            "auto_promote": config.reflection.promotion.auto_promote,
+            "target_files": config.reflection.promotion.target_files,
+            "max_file_lines": config.reflection.promotion.max_file_lines,
+            "notify_user": config.reflection.promotion.notify_user,
+        },
     )
 
     store_path = get_data_dir() / "cron" / "jobs.json"

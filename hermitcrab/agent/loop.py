@@ -31,7 +31,7 @@ from contextlib import AsyncExitStack
 from datetime import datetime, timezone
 from enum import Enum
 from pathlib import Path
-from typing import TYPE_CHECKING, Awaitable, Callable
+from typing import TYPE_CHECKING, Any, Awaitable, Callable
 
 from loguru import logger
 
@@ -119,6 +119,8 @@ class AgentLoop:
         channels_config: ChannelsConfig | None = None,
         # Optional: override job models (usually loaded from config)
         job_models: dict[JobClass, str | None] | None = None,
+        # Optional: reflection promotion config
+        reflection_config: dict[str, Any] | None = None,
     ):
         from hermitcrab.config.schema import ExecToolConfig
         self.bus = bus
@@ -165,6 +167,29 @@ class AgentLoop:
             exec_config=self.exec_config,
             restrict_to_workspace=restrict_to_workspace,
         )
+
+        # Reflection promoter for bootstrap file updates
+        from hermitcrab.agent.reflection import ReflectionPromoter
+
+        if reflection_config:
+            self._reflection_promoter = ReflectionPromoter(
+                workspace=workspace,
+                provider=provider,
+                model=self._get_model_for_job(JobClass.REFLECTION) or self.model,
+                target_files=reflection_config.get("target_files"),
+                max_file_lines=reflection_config.get("max_file_lines", 500),
+            )
+            self._reflection_auto_promote = reflection_config.get("auto_promote", True)
+            self._reflection_notify = reflection_config.get("notify_user", True)
+        else:
+            # Default promoter with no auto-promotion
+            self._reflection_promoter = ReflectionPromoter(
+                workspace=workspace,
+                provider=provider,
+                model=self._get_model_for_job(JobClass.REFLECTION) or self.model,
+            )
+            self._reflection_auto_promote = False
+            self._reflection_notify = True
 
         self._running = False
         self._mcp_servers = mcp_servers or {}
@@ -669,6 +694,7 @@ class AgentLoop:
         - Never mutates memory directly (proposes reflections)
         - Used to improve future behavior
         - Local preferred, external optional
+        - Promotes reflections to bootstrap file updates (if enabled)
 
         Args:
             session: Session to reflect on.
@@ -709,6 +735,13 @@ class AgentLoop:
                     committed,
                     session.key,
                 )
+
+                # Promote reflections to bootstrap file updates (if enabled)
+                if self._reflection_auto_promote:
+                    self._schedule_background(
+                        self._promote_reflections_to_bootstrap(reflections),
+                        f"promote:{session.key}",
+                    )
 
         except Exception as e:
             # Reflection failures never block agent operation
@@ -893,6 +926,64 @@ class AgentLoop:
                 reflection.title,
                 e,
             )
+
+    async def _promote_reflections_to_bootstrap(
+        self,
+        reflections: list[ReflectionCandidate],
+    ) -> dict[str, list[str]]:
+        """
+        Promote reflections to bootstrap file updates.
+
+        This is the self-improvement mechanism:
+        1. Analyze reflections for patterns
+        2. Generate bootstrap edit proposals via LLM
+        3. Apply edits to AGENTS.md, SOUL.md, IDENTITY.md, TOOLS.md
+        4. Notify user of changes (if enabled)
+
+        Args:
+            reflections: List of reflection candidates to promote.
+
+        Returns:
+            Dict mapping filename to list of applied edits.
+        """
+        try:
+            # Create notification callback
+            async def notify_user(message: str) -> None:
+                """Send notification to user via message tool."""
+                if not self._reflection_notify:
+                    return
+
+                # Try to send via message tool if available
+                message_tool = self.tools.get("message")
+                if message_tool and hasattr(message_tool, "set_context"):
+                    # Use last known channel context
+                    # TODO: Track channel context per session
+                    logger.info("🧠 Self-Improvement: {}", message)
+                else:
+                    logger.info("🧠 Self-Improvement: {}", message)
+
+            # Run promotion pipeline
+            applied_edits = await self._reflection_promoter.promote_reflections(
+                reflections=reflections,
+                notify_callback=notify_user if self._reflection_notify else None,
+            )
+
+            if applied_edits:
+                logger.info(
+                    "Bootstrap promotion complete: {} files updated",
+                    len(applied_edits),
+                )
+                for filename, edits in applied_edits.items():
+                    logger.info("  - {}: {} edit(s)", filename, len(edits))
+            else:
+                logger.debug("No bootstrap edits applied from {} reflections", len(reflections))
+
+            return applied_edits
+
+        except Exception as e:
+            # Bootstrap promotion failures never block agent operation
+            logger.warning("Bootstrap promotion failed (non-fatal): {}", e)
+            return {}
 
     async def _run_agent_loop(
         self,
