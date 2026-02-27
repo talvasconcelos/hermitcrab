@@ -1,44 +1,30 @@
 # User Profile
 
-Information about the user to help personalize interactions.
-
 ## Basic Information
 
-- **Name**: (your name)
-- **Timezone**: (your timezone, e.g., UTC+8)
-- **Language**: (preferred language)
+- **Name**: 
+- **Timezone**: 
+- **Language**: 
 
 ## Preferences
 
-### Communication Style
+### Communication
 
-- [ ] Casual
-- [ ] Professional
-- [ ] Technical
-
-### Response Length
-
-- [ ] Brief and concise
-- [ ] Detailed explanations
-- [ ] Adaptive based on question
+- [ ] Casual  [ ] Professional  [ ] Technical
+- [ ] Brief   [ ] Detailed      [ ] Adaptive
 
 ### Technical Level
 
-- [ ] Beginner
-- [ ] Intermediate
-- [ ] Expert
+- [ ] Beginner  [ ] Intermediate  [ ] Expert
 
 ## Work Context
 
-- **Primary Role**: (your role, e.g., developer, researcher)
-- **Main Projects**: (what you're working on)
-- **Tools You Use**: (IDEs, languages, frameworks)
+- **Role**: 
+- **Projects**: 
+- **Tools/Stack**: 
 
 ## Topics of Interest
 
-- 
-- 
-- 
 
 ## Special Instructions
 
@@ -46,4 +32,4 @@ Information about the user to help personalize interactions.
 
 ---
 
-*Edit this file to customize hermitcrab's behavior for your needs.*
+*Edit this file to personalize interactions. The agent reads this on every session.*
