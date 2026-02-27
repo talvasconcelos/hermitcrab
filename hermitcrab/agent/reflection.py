@@ -22,7 +22,7 @@ from __future__ import annotations
 import json
 import shutil
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 from enum import Enum
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Awaitable, Callable
@@ -147,7 +147,7 @@ class ReflectionCandidate:
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "ReflectionCandidate":
         """Create from dictionary (JSON deserialization)."""
-        created_at = datetime.now()
+        created_at = datetime.now(timezone.utc)
         if data.get("created_at"):
             try:
                 created_at = datetime.fromisoformat(data["created_at"])
@@ -570,7 +570,7 @@ class ReflectionPromoter:
             return  # No archiving needed
 
         # Archive old content
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
         archive_name = f"{filename}.archived.{timestamp}"
         archive_path = self.workspace / archive_name
 
