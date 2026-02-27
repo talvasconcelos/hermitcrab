@@ -1,16 +1,14 @@
 # Heartbeat Tasks
 
-This file is checked every 30 minutes by your hermitcrab agent.
-Add tasks below that you want the agent to work on periodically.
+Checked every 30 minutes by the heartbeat service.
 
-If this file has no tasks (only headers and comments), the agent will skip the heartbeat.
+**Usage:** Add tasks under "Active Tasks" that you want the agent to work on periodically. If this file has no tasks (only headers/comments), the agent skips the heartbeat check.
 
 ## Active Tasks
 
-<!-- Add your periodic tasks below this line -->
+<!-- Add periodic tasks below this line -->
 
 
 ## Completed
 
 <!-- Move completed tasks here or delete them -->
-
