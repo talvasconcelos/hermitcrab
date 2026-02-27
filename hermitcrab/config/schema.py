@@ -213,6 +213,28 @@ class HeartbeatConfig(Base):
     interval_s: int = 30 * 60  # 30 minutes
 
 
+class ReflectionPromotionConfig(Base):
+    """
+    Reflection promotion to bootstrap files configuration.
+
+    Controls how reflections are automatically promoted to update
+    AGENTS.md, SOUL.md, IDENTITY.md, and TOOLS.md files.
+    """
+
+    auto_promote: bool = True  # Auto-update bootstrap files from reflections
+    target_files: list[str] = Field(
+        default_factory=lambda: ["AGENTS.md", "SOUL.md", "IDENTITY.md", "TOOLS.md"]
+    )  # Which bootstrap files to update
+    max_file_lines: int = 500  # Archive old sections if file exceeds this limit
+    notify_user: bool = True  # Inform user when bootstrap files are updated
+
+
+class ReflectionConfig(Base):
+    """Reflection system configuration."""
+
+    promotion: ReflectionPromotionConfig = Field(default_factory=ReflectionPromotionConfig)
+
+
 class GatewayConfig(Base):
     """Gateway/server configuration."""
 
@@ -268,6 +290,7 @@ class Config(BaseSettings):
     providers: ProvidersConfig = Field(default_factory=ProvidersConfig)
     gateway: GatewayConfig = Field(default_factory=GatewayConfig)
     tools: ToolsConfig = Field(default_factory=ToolsConfig)
+    reflection: ReflectionConfig = Field(default_factory=ReflectionConfig)
 
     @property
     def workspace_path(self) -> Path:
