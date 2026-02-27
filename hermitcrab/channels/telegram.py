@@ -102,7 +102,7 @@ def _split_message(content: str, max_len: int = 4000) -> list[str]:
 class TelegramChannel(BaseChannel):
     """
     Telegram channel using long polling.
-    
+
     Simple and reliable - no webhook/public IP needed.
     """
 

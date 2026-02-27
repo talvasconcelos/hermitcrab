@@ -19,8 +19,10 @@ is about the agent's own behavior and performance.
 
 from __future__ import annotations
 
+import json
+import shutil
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 from enum import Enum
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Awaitable, Callable
@@ -145,7 +147,7 @@ class ReflectionCandidate:
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "ReflectionCandidate":
         """Create from dictionary (JSON deserialization)."""
-        created_at = datetime.now()
+        created_at = datetime.now(timezone.utc)
         if data.get("created_at"):
             try:
                 created_at = datetime.fromisoformat(data["created_at"])
@@ -463,7 +465,6 @@ class ReflectionPromoter:
             lines = existing_content.split("\n")
             new_lines = []
             in_section = False
-            section_content_started = False
 
             for i, line in enumerate(lines):
                 # Check if we're entering the target section
@@ -482,10 +483,6 @@ class ReflectionPromoter:
 
                 new_lines.append(line)
 
-                # Mark that we've seen content in this section
-                if in_section and line.strip() and not line.startswith("#"):
-                    section_content_started = True
-
             # If we were still in section at EOF, append at end
             if in_section:
                 new_lines.append("")
@@ -498,7 +495,7 @@ class ReflectionPromoter:
             separator = "\n\n" if existing_content else ""
             return f"{existing_content}{separator}{section}\n\n{content}\n"
 
-    def _smart_insert(
+    async def _smart_insert(
         self,
         filename: str,
         section: str,
@@ -540,7 +537,7 @@ class ReflectionPromoter:
         )
 
         try:
-            response = self.provider.chat(
+            response = await self.provider.chat(
                 messages=[{"role": "user", "content": prompt}],
                 model=self.model,
                 temperature=0.1,
@@ -573,10 +570,7 @@ class ReflectionPromoter:
             return  # No archiving needed
 
         # Archive old content
-        import shutil
-        from datetime import datetime
-
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
         archive_name = f"{filename}.archived.{timestamp}"
         archive_path = self.workspace / archive_name
 
@@ -643,8 +637,6 @@ class ReflectionPromoter:
             )
 
             # Parse JSON response
-            import json
-
             content = response.content
             if not content:
                 return []
@@ -726,7 +718,7 @@ class ReflectionPromoter:
         for proposal in proposals:
             try:
                 if use_smart_insert:
-                    updated_content = self._smart_insert(
+                    updated_content = await self._smart_insert(
                         filename=proposal.target_file,
                         section=proposal.section,
                         content=proposal.content,

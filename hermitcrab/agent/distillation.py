@@ -17,7 +17,7 @@ Candidate Types:
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 from enum import Enum
 from typing import Any
 
@@ -217,7 +217,7 @@ class AtomicCandidate:
         if data.get("decision_status"):
             decision_status = DecisionStatus(data["decision_status"])
 
-        created_at = datetime.now()
+        created_at = datetime.now(timezone.utc)
         if data.get("created_at"):
             try:
                 created_at = datetime.fromisoformat(data["created_at"])

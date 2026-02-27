@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+import re
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import Enum
@@ -146,7 +147,6 @@ class MemoryStore:
 
     def _slugify(self, text: str) -> str:
         """Convert text to a safe URL-friendly slug."""
-        import re
         text = text.lower().strip()
         text = re.sub(r"[^\w\s-]", "", text)
         text = re.sub(r"[-\s]+", "-", text)
@@ -190,70 +190,14 @@ class MemoryStore:
 
         category = MemoryCategory(category_str)
 
-        # Validate required fields per category
-        required_field_names = ["id", "created_at", "type"]
-        for field_name in required_field_names:
-            if field_name not in meta:
-                raise ValueError(f"Missing required field '{field_name}' in {category.value} memory")
-
-        # Category-specific required fields
-        if category == MemoryCategory.DECISIONS:
-            if "status" not in meta:
-                raise ValueError("Missing required field 'status' in decision memory")
-        elif category == MemoryCategory.GOALS:
-            if "status" not in meta:
-                raise ValueError("Missing required field 'status' in goal memory")
-        elif category == MemoryCategory.TASKS:
-            if "status" not in meta:
-                raise ValueError("Missing required field 'status' in task memory")
-            if "assignee" not in meta or not meta.get("assignee"):
-                raise ValueError("Missing required field 'assignee' in task memory")
+        # Validate required fields
+        self._validate_required_fields(meta, category)
 
         # Parse timestamps
-        created_str = meta.get("created_at", datetime.now().isoformat())
-        updated_str = meta.get("updated_at", created_str)
-
-        try:
-            created_at = datetime.strptime(created_str[:19], "%Y-%m-%dT%H-%M-%S")
-        except (ValueError, TypeError):
-            created_at = datetime.now()
-
-        try:
-            updated_at = datetime.strptime(updated_str[:19], "%Y-%m-%dT%H-%M-%S")
-        except (ValueError, TypeError):
-            updated_at = created_at
+        created_at, updated_at = self._parse_timestamps(meta)
 
         # Extract category-specific metadata
-        extra_meta: dict[str, Any] = {"_file_path": str(file_path)}
-        if category == MemoryCategory.TASKS:
-            extra_meta["status"] = meta.get("status", TaskStatus.OPEN.value)
-            extra_meta["assignee"] = meta.get("assignee", "")
-            if "deadline" in meta:
-                extra_meta["deadline"] = meta["deadline"]
-            if "priority" in meta:
-                extra_meta["priority"] = meta["priority"]
-            if "related_goal" in meta:
-                extra_meta["related_goal"] = meta["related_goal"]
-        elif category == MemoryCategory.GOALS:
-            extra_meta["status"] = meta.get("status", "active")
-            if "priority" in meta:
-                extra_meta["priority"] = meta["priority"]
-            if "horizon" in meta:
-                extra_meta["horizon"] = meta["horizon"]
-        elif category == MemoryCategory.FACTS:
-            if "source" in meta:
-                extra_meta["source"] = meta["source"]
-        elif category == MemoryCategory.DECISIONS:
-            extra_meta["status"] = meta.get("status", "active")
-            if "supersedes" in meta:
-                extra_meta["supersedes"] = meta["supersedes"]
-            if "rationale" in meta:
-                extra_meta["rationale"] = meta["rationale"]
-            if "scope" in meta:
-                extra_meta["scope"] = meta["scope"]
-        elif category == MemoryCategory.REFLECTIONS:
-            if "context" in meta:
-                extra_meta["context"] = meta["context"]
+        extra_meta = self._extract_category_metadata(meta, category, file_path)
 
         return MemoryItem(
             id=meta.get("id", self._generate_id(meta.get("title", ""), post.content)),
@@ -265,6 +209,82 @@ class MemoryStore:
             tags=meta.get("tags", []),
             metadata=extra_meta,
         )
+
+    def _validate_required_fields(self, meta: dict, category: MemoryCategory) -> None:
+        """Validate required fields for a memory category."""
+        # Common required fields
+        for field_name in ["id", "created_at", "type"]:
+            if field_name not in meta:
+                raise ValueError(f"Missing required field '{field_name}' in {category.value} memory")
+
+        # Category-specific required fields
+        if category in {MemoryCategory.DECISIONS, MemoryCategory.GOALS, MemoryCategory.TASKS}:
+            if "status" not in meta:
+                raise ValueError(f"Missing required field 'status' in {category.value[:-1]} memory")
+
+        if category == MemoryCategory.TASKS:
+            if "assignee" not in meta or not meta.get("assignee"):
+                raise ValueError("Missing required field 'assignee' in task memory")
+
+    def _parse_timestamps(self, meta: dict) -> tuple[datetime, datetime]:
+        """Parse created_at and updated_at timestamps from metadata."""
+        created_str = meta.get("created_at", datetime.now(timezone.utc).isoformat())
+        updated_str = meta.get("updated_at", created_str)
+
+        try:
+            created_at = datetime.strptime(created_str[:19], "%Y-%m-%dT%H-%M-%S")
+        except (ValueError, TypeError):
+            created_at = datetime.now(timezone.utc)
+
+        try:
+            updated_at = datetime.strptime(updated_str[:19], "%Y-%m-%dT%H-%M-%S")
+        except (ValueError, TypeError):
+            updated_at = created_at
+
+        return created_at, updated_at
+
+    def _extract_category_metadata(
+        self,
+        meta: dict,
+        category: MemoryCategory,
+        file_path: Path,
+    ) -> dict[str, Any]:
+        """Extract category-specific metadata from frontmatter."""
+        extra_meta: dict[str, Any] = {"_file_path": str(file_path)}
+
+        # Task metadata
+        if category == MemoryCategory.TASKS:
+            extra_meta["status"] = meta.get("status", TaskStatus.OPEN.value)
+            extra_meta["assignee"] = meta.get("assignee", "")
+            for key in ["deadline", "priority", "related_goal"]:
+                if key in meta:
+                    extra_meta[key] = meta[key]
+
+        # Goal metadata
+        elif category == MemoryCategory.GOALS:
+            extra_meta["status"] = meta.get("status", "active")
+            for key in ["priority", "horizon"]:
+                if key in meta:
+                    extra_meta[key] = meta[key]
+
+        # Fact metadata
+        elif category == MemoryCategory.FACTS:
+            if "source" in meta:
+                extra_meta["source"] = meta["source"]
+
+        # Decision metadata
+        elif category == MemoryCategory.DECISIONS:
+            extra_meta["status"] = meta.get("status", "active")
+            for key in ["supersedes", "rationale", "scope"]:
+                if key in meta:
+                    extra_meta[key] = meta[key]
+
+        # Reflection metadata
+        elif category == MemoryCategory.REFLECTIONS:
+            if "context" in meta:
+                extra_meta["context"] = meta["context"]
+
+        return extra_meta
 
     def _read_file(self, file_path: Path) -> MemoryItem | None:
         """Read a single memory file."""
@@ -278,8 +298,27 @@ class MemoryStore:
             logger.error("Failed to read memory file {}: {}", file_path, e)
             return None
 
-    def _write_file(self, item: MemoryItem) -> Path:
-        """Write a memory item to file."""
+    def _write_file(self, item: MemoryItem, overwrite: bool = False) -> Path:
+        """Write a memory item to file.
+
+        Args:
+            item: Memory item to write.
+            overwrite: If True and item has existing file path, overwrite it directly.
+
+        Returns:
+            Path to written file.
+        """
+        # If overwriting and item has existing file path, use it directly
+        if overwrite and item.metadata.get("_file_path"):
+            file_path = Path(item.metadata["_file_path"])
+            if file_path.exists():
+                # Write the file
+                post = item.to_frontmatter()
+                file_path.write_text(frontmatter.dumps(post), encoding="utf-8")
+
+                logger.info("Overwrote memory item: {}:{} -> {}", item.category.value, item.id, file_path)
+                return file_path
+
         # Generate unique filename with timestamp, UUID, category, and slug
         filename = self._generate_filename(item.title, item.category, item.created_at)
         file_path = self.category_dirs[item.category] / filename
@@ -341,8 +380,8 @@ class MemoryStore:
             category=MemoryCategory.FACTS,
             title=title,
             content=content.strip(),
-            created_at=datetime.now(),
-            updated_at=datetime.now(),
+            created_at=datetime.now(timezone.utc),
+            updated_at=datetime.now(timezone.utc),
             tags=tags or [],
             metadata={
                 "confidence": confidence,
@@ -396,8 +435,8 @@ class MemoryStore:
             category=MemoryCategory.DECISIONS,
             title=title,
             content=content.strip(),
-            created_at=datetime.now(),
-            updated_at=datetime.now(),
+            created_at=datetime.now(timezone.utc),
+            updated_at=datetime.now(timezone.utc),
             tags=tags or [],
             metadata={
                 "status": status,
@@ -450,8 +489,8 @@ class MemoryStore:
             category=MemoryCategory.GOALS,
             title=title,
             content=content.strip(),
-            created_at=datetime.now(),
-            updated_at=datetime.now(),
+            created_at=datetime.now(timezone.utc),
+            updated_at=datetime.now(timezone.utc),
             tags=tags or [],
             metadata={
                 "status": status,
@@ -508,8 +547,8 @@ class MemoryStore:
             category=MemoryCategory.TASKS,
             title=title,
             content=content.strip(),
-            created_at=datetime.now(),
-            updated_at=datetime.now(),
+            created_at=datetime.now(timezone.utc),
+            updated_at=datetime.now(timezone.utc),
             tags=tags or [],
             metadata={
                 "status": status.value,
@@ -555,8 +594,8 @@ class MemoryStore:
             category=MemoryCategory.REFLECTIONS,
             title=title,
             content=content.strip(),
-            created_at=datetime.now(),
-            updated_at=datetime.now(),
+            created_at=datetime.now(timezone.utc),
+            updated_at=datetime.now(timezone.utc),
             tags=tags or [],
             metadata={
                 "context": context,
@@ -599,7 +638,9 @@ class MemoryStore:
         if not category_path.exists():
             return results
 
-        for file_path in category_path.glob("*.md"):
+        # Collect all items first, then sort deterministically by updated_at (newest first)
+        all_items: list[MemoryItem] = []
+        for file_path in sorted(category_path.glob("*.md")):  # Sort paths for deterministic iteration
             item = self._read_file(file_path)
             if item is None:
                 continue
@@ -614,9 +655,31 @@ class MemoryStore:
                 if query_lower not in item.title.lower() and query_lower not in item.content.lower():
                     continue
 
-            results.append(item)
+            all_items.append(item)
 
-        return results
+        # Sort by updated_at descending (newest first) for deterministic ordering
+        all_items.sort(key=lambda x: x.updated_at, reverse=True)
+
+        # If searching by ID, check for duplicates and self-heal
+        if id:
+            matching = [item for item in all_items if item.id == id]
+            if len(matching) > 1:
+                logger.warning(
+                    "Duplicate IDs detected for '{}': {} items found. Keeping newest, removing {} old.",
+                    id,
+                    len(matching),
+                    len(matching) - 1,
+                )
+                # Self-heal: remove duplicate files (keep newest)
+                for duplicate in matching[1:]:
+                    file_path = Path(duplicate.metadata.get("_file_path", ""))
+                    if file_path.exists():
+                        file_path.unlink()
+                        logger.info("Removed duplicate memory file: {}", file_path)
+                return matching[:1]
+            return matching[:1] if matching else []
+
+        return all_items
 
     def search_memory(
         self,
@@ -769,7 +832,7 @@ class MemoryStore:
 
         # Update metadata
         item.metadata.update(metadata_updates)
-        item.updated_at = datetime.now()
+        item.updated_at = datetime.now(timezone.utc)
 
         # Category-specific metadata handling
         if category == MemoryCategory.TASKS:
@@ -778,7 +841,7 @@ class MemoryStore:
                 new_status = metadata_updates["status"]
                 logger.info("Task {} status changed: {} -> {}", id, old_status, new_status)
 
-        self._write_file(item)
+        self._write_file(item, overwrite=True)
         logger.info("Updated memory item: {}:{} ", category.value, id)
 
         return item
@@ -960,42 +1023,7 @@ class MemoryStore:
                 if "archived" in str(item.file_path):
                     continue
 
-                lines = [f"\n### {item.title}"]
-
-                # Add relevant metadata as context
-                meta_lines = []
-                if item.tags:
-                    meta_lines.append(f"Tags: {', '.join(item.tags)}")
-
-                if category == MemoryCategory.TASKS:
-                    status = item.metadata.get("status", "todo")
-                    meta_lines.append(f"Status: {status}")
-                    if item.metadata.get("assignee"):
-                        meta_lines.append(f"Assignee: {item.metadata['assignee']}")
-                    if item.metadata.get("deadline"):
-                        meta_lines.append(f"Deadline: {item.metadata['deadline']}")
-
-                elif category == MemoryCategory.GOALS:
-                    status = item.metadata.get("status", "active")
-                    meta_lines.append(f"Status: {status}")
-                    if item.metadata.get("priority"):
-                        meta_lines.append(f"Priority: {item.metadata['priority']}")
-
-                elif category == MemoryCategory.FACTS:
-                    if item.metadata.get("confidence"):
-                        meta_lines.append(f"Confidence: {item.metadata['confidence']}")
-                    if item.metadata.get("source"):
-                        meta_lines.append(f"Source: {item.metadata['source']}")
-
-                elif category == MemoryCategory.DECISIONS:
-                    if item.metadata.get("supersedes"):
-                        meta_lines.append(f"Supersedes: {item.metadata['supersedes']}")
-
-                if meta_lines:
-                    lines.append("(" + " | ".join(meta_lines) + ")")
-
-                lines.append(item.content)
-                section_lines.append("\n".join(lines))
+                section_lines.append(self._format_memory_item(item, category))
 
             parts.append("\n".join(section_lines))
 
@@ -1003,6 +1031,74 @@ class MemoryStore:
             return "\n\n---\n\n".join(parts)
 
         return ""
+
+    def _format_memory_item(self, item: MemoryItem, category: MemoryCategory) -> str:
+        """Format a single memory item for context display."""
+        lines = [f"\n### {item.title}"]
+
+        # Add relevant metadata as context
+        meta_lines = self._build_metadata_lines(item, category)
+
+        if meta_lines:
+            lines.append("(" + " | ".join(meta_lines) + ")")
+
+        lines.append(item.content)
+        return "\n".join(lines)
+
+    def _build_metadata_lines(self, item: MemoryItem, category: MemoryCategory) -> list[str]:
+        """Build metadata lines for a memory item based on category."""
+        meta_lines: list[str] = []
+
+        if item.tags:
+            meta_lines.append(f"Tags: {', '.join(item.tags)}")
+
+        # Category-specific metadata
+        if category == MemoryCategory.TASKS:
+            meta_lines.extend(self._get_task_metadata(item))
+        elif category == MemoryCategory.GOALS:
+            meta_lines.extend(self._get_goal_metadata(item))
+        elif category == MemoryCategory.FACTS:
+            meta_lines.extend(self._get_fact_metadata(item))
+        elif category == MemoryCategory.DECISIONS:
+            meta_lines.extend(self._get_decision_metadata(item))
+
+        return meta_lines
+
+    def _get_task_metadata(self, item: MemoryItem) -> list[str]:
+        """Get metadata lines for task items."""
+        meta_lines: list[str] = []
+        status = item.metadata.get("status", "todo")
+        meta_lines.append(f"Status: {status}")
+        if item.metadata.get("assignee"):
+            meta_lines.append(f"Assignee: {item.metadata['assignee']}")
+        if item.metadata.get("deadline"):
+            meta_lines.append(f"Deadline: {item.metadata['deadline']}")
+        return meta_lines
+
+    def _get_goal_metadata(self, item: MemoryItem) -> list[str]:
+        """Get metadata lines for goal items."""
+        meta_lines: list[str] = []
+        status = item.metadata.get("status", "active")
+        meta_lines.append(f"Status: {status}")
+        if item.metadata.get("priority"):
+            meta_lines.append(f"Priority: {item.metadata['priority']}")
+        return meta_lines
+
+    def _get_fact_metadata(self, item: MemoryItem) -> list[str]:
+        """Get metadata lines for fact items."""
+        meta_lines: list[str] = []
+        if item.metadata.get("confidence"):
+            meta_lines.append(f"Confidence: {item.metadata['confidence']}")
+        if item.metadata.get("source"):
+            meta_lines.append(f"Source: {item.metadata['source']}")
+        return meta_lines
+
+    def _get_decision_metadata(self, item: MemoryItem) -> list[str]:
+        """Get metadata lines for decision items."""
+        meta_lines: list[str] = []
+        if item.metadata.get("supersedes"):
+            meta_lines.append(f"Supersedes: {item.metadata['supersedes']}")
+        return meta_lines
 
     def list_memories(
         self,
