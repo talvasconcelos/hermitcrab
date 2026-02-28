@@ -71,7 +71,7 @@ class NostrConfig(Base):
         ]
     )  # Default popular relays
     protocol: Literal["nip04", "nip17"] = "nip04"  # NIP-04 for DMs, NIP-17 for groups (future)
-    allowed_pubkeys: list[str] = Field(default_factory=list)  # npub or hex (empty = open, warns)
+    allowed_pubkeys: list[str] = Field(default_factory=list)  # npub/hex, or "*" for open mode, or [] for strict/deny-all
 
     def validate_for_use(self) -> None:
         """
