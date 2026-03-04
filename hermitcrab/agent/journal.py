@@ -14,14 +14,21 @@ The journal is NOT memory:
 - Never automatically distilled into memory
 - Never injected into prompts by default
 - Does not affect decisions, facts, goals, tasks, or reflections
+
+Journal entries SHOULD use wikilinks [[Like This]] to reference:
+- Atomic memory notes ([[Facts]], [[Tasks]], [[Goals]], [[Decisions]], [[Reflections]])
+- Session identifiers for traceability
+- Key topics, projects, or concepts discussed
 """
 
 from __future__ import annotations
 
+import threading
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+import frontmatter
 from loguru import logger
 
 from hermitcrab.utils.helpers import ensure_dir
@@ -50,6 +57,7 @@ class JournalStore:
         """
         self.workspace = workspace
         self.journal_dir = ensure_dir(workspace / "journal")
+        self._write_lock = threading.RLock()
 
     def _get_today_path(self) -> Path:
         """Get the journal file path for today."""
@@ -139,8 +147,9 @@ class JournalStore:
 
         # Append to file (create if needed)
         mode = "a" if not needs_frontmatter else "w"
-        with open(file_path, mode, encoding="utf-8") as f:
-            f.write(full_content)
+        with self._write_lock:
+            with open(file_path, mode, encoding="utf-8") as f:
+                f.write(full_content)
 
         logger.info(
             "Wrote journal entry: {} ({} bytes, {})",
@@ -191,14 +200,8 @@ class JournalStore:
 
         try:
             content = file_path.read_text(encoding="utf-8")
-
-            # Skip frontmatter (between --- markers)
-            if content.startswith("---"):
-                end_marker = content.find("\n---", 3)
-                if end_marker != -1:
-                    return content[end_marker + 4 :].strip()
-
-            return content.strip()
+            post = frontmatter.loads(content)
+            return post.content.strip()
         except Exception as e:
             logger.error("Failed to read journal entry {}: {}", file_path, e)
             return None
@@ -262,36 +265,15 @@ class JournalStore:
 
         try:
             content = file_path.read_text(encoding="utf-8")
-
-            if not content.startswith("---"):
-                return {"date": date.strftime("%Y-%m-%d")}
-
-            # Parse frontmatter
-            end_marker = content.find("\n---", 3)
-            if end_marker == -1:
-                return {"date": date.strftime("%Y-%m-%d")}
-
-            frontmatter = content[4:end_marker]
+            post = frontmatter.loads(content)
             metadata: dict[str, Any] = {"date": date.strftime("%Y-%m-%d")}
 
-            current_list: str | None = None
-            for line in frontmatter.split("\n"):
-                line_stripped = line.strip()
-
-                if line_stripped.startswith("session_keys:"):
-                    metadata["session_keys"] = []
-                    current_list = "session_keys"
-                elif line_stripped.startswith("tags:"):
-                    metadata["tags"] = []
-                    current_list = "tags"
-                elif line_stripped.startswith("- "):
-                    # List item
-                    value = line_stripped[2:].strip()
-                    if current_list and current_list in metadata:
-                        metadata[current_list].append(value)
-                elif line_stripped and not line.startswith(" "):
-                    # New top-level field
-                    current_list = None
+            if post.metadata.get("date"):
+                metadata["date"] = str(post.metadata["date"])
+            if post.metadata.get("session_keys"):
+                metadata["session_keys"] = list(post.metadata["session_keys"])
+            if post.metadata.get("tags"):
+                metadata["tags"] = list(post.metadata["tags"])
 
             return metadata
         except Exception as e:

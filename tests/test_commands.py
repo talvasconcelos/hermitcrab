@@ -59,6 +59,8 @@ def test_onboard_fresh_install(mock_paths):
     assert (workspace_dir / "memory" / "goals").is_dir()
     assert (workspace_dir / "memory" / "tasks").is_dir()
     assert (workspace_dir / "memory" / "reflections").is_dir()
+    assert (workspace_dir / "scratchpads").is_dir()
+    assert (workspace_dir / "scratchpads" / "archive").is_dir()
 
 
 def test_onboard_existing_config_refresh(mock_paths):

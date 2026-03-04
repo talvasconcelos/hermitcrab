@@ -10,6 +10,12 @@ Categories (enforced):
 - goals: Outcome-oriented objectives
 - tasks: Concrete actionable items with lifecycle
 - reflections: Subjective observations, append-only
+
+Wikilinks:
+- Memory content supports Obsidian-style wikilinks [[Like This]]
+- Wikilinks create connections between related memories
+- Enables graph visualization and navigation in Obsidian
+- Example: A task might link to its parent [[Goal]] or related [[Decision]]
 """
 
 from __future__ import annotations
@@ -17,6 +23,7 @@ from __future__ import annotations
 import hashlib
 import os
 import re
+import threading
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import Enum
@@ -134,6 +141,7 @@ class MemoryStore:
         """
         self.workspace = workspace
         self.memory_dir = ensure_dir(workspace / "memory")
+        self._write_lock = threading.RLock()
 
         # Create category directories
         self.category_dirs: dict[MemoryCategory, Path] = {}
@@ -308,41 +316,52 @@ class MemoryStore:
         Returns:
             Path to written file.
         """
-        # If overwriting and item has existing file path, use it directly
-        if overwrite and item.metadata.get("_file_path"):
-            file_path = Path(item.metadata["_file_path"])
-            if file_path.exists():
-                # Write the file
-                post = item.to_frontmatter()
-                file_path.write_text(frontmatter.dumps(post), encoding="utf-8")
+        with self._write_lock:
+            # If overwriting and item has existing file path, use it directly
+            if overwrite and item.metadata.get("_file_path"):
+                file_path = Path(item.metadata["_file_path"])
+                if file_path.exists():
+                    post = item.to_frontmatter()
+                    file_path.write_text(frontmatter.dumps(post), encoding="utf-8")
+                    logger.info("Overwrote memory item: {}:{} -> {}", item.category.value, item.id, file_path)
+                    return file_path
 
-                logger.info("Overwrote memory item: {}:{} -> {}", item.category.value, item.id, file_path)
-                return file_path
+            # De-duplicate by deterministic ID: update existing file instead of creating another one
+            existing = self.read_memory(item.category, id=item.id)
+            if existing:
+                existing_item = existing[0]
+                existing_path = Path(existing_item.metadata.get("_file_path", ""))
+                if existing_path.exists():
+                    item.created_at = existing_item.created_at
+                    item.metadata["_file_path"] = str(existing_path)
+                    post = item.to_frontmatter()
+                    existing_path.write_text(frontmatter.dumps(post), encoding="utf-8")
+                    logger.info("Upserted memory item: {}:{} -> {}", item.category.value, item.id, existing_path)
+                    return existing_path
 
-        # Generate unique filename with timestamp, UUID, category, and slug
-        filename = self._generate_filename(item.title, item.category, item.created_at)
-        file_path = self.category_dirs[item.category] / filename
-
-        # Handle rare filename collisions (same timestamp + UUID)
-        counter = 0
-        original_filename = filename
-        while file_path.exists():
-            existing = self._read_file(file_path)
-            if existing and existing.id == item.id:
-                break  # Same item, overwrite
-            counter += 1
-            filename = f"{original_filename.rsplit('.', 1)[0]}_{counter}.md"
+            # Generate unique filename with timestamp, UUID, category, and slug
+            filename = self._generate_filename(item.title, item.category, item.created_at)
             file_path = self.category_dirs[item.category] / filename
 
-        # Write the file
-        post = item.to_frontmatter()
-        file_path.write_text(frontmatter.dumps(post), encoding="utf-8")
+            # Handle rare filename collisions (same timestamp + UUID)
+            counter = 0
+            original_filename = filename
+            while file_path.exists():
+                existing_file_item = self._read_file(file_path)
+                if existing_file_item and existing_file_item.id == item.id:
+                    break  # Same item, overwrite
+                counter += 1
+                filename = f"{original_filename.rsplit('.', 1)[0]}_{counter}.md"
+                file_path = self.category_dirs[item.category] / filename
 
-        # Update metadata with actual file path
-        item.metadata["_file_path"] = str(file_path)
+            post = item.to_frontmatter()
+            file_path.write_text(frontmatter.dumps(post), encoding="utf-8")
 
-        logger.info("Wrote memory item: {}:{} -> {}", item.category.value, item.id, file_path)
-        return file_path
+            # Update metadata with actual file path
+            item.metadata["_file_path"] = str(file_path)
+
+            logger.info("Wrote memory item: {}:{} -> {}", item.category.value, item.id, file_path)
+            return file_path
 
     # ========================================================================
     # WRITE OPERATIONS - Category-specific with lifecycle enforcement
@@ -509,7 +528,7 @@ class MemoryStore:
         content: str,
         assignee: str,
         tags: list[str] | None = None,
-        status: TaskStatus = TaskStatus.OPEN,
+        status: TaskStatus | str = TaskStatus.OPEN,
         deadline: str | None = None,
         priority: str | None = None,
         related_goal: str | None = None,
@@ -541,6 +560,10 @@ class MemoryStore:
             raise ValueError("Task content cannot be empty")
         if not assignee or not assignee.strip():
             raise ValueError("Task assignee is required")
+
+        # Convert string status to TaskStatus enum if needed
+        if isinstance(status, str):
+            status = TaskStatus(status)
 
         item = MemoryItem(
             id=self._generate_id(title, content),
@@ -1001,7 +1024,12 @@ class MemoryStore:
     # CONTEXT BUILDING
     # ========================================================================
 
-    def get_memory_context(self) -> str:
+    def get_memory_context(
+        self,
+        max_chars: int | None = None,
+        max_items_per_category: int | None = None,
+        max_item_chars: int | None = None,
+    ) -> str:
         """
         Build memory context for the system prompt.
 
@@ -1015,20 +1043,28 @@ class MemoryStore:
             if not items:
                 continue
 
+            active_items = [item for item in items if "archived" not in str(item.file_path)]
+            if max_items_per_category is not None:
+                active_items = active_items[:max_items_per_category]
+            if not active_items:
+                continue
+
             category_name = category.value.title()
             section_lines = [f"## {category_name}"]
 
-            for item in items:
-                # Skip archived items
-                if "archived" in str(item.file_path):
-                    continue
-
-                section_lines.append(self._format_memory_item(item, category))
+            for item in active_items:
+                formatted = self._format_memory_item(item, category)
+                if max_item_chars is not None and len(formatted) > max_item_chars:
+                    formatted = formatted[:max_item_chars].rstrip() + "\n...(truncated)"
+                section_lines.append(formatted)
 
             parts.append("\n".join(section_lines))
 
         if parts:
-            return "\n\n---\n\n".join(parts)
+            content = "\n\n---\n\n".join(parts)
+            if max_chars is not None and len(content) > max_chars:
+                return content[:max_chars].rstrip() + "\n\n_[Memory context truncated]_"
+            return content
 
         return ""
 

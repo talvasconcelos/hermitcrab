@@ -10,6 +10,7 @@ from typing import Any
 
 from hermitcrab.agent.memory import MemoryStore
 from hermitcrab.agent.skills import SkillsLoader
+from hermitcrab.utils.helpers import safe_filename
 
 
 class ContextBuilder:
@@ -22,12 +23,27 @@ class ContextBuilder:
 
     BOOTSTRAP_FILES = ["AGENTS.md", "SOUL.md", "USER.md", "TOOLS.md", "IDENTITY.md"]
 
-    def __init__(self, workspace: Path):
+    def __init__(
+        self,
+        workspace: Path,
+        memory_max_chars: int = 12000,
+        memory_max_items_per_category: int = 25,
+        memory_max_item_chars: int = 600,
+    ):
         self.workspace = workspace
         self.memory = MemoryStore(workspace)
         self.skills = SkillsLoader(workspace)
+        self.memory_max_chars = memory_max_chars
+        self.memory_max_items_per_category = memory_max_items_per_category
+        self.memory_max_item_chars = memory_max_item_chars
 
-    def build_system_prompt(self, skill_names: list[str] | None = None) -> str:
+    def build_system_prompt(
+        self,
+        skill_names: list[str] | None = None,
+        channel: str | None = None,
+        chat_id: str | None = None,
+        scratchpad_path: str | None = None,
+    ) -> str:
         """
         Build the system prompt from bootstrap files, memory, and skills.
 
@@ -42,15 +58,35 @@ class ContextBuilder:
         # Core identity
         parts.append(self._get_identity())
 
+        # Agent's workspace/space ownership
+        parts.append(
+            "You are the assistant/agent. This workspace is your house, your own space to organize and remember in order to better assist the user."
+        )
+
         # Bootstrap files
         bootstrap = self._load_bootstrap_files()
         if bootstrap:
             parts.append(bootstrap)
 
         # Memory context
-        memory = self.memory.get_memory_context()
+        memory = self.memory.get_memory_context(
+            max_chars=self.memory_max_chars,
+            max_items_per_category=self.memory_max_items_per_category,
+            max_item_chars=self.memory_max_item_chars,
+        )
         if memory:
             parts.append(f"# Memory\n\n{memory}")
+
+        channel_prompt = self._load_channel_prompt(channel, chat_id)
+        if channel_prompt:
+            parts.append(f"# Channel Prompt\n\n{channel_prompt}")
+        if scratchpad_path:
+            parts.append(
+                "# Scratchpad\n\n"
+                f"Session scratchpad file: {scratchpad_path}\n"
+                "Use it as transient working memory for this session.\n"
+                "It is not long-term memory and is archived/cleared when the session ends."
+            )
 
         # Skills - progressive loading
         # 1. Always-loaded skills: include full content
@@ -71,6 +107,25 @@ Skills with available="false" need dependencies installed first - you can try in
 {skills_summary}""")
 
         return "\n\n---\n\n".join(parts)
+
+    def _load_channel_prompt(self, channel: str | None, chat_id: str | None) -> str:
+        """Load optional channel-specific/system prompt overlays from workspace."""
+        if not channel:
+            return ""
+
+        prompts_dir = self.workspace / "prompts"
+        channel_safe = safe_filename(channel)
+        paths = [prompts_dir / f"{channel_safe}.md"]
+
+        if chat_id:
+            chat_safe = safe_filename(chat_id)
+            paths.append(prompts_dir / channel_safe / f"{chat_safe}.md")
+
+        parts: list[str] = []
+        for path in paths:
+            if path.exists():
+                parts.append(path.read_text(encoding="utf-8").strip())
+        return "\n\n".join(p for p in parts if p)
 
     def _get_identity(self) -> str:
         """Get the core identity section."""
@@ -135,6 +190,7 @@ Reply directly with text for conversations. Only use the 'message' tool to send 
         media: list[str] | None = None,
         channel: str | None = None,
         chat_id: str | None = None,
+        scratchpad_path: str | None = None,
         max_history: int | None = None,
     ) -> list[dict[str, Any]]:
         """
@@ -155,7 +211,12 @@ Reply directly with text for conversations. Only use the 'message' tool to send 
         messages = []
 
         # System prompt
-        system_prompt = self.build_system_prompt(skill_names)
+        system_prompt = self.build_system_prompt(
+            skill_names,
+            channel=channel,
+            chat_id=chat_id,
+            scratchpad_path=scratchpad_path,
+        )
         if channel and chat_id:
             system_prompt += f"\n\n## Current Session\nChannel: {channel}\nChat ID: {chat_id}"
         messages.append({"role": "system", "content": system_prompt})

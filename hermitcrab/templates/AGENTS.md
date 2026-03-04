@@ -14,11 +14,21 @@ Ask yourself: *"Does this require information that might be in memory?"* If yes 
 - **On failures**: Analyze the error before retrying with a different approach
 - **Don't assume existence**: Use `list_dir` or `read_file` to verify paths
 
-### Memory Operations
+### Memory Operations & Wikilinks
 
 - Use typed APIs (`write_fact`, `write_task`, etc.) — never `write_file` for memory
 - Search memory before answering questions about user preferences, projects, or history
 - Memory is category-based and atomic — no summarization or consolidation
+
+**Wikilinks for Knowledge Graph:**
+- Use wikilinks `[[Like This]]` to connect related memories (Obsidian-compatible)
+- When writing tasks, link to related `[[Goals]]`, `[[Decisions]]`, or `[[Projects]]`
+- When writing facts, link to relevant concepts, people, or projects
+- When writing journal entries, reference atomic notes by wikilink
+- Don't force wikilinks — use them when they create meaningful connections
+- Example: "Implement feature X for `[[Project Alpha]]` to achieve `[[Q2 2026 Goals]]`"
+
+This creates a navigable knowledge graph that both you and the user can explore.
 
 ### Session Lifecycle
 
