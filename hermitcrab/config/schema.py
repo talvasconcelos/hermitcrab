@@ -169,6 +169,14 @@ class AgentDefaults(Base):
     temperature: float = 0.1
     max_tool_iterations: int = 40
     memory_window: int = 100
+    inactivity_timeout_s: int = 30 * 60
+    llm_max_retries: int = 3
+    llm_retry_base_delay_s: float = 0.6
+    max_loop_seconds: int = 240
+    max_identical_tool_cycles: int = 2
+    memory_context_max_chars: int = 10000
+    memory_context_max_items_per_category: int = 20
+    memory_context_max_item_chars: int = 500
 
 
 class AgentsConfig(Base):
@@ -205,7 +213,7 @@ class ProvidersConfig(Base):
     volcengine: ProviderConfig = Field(default_factory=ProviderConfig)  # VolcEngine (火山引擎) API gateway
     openai_codex: ProviderConfig = Field(default_factory=ProviderConfig)  # OpenAI Codex (OAuth)
     github_copilot: ProviderConfig = Field(default_factory=ProviderConfig)  # Github Copilot (OAuth)
-    ollama: ProviderConfig = Field(default_factory=ProviderConfig)  # Ollama (local LLM runner)
+    ollama: ProviderConfig = Field(default_factory=ProviderConfig)  # Ollama via LiteLLM routing
 
 
 class HeartbeatConfig(Base):
@@ -223,7 +231,7 @@ class ReflectionPromotionConfig(Base):
     AGENTS.md, SOUL.md, IDENTITY.md, and TOOLS.md files.
     """
 
-    auto_promote: bool = True  # Auto-update bootstrap files from reflections
+    auto_promote: bool = False  # Safer default: propose/log reflections, don't self-edit files automatically
     target_files: list[str] = Field(
         default_factory=lambda: ["AGENTS.md", "SOUL.md", "IDENTITY.md", "TOOLS.md"]
     )  # Which bootstrap files to update
@@ -314,14 +322,14 @@ class Config(BaseSettings):
         for spec in PROVIDERS:
             p = getattr(self.providers, spec.name, None)
             if p and model_prefix and normalized_prefix == spec.name:
-                if spec.is_oauth or p.api_key:
+                if spec.is_oauth or spec.is_local or p.api_key:
                     return p, spec.name
 
         # Match by keyword (order follows PROVIDERS registry)
         for spec in PROVIDERS:
             p = getattr(self.providers, spec.name, None)
             if p and any(_kw_matches(kw) for kw in spec.keywords):
-                if spec.is_oauth or p.api_key:
+                if spec.is_oauth or spec.is_local or p.api_key:
                     return p, spec.name
 
         # Fallback: gateways first, then others (follows registry order)
@@ -330,7 +338,7 @@ class Config(BaseSettings):
             if spec.is_oauth:
                 continue
             p = getattr(self.providers, spec.name, None)
-            if p and p.api_key:
+            if p and (p.api_key or spec.is_local):
                 return p, spec.name
         return None, None
 
@@ -359,7 +367,7 @@ class Config(BaseSettings):
         # to avoid polluting the global litellm.api_base.
         if name:
             spec = find_by_name(name)
-            if spec and spec.is_gateway and spec.default_api_base:
+            if spec and (spec.is_gateway or spec.is_local) and spec.default_api_base:
                 return spec.default_api_base
         return None
 

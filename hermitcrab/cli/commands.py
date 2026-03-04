@@ -71,18 +71,10 @@ def _build_job_models_from_config(config: Config) -> dict | None:
         JobClass.INTERACTIVE_RESPONSE: job_models_config.get_model(
             "interactive_response", primary_model
         ),
-        JobClass.JOURNAL_SYNTHESIS: job_models_config.get_model(
-            "journal_synthesis", primary_model
-        ),
-        JobClass.DISTILLATION: job_models_config.get_model(
-            "distillation", primary_model
-        ),
-        JobClass.REFLECTION: job_models_config.get_model(
-            "reflection", primary_model
-        ),
-        JobClass.SUMMARISATION: job_models_config.get_model(
-            "summarisation", primary_model
-        ),
+        JobClass.JOURNAL_SYNTHESIS: job_models_config.get_model("journal_synthesis", primary_model),
+        JobClass.DISTILLATION: job_models_config.get_model("distillation", primary_model),
+        JobClass.REFLECTION: job_models_config.get_model("reflection", primary_model),
+        JobClass.SUMMARISATION: job_models_config.get_model("summarisation", primary_model),
     }
 
 
@@ -97,6 +89,7 @@ def _flush_pending_tty_input() -> None:
 
     try:
         import termios
+
         termios.tcflush(fd, termios.TCIFLUSH)
         return
     except Exception:
@@ -119,6 +112,7 @@ def _restore_terminal() -> None:
         return
     try:
         import termios
+
         termios.tcsetattr(sys.stdin.fileno(), termios.TCSADRAIN, _SAVED_TERM_ATTRS)
     except Exception:
         pass
@@ -131,6 +125,7 @@ def _init_prompt_session() -> None:
     # Save terminal state so we can restore it on exit
     try:
         import termios
+
         _SAVED_TERM_ATTRS = termios.tcgetattr(sys.stdin.fileno())
     except Exception:
         pass
@@ -141,7 +136,7 @@ def _init_prompt_session() -> None:
     _PROMPT_SESSION = PromptSession(
         history=FileHistory(str(history_file)),
         enable_open_in_editor=False,
-        multiline=False,   # Enter submits (single line mode)
+        multiline=False,  # Enter submits (single line mode)
     )
 
 
@@ -179,7 +174,6 @@ async def _read_interactive_input_async() -> str:
         raise KeyboardInterrupt from exc
 
 
-
 def version_callback(value: bool):
     if value:
         console.print(f"{__logo__} hermitcrab v{__version__}")
@@ -188,9 +182,7 @@ def version_callback(value: bool):
 
 @app.callback()
 def main(
-    version: bool = typer.Option(
-        None, "--version", "-v", callback=version_callback, is_eager=True
-    ),
+    version: bool = typer.Option(None, "--version", "-v", callback=version_callback, is_eager=True),
 ):
     """hermitcrab - Personal AI Assistant."""
     pass
@@ -213,7 +205,9 @@ def onboard():
     if config_path.exists():
         console.print(f"[yellow]Config already exists at {config_path}[/yellow]")
         console.print("  [bold]y[/bold] = overwrite with defaults (existing values will be lost)")
-        console.print("  [bold]N[/bold] = refresh config, keeping existing values and adding new fields")
+        console.print(
+            "  [bold]N[/bold] = refresh config, keeping existing values and adding new fields"
+        )
         if typer.confirm("Overwrite?"):
             config = Config()
             save_config(config)
@@ -221,7 +215,9 @@ def onboard():
         else:
             config = load_config()
             save_config(config)
-            console.print(f"[green]✓[/green] Config refreshed at {config_path} (existing values preserved)")
+            console.print(
+                f"[green]✓[/green] Config refreshed at {config_path} (existing values preserved)"
+            )
     else:
         save_config(Config())
         console.print(f"[green]✓[/green] Created config at {config_path}")
@@ -240,10 +236,7 @@ def onboard():
     console.print("\nNext steps:")
     console.print("  1. Add your API key to [cyan]~/.hermitcrab/config.json[/cyan]")
     console.print("     Get one at: https://openrouter.ai/keys")
-    console.print("  2. Chat: [cyan]hermitcrab agent -m \"Hello!\"[/cyan]")
-    console.print("\n[dim]Want Telegram/WhatsApp? See: https://github.com/HKUDS/hermitcrab#-chat-apps[/dim]")
-
-
+    console.print('  2. Chat: [cyan]hermitcrab agent -m "Hello!"[/cyan]')
 
 
 def _create_workspace_templates(workspace: Path):
@@ -268,6 +261,20 @@ def _create_workspace_templates(workspace: Path):
         category_dir = memory_dir / category
         category_dir.mkdir(exist_ok=True)
         console.print(f"  [dim]Created memory/{category}/[/dim]")
+
+    # Create knowledge base directories (reference library, not memory)
+    knowledge_dir = workspace / "knowledge"
+    knowledge_dir.mkdir(exist_ok=True)
+
+    for category in ["articles", "books", "docs", "notes"]:
+        category_dir = knowledge_dir / category
+        category_dir.mkdir(exist_ok=True)
+        console.print(f"  [dim]Created knowledge/{category}/[/dim]")
+
+    scratchpads_dir = workspace / "scratchpads"
+    scratchpads_dir.mkdir(exist_ok=True)
+    (scratchpads_dir / "archive").mkdir(exist_ok=True)
+    console.print("  [dim]Created scratchpads/ and scratchpads/archive/[/dim]")
 
     (workspace / "skills").mkdir(exist_ok=True)
 
@@ -295,8 +302,13 @@ def _make_provider(config: Config):
         )
 
     from hermitcrab.providers.registry import find_by_name
+
     spec = find_by_name(provider_name)
-    if not model.startswith("bedrock/") and not (p and p.api_key) and not (spec and spec.is_oauth):
+    if (
+        not model.startswith("bedrock/")
+        and not (p and p.api_key)
+        and not (spec and (spec.is_oauth or spec.is_local))
+    ):
         console.print("[red]Error: No API key configured.[/red]")
         console.print("Set one in ~/.hermitcrab/config.json under providers section")
         raise typer.Exit(1)
@@ -319,8 +331,15 @@ def _make_provider(config: Config):
 def gateway(
     port: int = typer.Option(18790, "--port", "-p", help="Gateway port"),
     verbose: bool = typer.Option(False, "--verbose", "-v", help="Verbose output"),
+    log_level: str = typer.Option(
+        "INFO",
+        "--log-level",
+        help="Log level: TRACE, DEBUG, INFO, WARNING, ERROR",
+    ),
 ):
     """Start the hermitcrab gateway."""
+    from loguru import logger
+
     from hermitcrab.agent.loop import AgentLoop
     from hermitcrab.bus.queue import MessageBus
     from hermitcrab.channels.manager import ChannelManager
@@ -330,11 +349,12 @@ def gateway(
     from hermitcrab.heartbeat.service import HeartbeatService
     from hermitcrab.session.manager import SessionManager
 
-    if verbose:
-        import logging
-        logging.basicConfig(level=logging.DEBUG)
+    configured_level = "DEBUG" if verbose else log_level.upper()
+    logger.remove()
+    logger.add(sys.stderr, level=configured_level)
 
     console.print(f"{__logo__} Starting hermitcrab gateway on port {port}...")
+    console.print(f"[dim]Log level: {configured_level}[/dim]")
 
     config = load_config()
     bus = MessageBus()
@@ -366,6 +386,14 @@ def gateway(
         mcp_servers=config.tools.mcp_servers,
         channels_config=config.channels,
         job_models=job_models,  # Pass job models (or None for defaults)
+        inactivity_timeout_s=config.agents.defaults.inactivity_timeout_s,
+        llm_max_retries=config.agents.defaults.llm_max_retries,
+        llm_retry_base_delay_s=config.agents.defaults.llm_retry_base_delay_s,
+        max_loop_seconds=config.agents.defaults.max_loop_seconds,
+        max_identical_tool_cycles=config.agents.defaults.max_identical_tool_cycles,
+        memory_context_max_chars=config.agents.defaults.memory_context_max_chars,
+        memory_context_max_items_per_category=config.agents.defaults.memory_context_max_items_per_category,
+        memory_context_max_item_chars=config.agents.defaults.memory_context_max_item_chars,
         reflection_config={
             "auto_promote": config.reflection.promotion.auto_promote,
             "target_files": config.reflection.promotion.target_files,
@@ -385,12 +413,16 @@ def gateway(
         )
         if job.payload.deliver and job.payload.to:
             from hermitcrab.bus.events import OutboundMessage
-            await bus.publish_outbound(OutboundMessage(
-                channel=job.payload.channel or "cli",
-                chat_id=job.payload.to,
-                content=response or ""
-            ))
+
+            await bus.publish_outbound(
+                OutboundMessage(
+                    channel=job.payload.channel or "cli",
+                    chat_id=job.payload.to,
+                    content=response or "",
+                )
+            )
         return response
+
     cron.on_job = on_cron_job
 
     # Create channel manager
@@ -431,10 +463,13 @@ def gateway(
     async def on_heartbeat_notify(response: str) -> None:
         """Deliver a heartbeat response to the user's channel."""
         from hermitcrab.bus.events import OutboundMessage
+
         channel, chat_id = _pick_heartbeat_target()
         if channel == "cli":
             return  # No external channel available to deliver to
-        await bus.publish_outbound(OutboundMessage(channel=channel, chat_id=chat_id, content=response))
+        await bus.publish_outbound(
+            OutboundMessage(channel=channel, chat_id=chat_id, content=response)
+        )
 
     hb_cfg = config.gateway.heartbeat
     heartbeat = HeartbeatService(
@@ -507,6 +542,7 @@ def _run_nostr_mode(
     try:
         if nostr_pubkey.startswith("npub"):
             from pynostr.key import PublicKey
+
             hex_pubkey = PublicKey.from_npub(nostr_pubkey).hex()
         else:
             hex_pubkey = nostr_pubkey
@@ -575,7 +611,9 @@ def _run_nostr_mode(
                     turn_done.clear()
                     turn_response.clear()
 
-                    console.print(f"\n[cyan]Received message from Nostr:[/cyan] {msg.content[:50]}...")
+                    console.print(
+                        f"\n[cyan]Received message from Nostr:[/cyan] {msg.content[:50]}..."
+                    )
 
                     with thinking_ctx():
                         await turn_done.wait()
@@ -605,8 +643,12 @@ def _run_nostr_mode(
 def agent(
     message: str = typer.Option(None, "--message", "-m", help="Message to send to the agent"),
     session_id: str = typer.Option("cli:direct", "--session", "-s", help="Session ID"),
-    markdown: bool = typer.Option(True, "--markdown/--no-markdown", help="Render assistant output as Markdown"),
-    logs: bool = typer.Option(False, "--logs/--no-logs", help="Show hermitcrab runtime logs during chat"),
+    markdown: bool = typer.Option(
+        True, "--markdown/--no-markdown", help="Render assistant output as Markdown"
+    ),
+    logs: bool = typer.Option(
+        False, "--logs/--no-logs", help="Show hermitcrab runtime logs during chat"
+    ),
     nostr_pubkey: str | None = typer.Option(
         None,
         "--nostr-pubkey",
@@ -658,6 +700,14 @@ def agent(
         mcp_servers=config.tools.mcp_servers,
         channels_config=config.channels,
         job_models=job_models,  # Pass job models (or None for defaults)
+        inactivity_timeout_s=config.agents.defaults.inactivity_timeout_s,
+        llm_max_retries=config.agents.defaults.llm_max_retries,
+        llm_retry_base_delay_s=config.agents.defaults.llm_retry_base_delay_s,
+        max_loop_seconds=config.agents.defaults.max_loop_seconds,
+        max_identical_tool_cycles=config.agents.defaults.max_identical_tool_cycles,
+        memory_context_max_chars=config.agents.defaults.memory_context_max_chars,
+        memory_context_max_items_per_category=config.agents.defaults.memory_context_max_items_per_category,
+        memory_context_max_item_chars=config.agents.defaults.memory_context_max_item_chars,
         reflection_config={
             "auto_promote": config.reflection.promotion.auto_promote,
             "target_files": config.reflection.promotion.target_files,
@@ -670,6 +720,7 @@ def agent(
     def _thinking_ctx():
         if logs:
             from contextlib import nullcontext
+
             return nullcontext()
         # Animated spinner is safe to use with prompt_toolkit input handling
         return console.status("[dim]hermitcrab is thinking...[/dim]", spinner="dots")
@@ -686,7 +737,9 @@ def agent(
         # Single message mode — direct call, no bus needed
         async def run_once():
             with _thinking_ctx():
-                response = await agent_loop.process_direct(message, session_id, on_progress=_cli_progress)
+                response = await agent_loop.process_direct(
+                    message, session_id, on_progress=_cli_progress
+                )
             _print_agent_response(response, render_markdown=markdown)
             await agent_loop.close_mcp()
 
@@ -703,8 +756,11 @@ def agent(
     else:
         # Interactive mode — route through bus like other channels
         from hermitcrab.bus.events import InboundMessage
+
         _init_prompt_session()
-        console.print(f"{__logo__} Interactive mode (type [bold]exit[/bold] or [bold]Ctrl+C[/bold] to quit)\n")
+        console.print(
+            f"{__logo__} Interactive mode (type [bold]exit[/bold] or [bold]Ctrl+C[/bold] to quit)\n"
+        )
 
         if ":" in session_id:
             cli_channel, cli_chat_id = session_id.split(":", 1)
@@ -761,6 +817,28 @@ def agent(
                             continue
 
                         if _is_exit_command(command):
+                            # Finalize session so journal/distillation/reflection run on exit.
+                            console.print("[dim]Finalizing session before exit...[/dim]")
+                            try:
+                                await agent_loop.process_direct(
+                                    "/new",
+                                    session_key=f"{cli_channel}:{cli_chat_id}",
+                                    channel=cli_channel,
+                                    chat_id=cli_chat_id,
+                                )
+                                # Wait up to 10s for background tasks (journal/distillation/reflection)
+                                done, pending = await agent_loop.wait_for_background_tasks(
+                                    timeout_s=10.0
+                                )
+                                if done > 0:
+                                    console.print(f"[dim]Background tasks completed: {done}[/dim]")
+                                if pending > 0:
+                                    console.print(
+                                        f"[yellow]Background tasks still running: {pending} "
+                                        "(continuing shutdown)[/yellow]"
+                                    )
+                            except Exception as e:
+                                console.print(f"[yellow]Session finalization failed: {e}[/yellow]")
                             _restore_terminal()
                             console.print("\nGoodbye!")
                             break
@@ -768,12 +846,14 @@ def agent(
                         turn_done.clear()
                         turn_response.clear()
 
-                        await bus.publish_inbound(InboundMessage(
-                            channel=cli_channel,
-                            sender_id="user",
-                            chat_id=cli_chat_id,
-                            content=user_input,
-                        ))
+                        await bus.publish_inbound(
+                            InboundMessage(
+                                channel=cli_channel,
+                                sender_id="user",
+                                chat_id=cli_chat_id,
+                                content=user_input,
+                            )
+                        )
 
                         with _thinking_ctx():
                             await turn_done.wait()
@@ -820,81 +900,47 @@ def channels_status():
 
     # WhatsApp
     wa = config.channels.whatsapp
-    table.add_row(
-        "WhatsApp",
-        "✓" if wa.enabled else "✗",
-        wa.bridge_url
-    )
+    table.add_row("WhatsApp", "✓" if wa.enabled else "✗", wa.bridge_url)
 
     dc = config.channels.discord
-    table.add_row(
-        "Discord",
-        "✓" if dc.enabled else "✗",
-        dc.gateway_url
-    )
+    table.add_row("Discord", "✓" if dc.enabled else "✗", dc.gateway_url)
 
     # Feishu
     fs = config.channels.feishu
     fs_config = f"app_id: {fs.app_id[:10]}..." if fs.app_id else "[dim]not configured[/dim]"
-    table.add_row(
-        "Feishu",
-        "✓" if fs.enabled else "✗",
-        fs_config
-    )
+    table.add_row("Feishu", "✓" if fs.enabled else "✗", fs_config)
 
     # Mochat
     mc = config.channels.mochat
     mc_base = mc.base_url or "[dim]not configured[/dim]"
-    table.add_row(
-        "Mochat",
-        "✓" if mc.enabled else "✗",
-        mc_base
-    )
+    table.add_row("Mochat", "✓" if mc.enabled else "✗", mc_base)
 
     # Telegram
     tg = config.channels.telegram
     tg_config = f"token: {tg.token[:10]}..." if tg.token else "[dim]not configured[/dim]"
-    table.add_row(
-        "Telegram",
-        "✓" if tg.enabled else "✗",
-        tg_config
-    )
+    table.add_row("Telegram", "✓" if tg.enabled else "✗", tg_config)
 
     # Slack
     slack = config.channels.slack
     slack_config = "socket" if slack.app_token and slack.bot_token else "[dim]not configured[/dim]"
-    table.add_row(
-        "Slack",
-        "✓" if slack.enabled else "✗",
-        slack_config
-    )
+    table.add_row("Slack", "✓" if slack.enabled else "✗", slack_config)
 
     # DingTalk
     dt = config.channels.dingtalk
-    dt_config = f"client_id: {dt.client_id[:10]}..." if dt.client_id else "[dim]not configured[/dim]"
-    table.add_row(
-        "DingTalk",
-        "✓" if dt.enabled else "✗",
-        dt_config
+    dt_config = (
+        f"client_id: {dt.client_id[:10]}..." if dt.client_id else "[dim]not configured[/dim]"
     )
+    table.add_row("DingTalk", "✓" if dt.enabled else "✗", dt_config)
 
     # QQ
     qq = config.channels.qq
     qq_config = f"app_id: {qq.app_id[:10]}..." if qq.app_id else "[dim]not configured[/dim]"
-    table.add_row(
-        "QQ",
-        "✓" if qq.enabled else "✗",
-        qq_config
-    )
+    table.add_row("QQ", "✓" if qq.enabled else "✗", qq_config)
 
     # Email
     em = config.channels.email
     em_config = em.imap_host if em.imap_host else "[dim]not configured[/dim]"
-    table.add_row(
-        "Email",
-        "✓" if em.enabled else "✗",
-        em_config
-    )
+    table.add_row("Email", "✓" if em.enabled else "✗", em_config)
 
     console.print(table)
 
@@ -1017,12 +1063,17 @@ def cron_list(
     import time
     from datetime import datetime as _dt
     from zoneinfo import ZoneInfo
+
     for job in jobs:
         # Format schedule
         if job.schedule.kind == "every":
             sched = f"every {(job.schedule.every_ms or 0) // 1000}s"
         elif job.schedule.kind == "cron":
-            sched = f"{job.schedule.expr or ''} ({job.schedule.tz})" if job.schedule.tz else (job.schedule.expr or "")
+            sched = (
+                f"{job.schedule.expr or ''} ({job.schedule.tz})"
+                if job.schedule.tz
+                else (job.schedule.expr or "")
+            )
         else:
             sched = "one-time"
 
@@ -1049,11 +1100,15 @@ def cron_add(
     message: str = typer.Option(..., "--message", "-m", help="Message for agent"),
     every: int = typer.Option(None, "--every", "-e", help="Run every N seconds"),
     cron_expr: str = typer.Option(None, "--cron", "-c", help="Cron expression (e.g. '0 9 * * *')"),
-    tz: str | None = typer.Option(None, "--tz", help="IANA timezone for cron (e.g. 'America/Vancouver')"),
+    tz: str | None = typer.Option(
+        None, "--tz", help="IANA timezone for cron (e.g. 'America/Vancouver')"
+    ),
     at: str = typer.Option(None, "--at", help="Run once at time (ISO format)"),
     deliver: bool = typer.Option(False, "--deliver", "-d", help="Deliver response to channel"),
     to: str = typer.Option(None, "--to", help="Recipient for delivery"),
-    channel: str = typer.Option(None, "--channel", help="Channel for delivery (e.g. 'telegram', 'whatsapp')"),
+    channel: str = typer.Option(
+        None, "--channel", help="Channel for delivery (e.g. 'telegram', 'whatsapp')"
+    ),
 ):
     """Add a scheduled job."""
     from hermitcrab.config.loader import get_data_dir
@@ -1071,6 +1126,7 @@ def cron_add(
         schedule = CronSchedule(kind="cron", expr=cron_expr, tz=tz)
     elif at:
         import datetime
+
         dt = datetime.datetime.fromisoformat(at)
         schedule = CronSchedule(kind="at", at_ms=int(dt.timestamp() * 1000))
     else:
@@ -1146,6 +1202,7 @@ def cron_run(
     from hermitcrab.config.loader import get_data_dir, load_config
     from hermitcrab.cron.service import CronService
     from hermitcrab.cron.types import CronJob
+
     logger.disable("hermitcrab")
 
     config = load_config()
@@ -1170,6 +1227,14 @@ def cron_run(
         mcp_servers=config.tools.mcp_servers,
         channels_config=config.channels,
         job_models=job_models,  # Pass job models (or None for defaults)
+        inactivity_timeout_s=config.agents.defaults.inactivity_timeout_s,
+        llm_max_retries=config.agents.defaults.llm_max_retries,
+        llm_retry_base_delay_s=config.agents.defaults.llm_retry_base_delay_s,
+        max_loop_seconds=config.agents.defaults.max_loop_seconds,
+        max_identical_tool_cycles=config.agents.defaults.max_identical_tool_cycles,
+        memory_context_max_chars=config.agents.defaults.memory_context_max_chars,
+        memory_context_max_items_per_category=config.agents.defaults.memory_context_max_items_per_category,
+        memory_context_max_item_chars=config.agents.defaults.memory_context_max_item_chars,
         reflection_config={
             "auto_promote": config.reflection.promotion.auto_promote,
             "target_files": config.reflection.promotion.target_files,
@@ -1222,8 +1287,12 @@ def status():
 
     console.print(f"{__logo__} hermitcrab Status\n")
 
-    console.print(f"Config: {config_path} {'[green]✓[/green]' if config_path.exists() else '[red]✗[/red]'}")
-    console.print(f"Workspace: {workspace} {'[green]✓[/green]' if workspace.exists() else '[red]✗[/red]'}")
+    console.print(
+        f"Config: {config_path} {'[green]✓[/green]' if config_path.exists() else '[red]✗[/red]'}"
+    )
+    console.print(
+        f"Workspace: {workspace} {'[green]✓[/green]' if workspace.exists() else '[red]✗[/red]'}"
+    )
 
     if config_path.exists():
         from hermitcrab.providers.registry import PROVIDERS
@@ -1245,7 +1314,9 @@ def status():
                     console.print(f"{spec.label}: [dim]not set[/dim]")
             else:
                 has_key = bool(p.api_key)
-                console.print(f"{spec.label}: {'[green]✓[/green]' if has_key else '[dim]not set[/dim]'}")
+                console.print(
+                    f"{spec.label}: {'[green]✓[/green]' if has_key else '[dim]not set[/dim]'}"
+                )
 
 
 # ============================================================================
@@ -1258,8 +1329,12 @@ app.add_typer(journal_app, name="journal")
 
 @journal_app.command("write")
 def journal_write(
-    content: str = typer.Option("", "--content", "-c", help="Journal content (optional, prompts if not provided)"),
-    date: str = typer.Option("", "--date", "-d", help="Date in YYYY-MM-DD format (defaults to today)"),
+    content: str = typer.Option(
+        "", "--content", "-c", help="Journal content (optional, prompts if not provided)"
+    ),
+    date: str = typer.Option(
+        "", "--date", "-d", help="Date in YYYY-MM-DD format (defaults to today)"
+    ),
     tag: list[str] = typer.Option([], "--tag", "-t", help="Tags (can be specified multiple times)"),
 ):
     """Write a journal entry."""
@@ -1314,8 +1389,12 @@ def journal_write(
 
 @journal_app.command("read")
 def journal_read(
-    date: str = typer.Option("", "--date", "-d", help="Date in YYYY-MM-DD format (defaults to today)"),
-    body_only: bool = typer.Option(False, "--body", "-b", help="Show body content only (no frontmatter)"),
+    date: str = typer.Option(
+        "", "--date", "-d", help="Date in YYYY-MM-DD format (defaults to today)"
+    ),
+    body_only: bool = typer.Option(
+        False, "--body", "-b", help="Show body content only (no frontmatter)"
+    ),
 ):
     """Read a journal entry."""
     from datetime import datetime, timezone
@@ -1344,7 +1423,9 @@ def journal_read(
 
     if content is None:
         target_date = entry_date or datetime.now(timezone.utc)
-        console.print(f"[yellow]No journal entry found for {target_date.strftime('%Y-%m-%d')}[/yellow]")
+        console.print(
+            f"[yellow]No journal entry found for {target_date.strftime('%Y-%m-%d')}[/yellow]"
+        )
         raise typer.Exit(0)
 
     # Display with markdown rendering
@@ -1403,12 +1484,15 @@ def _register_login(name: str):
     def decorator(fn):
         _LOGIN_HANDLERS[name] = fn
         return fn
+
     return decorator
 
 
 @provider_app.command("login")
 def provider_login(
-    provider: str = typer.Argument(..., help="OAuth provider (e.g. 'openai-codex', 'github-copilot')"),
+    provider: str = typer.Argument(
+        ..., help="OAuth provider (e.g. 'openai-codex', 'github-copilot')"
+    ),
 ):
     """Authenticate with an OAuth provider."""
     from hermitcrab.providers.registry import PROVIDERS
@@ -1433,6 +1517,7 @@ def provider_login(
 def _login_openai_codex() -> None:
     try:
         from oauth_cli_kit import get_token, login_oauth_interactive
+
         token = None
         try:
             token = get_token()
@@ -1447,7 +1532,9 @@ def _login_openai_codex() -> None:
         if not (token and token.access):
             console.print("[red]✗ Authentication failed[/red]")
             raise typer.Exit(1)
-        console.print(f"[green]✓ Authenticated with OpenAI Codex[/green]  [dim]{token.account_id}[/dim]")
+        console.print(
+            f"[green]✓ Authenticated with OpenAI Codex[/green]  [dim]{token.account_id}[/dim]"
+        )
     except ImportError:
         console.print("[red]oauth_cli_kit not installed. Run: pip install oauth-cli-kit[/red]")
         raise typer.Exit(1)
@@ -1461,7 +1548,12 @@ def _login_github_copilot() -> None:
 
     async def _trigger():
         from litellm import acompletion
-        await acompletion(model="github_copilot/gpt-4o", messages=[{"role": "user", "content": "hi"}], max_tokens=1)
+
+        await acompletion(
+            model="github_copilot/gpt-4o",
+            messages=[{"role": "user", "content": "hi"}],
+            max_tokens=1,
+        )
 
     try:
         asyncio.run(_trigger())

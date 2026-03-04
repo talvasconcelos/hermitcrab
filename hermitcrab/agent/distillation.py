@@ -12,6 +12,11 @@ Candidate Types:
 - goal: Outcome-oriented objectives
 - task: Actionable items with lifecycle
 - reflection: Subjective observations (append-only)
+
+Wikilinks:
+- Content SHOULD include wikilinks [[Like This]] to connect related memories
+- Links to existing memory items create a navigable knowledge graph
+- Example: "User prefers [[Python]] for backend work on [[Project Alpha]]"
 """
 
 from __future__ import annotations
@@ -96,7 +101,7 @@ class AtomicCandidate:
     reflection_context: str | None = None
 
     # Metadata
-    created_at: datetime = field(default_factory=datetime.now)
+    created_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
     extra: dict[str, Any] = field(default_factory=dict)
 
     def to_memory_params(self) -> dict[str, Any]:
