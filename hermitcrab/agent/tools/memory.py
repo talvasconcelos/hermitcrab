@@ -18,7 +18,11 @@ class WriteFactTool(Tool):
 
     @property
     def description(self) -> str:
-        return "Save a long-term fact to memory (user preferences, established truths, project context)"
+        return (
+            "Save a long-term fact to memory (user preferences, established truths, project context). "
+            "Use wikilinks [[Like This]] to connect related memories when it makes sense "
+            "(e.g., 'User prefers [[Python]] for backend development')."
+        )
 
     @property
     def parameters(self) -> dict[str, Any]:
@@ -31,7 +35,7 @@ class WriteFactTool(Tool):
                 },
                 "content": {
                     "type": "string",
-                    "description": "The fact content"
+                    "description": "The fact content. Use wikilinks [[Like This]] to connect related memories."
                 },
                 "tags": {
                     "type": "array",
@@ -84,7 +88,10 @@ class WriteDecisionTool(Tool):
 
     @property
     def description(self) -> str:
-        return "Save a decision to memory (architectural choices, trade-offs, locked decisions)"
+        return (
+            "Save a decision to memory (architectural choices, trade-offs, locked decisions). "
+            "Use wikilinks [[Like This]] to connect to related [[Goals]], [[Facts]], or other [[Decisions]]."
+        )
 
     @property
     def parameters(self) -> dict[str, Any]:
@@ -97,7 +104,7 @@ class WriteDecisionTool(Tool):
                 },
                 "content": {
                     "type": "string",
-                    "description": "Decision content"
+                    "description": "Decision content. Use wikilinks [[Like This]] to connect related memories."
                 },
                 "tags": {
                     "type": "array",
@@ -157,7 +164,10 @@ class WriteGoalTool(Tool):
 
     @property
     def description(self) -> str:
-        return "Save a goal to memory (objectives, outcomes the user wants to achieve)"
+        return (
+            "Save a goal to memory (objectives, outcomes the user wants to achieve). "
+            "Use wikilinks [[Like This]] to connect related [[Tasks]], [[Decisions]], or other [[Goals]]."
+        )
 
     @property
     def parameters(self) -> dict[str, Any]:
@@ -170,7 +180,7 @@ class WriteGoalTool(Tool):
                 },
                 "content": {
                     "type": "string",
-                    "description": "Goal content"
+                    "description": "Goal content. Use wikilinks [[Like This]] to connect related memories."
                 },
                 "tags": {
                     "type": "array",
@@ -225,7 +235,11 @@ class WriteTaskTool(Tool):
 
     @property
     def description(self) -> str:
-        return "Save a task to memory (action items, todos, things to do)"
+        return (
+            "Save a task to memory (action items, todos, things to do). "
+            "Use wikilinks [[Like This]] to connect to related [[Goals]], [[Decisions]], or other [[Tasks]]. "
+            "Example: 'Implement feature X for [[Project Alpha]] to achieve [[Q2 Goals]].'"
+        )
 
     @property
     def parameters(self) -> dict[str, Any]:
@@ -238,7 +252,7 @@ class WriteTaskTool(Tool):
                 },
                 "content": {
                     "type": "string",
-                    "description": "Task content"
+                    "description": "Task content. Use wikilinks [[Like This]] to connect related memories."
                 },
                 "assignee": {
                     "type": "string",
@@ -251,7 +265,7 @@ class WriteTaskTool(Tool):
                 },
                 "status": {
                     "type": "string",
-                    "enum": ["pending", "in_progress", "completed", "archived"],
+                    "enum": ["open", "in_progress", "done", "deferred"],
                     "description": "Task status"
                 },
                 "deadline": {
@@ -273,7 +287,7 @@ class WriteTaskTool(Tool):
         content: str,
         assignee: str,
         tags: list[str] | None = None,
-        status: str = "pending",
+        status: str = "open",
         deadline: str | None = None,
         priority: str | None = None,
         **kwargs: Any
@@ -305,7 +319,10 @@ class WriteReflectionTool(Tool):
 
     @property
     def description(self) -> str:
-        return "Save a reflection to memory (meta-observations, patterns, insights)"
+        return (
+            "Save a reflection to memory (meta-observations, patterns, insights). "
+            "Use wikilinks [[Like This]] to connect to related memories, sessions, or concepts."
+        )
 
     @property
     def parameters(self) -> dict[str, Any]:
@@ -318,7 +335,7 @@ class WriteReflectionTool(Tool):
                 },
                 "content": {
                     "type": "string",
-                    "description": "Reflection content"
+                    "description": "Reflection content. Use wikilinks [[Like This]] to connect related memories."
                 },
                 "tags": {
                     "type": "array",
