@@ -20,7 +20,7 @@ We stand on the shoulders of giants:
 HermitCrab is a **personal AI agent** you run on your own machine.  
 It’s not another cloud wrapper, not a bloated framework, not yet another SaaS subscription trap.  
 
-It’s small (under 7,000 lines of core code), readable, auditable, and built around one simple idea:  
+It’s small (under 6,000 lines of core code), readable, auditable, and built around one simple idea:  
 **Your AI should remember what matters to you — forever — without turning into a black box.**
 
 Think of it as a **second brain** you can carry in your pocket (or copy to a new laptop/VPS in seconds).  
@@ -78,10 +78,11 @@ All extracted knowledge lands as tiny, atomic Markdown notes in `workspace/memor
 workspace/
 ├── memory/
 │   ├── facts/          # preferences, hard truths
-│   ├── decisions/      # choices & reasoning
+│   ├── decisions/      # choices & reasoning (immutable)
 │   ├── goals/          # long-term objectives
 │   ├── tasks/          # things to do (with deadlines & status)
 │   └── reflections/    # self-analysis, cleanups
+├── knowledge/          # reference library (articles, docs, notes)
 ├── journal/            # narrative session summaries
 ├── scratchpads/        # per-session transient working notes
 └── sessions/           # raw chat logs (for debugging)
@@ -123,9 +124,14 @@ All channels feed into the same memory & reflection engine.
 | list_dir          | Browse directories                        |
 | exec              | Run safe shell commands                   |
 | web_search        | DuckDuckGo search (no API key needed)     |
+| web_fetch         | Fetch & extract URL content (sanitized)   |
+| knowledge_search  | Search your knowledge library             |
+| knowledge_ingest  | Save articles/docs to library             |
 | message           | Reply to you                              |
-| spawn             | Launch sub-agents           |
+| spawn             | Launch sub-agents                         |
 | cron              | Schedule recurring jobs                   |
+
+**Security:** Web content is automatically sanitized to remove prompt injection attacks, hidden instructions, and encoded payloads.
 
 Execution is **always** gated by Python — the LLM can only propose.
 
@@ -161,7 +167,7 @@ Design rules we live by:
 - Memory is deterministic & auditable
 - Local-first by default
 - Small enough to read in a weekend
-- Forkable, hackable, understandable
+- Hackable, understandable
 
 ### Runtime safety defaults
 
@@ -177,7 +183,7 @@ Production-minded defaults are in `hermitcrab/config/schema.py` and are written 
 
 | Aspect              | HermitCrab                          | Typical AI Framework / Chatbot      |
 |---------------------|-------------------------------------|-------------------------------------|
-| Core code size      | ~7k lines                           | 50k–300k+ lines                     |
+| Core code size      | ~6k lines                           | 50k–300k+ lines                     |
 | Memory              | Atomic Markdown                     | Vector DB or forgotten             |
 | Portability         | Copy workspace → works              | Cloud account locked                |
 | Transparency        | Fully auditable                     | Opaque internals                    |
@@ -225,32 +231,12 @@ hermitcrab onboard
 hermitcrab gateway
 ```
 
-Welcome to your own second brain.  
-Let’s make it remember everything that matters.
-
-### Release and publishing
-
-This repo now includes GitHub Actions workflows:
-
-- CI: `.github/workflows/ci.yml` (ruff + pytest on push/PR)
-- PyPI publish: `.github/workflows/publish-pypi.yml` (on GitHub Release publish)
-
-Recommended release flow:
-
-1. Bump version in `pyproject.toml`.
-2. Run local checks: `uv run ruff check . && uv run pytest -q`.
-3. Commit + tag + push.
-4. Create/publish a GitHub Release for that tag.
-5. PyPI workflow builds with `uv build` and publishes.
-
-PyPI setup needed once:
-
-- Configure PyPI Trusted Publisher for this GitHub repo/workflow.
-- Or, if not using Trusted Publisher, replace workflow publish step with API-token auth.
+Welcome to your own second brain.
+Let's make it remember everything that matters.
 
 ### Docker
 
-`Dockerfile` and `docker-compose.yml` build/run HermitCrab directly (no `bridge/` dependency).
+`Dockerfile` and `docker-compose.yml` build/run HermitCrab directly.
 
 - Build: `docker compose build`
 - Run gateway: `docker compose up -d hermitcrab-gateway`

@@ -1,8 +1,10 @@
+<!-- HEARTBEAT_DISABLED: Remove this comment to enable periodic task checks -->
+
 # Heartbeat Tasks
 
 Checked every 30 minutes by the heartbeat service.
 
-**Usage:** Add tasks under "Active Tasks" that you want the agent to work on periodically. If this file has no tasks (only headers/comments), the agent skips the heartbeat check.
+**Usage:** Add tasks under "Active Tasks" below. If file has only this comment/header (no tasks), heartbeat skips execution.
 
 ## Active Tasks
 

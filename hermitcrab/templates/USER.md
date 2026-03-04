@@ -1,35 +1,24 @@
 # User Profile
 
-## Basic Information
-
-- **Name**: 
-- **Timezone**: 
-- **Language**: 
+## Basic Info
+- **Name**:
+- **Timezone**:
+- **Language**:
 
 ## Preferences
+- **Style**: [ ] Casual  [ ] Professional  [ ] Technical
+- **Detail**: [ ] Brief   [ ] Detailed      [ ] Adaptive
+- **Level**: [ ] Beginner  [ ] Intermediate  [ ] Expert
 
-### Communication
+## Context
+- **Role**:
+- **Projects**:
+- **Stack**:
 
-- [ ] Casual  [ ] Professional  [ ] Technical
-- [ ] Brief   [ ] Detailed      [ ] Adaptive
-
-### Technical Level
-
-- [ ] Beginner  [ ] Intermediate  [ ] Expert
-
-## Work Context
-
-- **Role**: 
-- **Projects**: 
-- **Tools/Stack**: 
-
-## Topics of Interest
+## Interests
 
 
 ## Special Instructions
 
-(Any specific instructions for how the assistant should behave)
-
 ---
-
-*Edit this file to personalize interactions. The agent reads this on every session.*
+*Edit to personalize. Agent reads this every session.*

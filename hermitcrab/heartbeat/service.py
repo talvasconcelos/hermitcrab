@@ -82,6 +82,19 @@ class HeartbeatService:
                 return None
         return None
 
+    def _is_heartbeat_disabled(self, content: str) -> bool:
+        """Check if heartbeat is disabled via marker comment.
+
+        Looks for <!-- HEARTBEAT_DISABLED --> at the top of the file.
+        This allows users to disable heartbeat without deleting the file.
+        """
+        if not content:
+            return True  # Empty file = disabled
+
+        # Check for disable marker in first 500 chars (should be at top)
+        preview = content[:500].upper()
+        return "HEARTBEAT_DISABLED" in preview
+
     async def _decide(self, content: str) -> tuple[str, str]:
         """Phase 1: ask LLM to decide skip/run via virtual tool call.
 
@@ -140,8 +153,10 @@ class HeartbeatService:
     async def _tick(self) -> None:
         """Execute a single heartbeat tick."""
         content = self._read_heartbeat_file()
-        if not content:
-            logger.debug("Heartbeat: HEARTBEAT.md missing or empty")
+
+        # Check for disable marker first (avoids LLM call)
+        if self._is_heartbeat_disabled(content):
+            logger.debug("Heartbeat: disabled via marker or empty file")
             return
 
         logger.info("Heartbeat: checking for tasks...")
@@ -165,8 +180,12 @@ class HeartbeatService:
     async def trigger_now(self) -> str | None:
         """Manually trigger a heartbeat."""
         content = self._read_heartbeat_file()
-        if not content:
+
+        # Check for disable marker first (avoids LLM call)
+        if self._is_heartbeat_disabled(content):
+            logger.debug("Heartbeat: disabled via marker or empty file")
             return None
+
         action, tasks = await self._decide(content)
         if action != "run" or not self.on_execute:
             return None
