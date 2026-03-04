@@ -240,11 +240,9 @@ class NostrChannel(BaseChannel):
             if event:
                 await self._handle_event(relay_url, event)
         elif msg_type == "NOTICE":
-            logger.debug("NOTICE from {}: {}", relay_url, data[1] if len(data) > 1 else "")
+            pass  # Skip relay notices (too verbose)
         elif msg_type == "OK":
-            event_id = data[1] if len(data) > 1 else "unknown"
-            success = data[2] if len(data) > 2 else False
-            logger.debug("OK from {}: event={}... success={}", relay_url, str(event_id)[:8], success)
+            pass  # Skip OK confirmations (too verbose)
 
     async def _handle_event(self, relay_url: str, event: dict[str, Any]) -> None:
         try:
@@ -256,14 +254,12 @@ class NostrChannel(BaseChannel):
             event_created_at = event.get("created_at", 0)
 
             if event_id and event_id in self._seen_event_ids:
-                logger.debug("Skipping duplicate event {}", event_id[:8])
                 return
 
             if event_kind != 4:
                 return
 
             if event_created_at < self._listen_start:
-                logger.debug("Skipping old message (created_at={} < listen_start={})", event_created_at, self._listen_start)
                 return
 
             sender_pubkey, content, message_created_at = self._handle_nip04_event(
@@ -279,7 +275,6 @@ class NostrChannel(BaseChannel):
             if event_id:
                 self._seen_event_ids.add(event_id)
                 if len(self._seen_event_ids) > self._MAX_SEEN_EVENTS:
-                    logger.debug("Seen-event cache exceeded {}, clearing cache", self._MAX_SEEN_EVENTS)
                     self._seen_event_ids.clear()
 
             logger.info("Received DM from {}...: {}...", sender_pubkey[:8], content[:50] if content else "(empty)")
@@ -315,8 +310,6 @@ class NostrChannel(BaseChannel):
 
         try:
             pynostr_event = self.Event(kind=4, pubkey=event_pubkey, created_at=event_created_at, tags=event_tags, content=event_content)
-            if event_id and pynostr_event.id != event_id:
-                logger.debug("NIP-04 event id mismatch (relay={}, computed={})", event_id[:8], pynostr_event.id[:8] if pynostr_event.id else "none")
             dm = self.EncryptedDirectMessage.from_event(pynostr_event)
             dm.decrypt(private_key_hex=self._hex_priv, public_key_hex=sender_pubkey)
             return sender_pubkey, dm.cleartext_content or "", event_created_at
@@ -390,7 +383,6 @@ class NostrChannel(BaseChannel):
         recipient_pubkey = msg.chat_id
         content = msg.content.strip()
         if not content or content.lower() in {"thinking...", "thinking..", "thinking.", "thinking"}:
-            logger.debug("Skipping empty/thinking message")
             return
 
         try:
@@ -403,7 +395,6 @@ class NostrChannel(BaseChannel):
             for relay_url, ws in await self._connection_snapshot():
                 try:
                     await ws.send(publish_msg)
-                    logger.debug("Published event to {}", relay_url)
                 except Exception as e:
                     logger.warning("Failed to publish to {}: {}", relay_url, e)
                     await self._remove_connection_if_same(relay_url, ws)

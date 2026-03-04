@@ -1,26 +1,23 @@
 # Tool Usage Notes
 
-Tool signatures are provided automatically via function calling.
-This file documents non-obvious constraints and usage patterns.
+Tool signatures provided via function calling. Non-obvious constraints below.
 
-## exec — Safety Limits
+## Memory vs Knowledge
 
-- Commands have a configurable timeout (default 60s)
-- Dangerous commands are blocked (rm -rf, format, dd, shutdown, etc.)
-- Output is truncated at 10,000 characters
-- `restrictToWorkspace` config can limit file access to the workspace
+**Memory** = Identity (authoritative, auto-distilled from conversations)
+**Knowledge** = Reference library (external info, explicit retrieval only)
 
 ## Memory Operations — Use Typed APIs
 
-**IMPORTANT:** When saving knowledge to long-term memory, use the typed memory APIs instead of `write_file`.
+**IMPORTANT:** Use typed memory APIs instead of `write_file` for long-term memory.
 
 | Operation | Use Case |
 |-----------|----------|
 | `write_fact` | User preferences, established truths |
-| `write_decision` | Architectural choices, trade-offs (immutable) |
-| `write_goal` | Objectives the user wants to achieve |
-| `write_task` | Action items, todos (requires `assignee`) |
-| `write_reflection` | Meta-observations, patterns (append-only) |
+| `write_decision` | Architectural choices (immutable) |
+| `write_goal` | Objectives to achieve |
+| `write_task` | Action items (requires `assignee`) |
+| `write_reflection` | Meta-observations (append-only) |
 
 ### Category Rules
 
@@ -32,10 +29,19 @@ This file documents non-obvious constraints and usage patterns.
 | **tasks** | ✅ Status only | ⚠️ Archive if done |
 | **reflections** | ❌ Append-only | ❌ Never |
 
-## cron — Scheduled Tasks
+## Knowledge Operations
 
-Refer to the cron skill for usage. Jobs run at configured intervals.
+| Tool | Purpose |
+|------|---------|
+| `knowledge_search` | Search by query, category, or tags |
+| `knowledge_ingest` | Save content to library (articles, docs, notes) |
+| `knowledge_ingest_url` | Fetch URL and save to library |
+| `knowledge_list` | Browse with filters (returns metadata only) |
 
-## spawn — Sub-agents
+**Categories:** `articles`, `books`, `docs`, `notes`
 
-Use for background tasks that don't need immediate response. Sub-agents have isolated sessions but share the same memory.
+## Other Tools
+
+- **exec**: Timeout 60s, dangerous commands blocked, output truncated at 10k chars
+- **cron**: See cron skill for scheduled tasks
+- **spawn**: Background tasks with isolated sessions, shared memory
