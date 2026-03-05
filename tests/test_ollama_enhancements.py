@@ -273,7 +273,7 @@ class TestToolCallQuirkHandling:
         assert len(result) == 1
         assert result[0].id == "call_123"
         assert result[0].name == "shell"
-        assert result[0].arguments == '{"command": "date"}'
+        assert result[0].arguments == {"command": "date"}
 
     def test_parse_ollama_tool_calls_with_quirks(self, ollama_provider):
         """Should apply quirk handling when parsing."""

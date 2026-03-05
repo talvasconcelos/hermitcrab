@@ -7,7 +7,6 @@ Includes Ollama-specific enhancements:
 - Multimodal support (IMAGE marker extraction)
 """
 
-import json
 import os
 import re
 from typing import Any, Literal
@@ -251,13 +250,11 @@ class LiteLLMProvider(LLMProvider):
             # Apply quirk handling
             clean_name, clean_args = self._extract_ollama_tool_name(raw_name, args)
 
-            # Ensure arguments are serialized as JSON string for internal parser
-            args_str = json.dumps(clean_args) if isinstance(clean_args, dict) else str(clean_args)
-
+            # Pass arguments as dict (not string) - downstream code expects dict
             tool_calls.append(ToolCallRequest(
                 id=getattr(tc, "id", None) or f"call_{len(tool_calls)}",
                 name=clean_name,
-                arguments=args_str,
+                arguments=clean_args if isinstance(clean_args, dict) else {},
             ))
 
         return tool_calls
@@ -488,21 +485,13 @@ class LiteLLMProvider(LLMProvider):
                 for tc in message.tool_calls:
                     # Parse arguments from JSON string if needed
                     args = tc.function.arguments
-
-                    # Ensure arguments are a dict
                     if isinstance(args, str):
                         args = json_repair.loads(args)
-                    elif not isinstance(args, dict):
-                        # Fallback: try to serialize and re-parse
-                        try:
-                            args = json_repair.loads(str(args))
-                        except Exception:
-                            args = {}
 
                     tool_calls.append(ToolCallRequest(
                         id=tc.id,
                         name=tc.function.name,
-                        arguments=args if isinstance(args, dict) else {},
+                        arguments=args,
                     ))
 
         usage = {}

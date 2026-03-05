@@ -326,17 +326,7 @@ class AgentLoop:
         """Format tool calls as concise hint, e.g. 'web_search("query")'."""
 
         def _fmt(tc):
-            # Handle both dict and string arguments
-            args = tc.arguments
-            if isinstance(args, str):
-                # Try to parse JSON string
-                try:
-                    import json_repair
-                    args = json_repair.loads(args)
-                except Exception:
-                    args = {}
-
-            val = next(iter(args.values()), None) if isinstance(args, dict) and args else None
+            val = next(iter(tc.arguments.values()), None) if tc.arguments else None
             if isinstance(val, str):
                 return f'{tc.name}("{val[:40]}…")' if len(val) > 40 else f'{tc.name}("{val}")'
             if val is None:
