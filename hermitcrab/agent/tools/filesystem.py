@@ -68,6 +68,10 @@ class ReadFileTool(Tool):
 class WriteFileTool(Tool):
     """Tool to write content to a file."""
 
+    # Protected directories that can only be modified by dedicated tools
+    # memory/ -> memory tools (write_task, write_fact, etc.)
+    PROTECTED_SUBDIRS = frozenset({"memory"})
+
     def __init__(self, workspace: Path | None = None, allowed_dir: Path | None = None):
         self._workspace = workspace
         self._allowed_dir = allowed_dir
@@ -78,7 +82,7 @@ class WriteFileTool(Tool):
 
     @property
     def description(self) -> str:
-        return "Write content to a file at the given path. Creates parent directories if needed."
+        return "Write content to a file at the given path. Creates parent directories if needed. Cannot write to memory/ - use memory tools instead."
 
     @property
     def parameters(self) -> dict[str, Any]:
@@ -87,7 +91,7 @@ class WriteFileTool(Tool):
             "properties": {
                 "path": {
                     "type": "string",
-                    "description": "The file path to write to"
+                    "description": "The file path to write to (cannot be in memory/)"
                 },
                 "content": {
                     "type": "string",
@@ -100,6 +104,16 @@ class WriteFileTool(Tool):
     async def execute(self, path: str, content: str, **kwargs: Any) -> str:
         try:
             file_path = _resolve_path(path, self._workspace, self._allowed_dir)
+
+            # Block writes to protected directories (memory/)
+            if self._workspace:
+                try:
+                    relative_path = file_path.resolve().relative_to(self._workspace.resolve())
+                    if relative_path.parts and relative_path.parts[0] in self.PROTECTED_SUBDIRS:
+                        return f"Error: Cannot write to protected directory: {relative_path.parts[0]}/. Use dedicated memory tools instead."
+                except ValueError:
+                    pass  # Path is outside workspace, will be caught by allowed_dir check
+
             file_path.parent.mkdir(parents=True, exist_ok=True)
             file_path.write_text(content, encoding="utf-8")
             return f"Successfully wrote {len(content)} bytes to {file_path}"
