@@ -29,6 +29,7 @@ class ContextBuilder:
         memory_max_chars: int = 12000,
         memory_max_items_per_category: int = 25,
         memory_max_item_chars: int = 600,
+        model_aliases: dict[str, str] | None = None,
     ):
         self.workspace = workspace
         self.memory = MemoryStore(workspace)
@@ -36,6 +37,7 @@ class ContextBuilder:
         self.memory_max_chars = memory_max_chars
         self.memory_max_items_per_category = memory_max_items_per_category
         self.memory_max_item_chars = memory_max_item_chars
+        self.model_aliases = model_aliases or {}
 
     def build_system_prompt(
         self,
@@ -135,6 +137,14 @@ Skills with available="false" need dependencies installed first - you can try in
         system = platform.system()
         runtime = f"{'macOS' if system == 'Darwin' else system} {platform.machine()}, Python {platform.python_version()}"
 
+        # Format model aliases if configured
+        aliases_section = ""
+        if self.model_aliases:
+            alias_lines = [f"- **{alias}**: {model}" for alias, model in self.model_aliases.items()]
+            aliases_section = "\n".join(alias_lines)
+        else:
+            aliases_section = "- No custom aliases configured (use full model names)"
+
         return f"""# hermitcrab
 
 ## Current Time
@@ -174,7 +184,17 @@ Reply directly with text for conversations. Only use the 'message' tool to send 
 - Track goals and tasks: use write_goal() and write_task() with appropriate status
 - Search memory: use search_memory(query) or read_memory(category, id)
 - Memory is category-based, atomic, and file-backed — no summarization
-- Before answering questions, ask yourself: "Does answering this correctly require user-specific, project-specific, or historical information that may exist in memory?" If the answer is yes, or maybe, search memory first and use the results to inform your answer. Never guess, fabricate, or assume memory content."""
+- Before answering questions, ask yourself: "Does answering this correctly require user-specific, project-specific, or historical information that may exist in memory?" If the answer is yes, or maybe, search memory first and use the results to inform your answer. Never guess, fabricate, or assume memory content.
+
+## Model Aliases
+You can spawn subagents with specific models using aliases. When delegating tasks, choose the appropriate model for the job:
+{aliases_section}
+
+To spawn a subagent with a specific model:
+- spawn(task="...", label="...", model="qwen")
+- spawn(task="...", label="...", model="local")
+
+Use subagents for complex, time-consuming, or specialized tasks. You act as the coordinator — delegate grunt work to subagents and stay responsive to the user."""
 
     def _load_bootstrap_files(self) -> str:
         """Load all bootstrap files from workspace."""
