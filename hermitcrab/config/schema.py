@@ -127,6 +127,7 @@ class AgentJobModels(Base):
     distillation: str | None = None  # None = skip (local only, don't escalate)
     reflection: str | None = None  # None = use primary
     summarisation: str | None = None  # None = use primary
+    subagent: str | None = None  # None = use primary (dedicated model for subagents)
 
     def get_model(self, job_class: str, primary_model: str) -> str | None:
         """
@@ -183,6 +184,7 @@ class AgentsConfig(Base):
     """Agent configuration."""
 
     defaults: AgentDefaults = Field(default_factory=AgentDefaults)
+    model_aliases: dict[str, str] = Field(default_factory=dict)  # Friendly aliases: {"qwen": "ollama/qwen2.5:7b"}
 
 
 class ProviderConfig(Base):

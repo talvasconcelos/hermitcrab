@@ -51,14 +51,66 @@ Move your workspace anywhere. The agent picks up exactly where it left off.
    ```
    (creates `~/.hermitcrab/` with config and empty workspace)
 
-3. **Pick a model & run**  
-   Edit `~/.hermitcrab/config.json` to point to your favorite model (local or cloud).  
-   Then just:
+3. **Pick a model & run**
+
+   **Option A: Local Ollama (recommended for privacy & free)**
+   
+   a. Install Ollama:
+   ```bash
+   # macOS
+   brew install ollama
+   
+   # Linux
+   curl -fsSL https://ollama.com/install.sh | sh
+   
+   # Start Ollama (runs in background)
+   ollama serve
+   ```
+   
+   b. Pull a model:
+   ```bash
+   ollama pull lfm2.5-thinking:latest  # Fast thinking model
+   # Or: ollama pull llama3.1:8b      # General purpose
+   # Or: ollama pull qwen2.5-coder:7b # Coding specialist
+   ```
+   
+   c. Edit `~/.hermitcrab/config.json`:
+   ```json
+   {
+     "providers": {
+       "ollama": {
+         "apiBase": "http://localhost:11434"
+       }
+     },
+     "agents": {
+       "defaults": {
+         "model": "ollama/lfm2.5-thinking:latest"
+       }
+     }
+   }
+   ```
+   
+   **Option B: Cloud model (OpenRouter)**
+   ```bash
+   # Get API key at https://openrouter.ai/keys
+   ```
+   Edit `~/.hermitcrab/config.json`:
+   ```json
+   {
+     "providers": {
+       "openrouter": {
+         "apiKey": "sk-or-..."
+       }
+     }
+   }
+   ```
+
+   Then run:
    ```bash
    hermitcrab agent
    ```
 
-You’re now talking to your own persistent, memory-aware agent.
+You're now talking to your own persistent, memory-aware agent.
 
 ### How the agent actually thinks & remembers
 

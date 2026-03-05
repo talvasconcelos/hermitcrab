@@ -94,6 +94,7 @@ class JobClass(str, Enum):
     DISTILLATION = "distillation"  # Atomic extraction, local only
     REFLECTION = "reflection"  # Meta-analysis, local preferred
     SUMMARISATION = "summarisation"  # Content summarization, flexible
+    SUBAGENT = "subagent"  # Background subagent tasks
 
 
 # Session inactivity timeout (30 minutes)
@@ -141,6 +142,8 @@ class AgentLoop:
         job_models: dict[JobClass, str | None] | None = None,
         # Optional: reflection promotion config
         reflection_config: dict[str, Any] | None = None,
+        # Optional: model aliases (friendly names like "qwen", "local")
+        model_aliases: dict[str, str] | None = None,
         inactivity_timeout_s: int = INACTIVITY_TIMEOUT_S,
         llm_max_retries: int = 2,
         llm_retry_base_delay_s: float = 0.5,
@@ -181,13 +184,16 @@ class AgentLoop:
                 JobClass.DISTILLATION: None,  # Skip by default
                 JobClass.REFLECTION: self.model,
                 JobClass.SUMMARISATION: self.model,
+                JobClass.SUBAGENT: self.model,
             }
+        self.model_aliases = model_aliases or {}
 
         self.context = ContextBuilder(
             workspace,
             memory_max_chars=memory_context_max_chars,
             memory_max_items_per_category=memory_context_max_items_per_category,
             memory_max_item_chars=memory_context_max_item_chars,
+            model_aliases=self.model_aliases,
         )
         self.sessions = session_manager or SessionManager(workspace)
         self.journal = JournalStore(workspace)
@@ -198,12 +204,13 @@ class AgentLoop:
             provider=provider,
             workspace=workspace,
             bus=bus,
-            model=self.model,
+            model=self._job_models.get(JobClass.SUBAGENT) or self.model,
             temperature=self.temperature,
             max_tokens=self.max_tokens,
             brave_api_key=brave_api_key,
             exec_config=self.exec_config,
             restrict_to_workspace=restrict_to_workspace,
+            model_aliases=self.model_aliases,
         )
 
         # Initialize reflection service
