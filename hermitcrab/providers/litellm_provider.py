@@ -99,7 +99,9 @@ class LiteLLMProvider(LLMProvider):
             model: Model name, potentially with :cloud suffix
 
         Returns:
-            Tuple of (stripped_model_name, should_use_cloud)
+            Tuple of (model_name_for_api, should_use_cloud)
+            - For local Ollama: keeps :cloud suffix (Ollama needs it for routing)
+            - For direct cloud: strips :cloud suffix (API handles routing)
 
         Raises:
             ValueError: If :cloud requested but no local Ollama and no API key
@@ -116,9 +118,9 @@ class LiteLLMProvider(LLMProvider):
             any(host in self.api_base.lower() for host in ['localhost', '127.0.0.1', '::1'])
         )
 
-        # If local Ollama is available, :cloud just routes through it
+        # If local Ollama is available, keep :cloud suffix for Ollama to route
         if is_local_ollama:
-            return normalized_model, True
+            return model, True  # Keep :cloud suffix - Ollama needs it!
 
         # No local Ollama - need API key for direct cloud access
         if not self._ollama_cloud_api_key:
@@ -128,7 +130,7 @@ class LiteLLMProvider(LLMProvider):
                 f"Start Ollama locally or set api_key in provider config."
             )
 
-        # Use API key for direct cloud access
+        # Use API key for direct cloud access (stripped model name)
         return normalized_model, True
 
     def _extract_ollama_images(self, content: str) -> tuple[str | None, list[str]]:
