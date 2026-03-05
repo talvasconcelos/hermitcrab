@@ -1104,7 +1104,8 @@ class AgentLoop:
                     clean = self._strip_think(response.content)
                     if clean:
                         await on_progress(clean)
-                    await on_progress(self._tool_hint(response.tool_calls), tool_hint=True)
+                    # Tool hints are for debugging only - don't send to user channels
+                    # await on_progress(self._tool_hint(response.tool_calls), tool_hint=True)
 
                 tool_call_dicts = [
                     {
@@ -1140,6 +1141,11 @@ class AgentLoop:
                 repeated_tool_cycles = 0
                 last_tool_signature = None
                 final_content = self._strip_think(response.content)
+                # If LLM returned no content but we have tool results, use last tool result
+                if not final_content and messages:
+                    last_msg = messages[-1]
+                    if last_msg.get("role") == "tool" and last_msg.get("content"):
+                        final_content = str(last_msg["content"])
                 break
 
         if final_content is None and iteration >= self.max_iterations:
@@ -1423,7 +1429,14 @@ class AgentLoop:
                 raise  # Re-raise to be handled by outer error handler
 
             if final_content is None:
-                final_content = "I've completed processing but have no response to give."
+                # Fallback: check if we have any tool results to report
+                if all_msgs:
+                    for msg in reversed(all_msgs):
+                        if msg.get("role") == "tool" and msg.get("content"):
+                            final_content = str(msg["content"])
+                            break
+                if final_content is None:
+                    final_content = "Task completed."
 
             preview = final_content[:120] + "..." if len(final_content) > 120 else final_content
             logger.info("Response to {}:{}: {}", msg.channel, msg.sender_id, preview)
