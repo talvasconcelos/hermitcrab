@@ -1175,6 +1175,14 @@ class AgentLoop:
                             )
                     except Exception as e:
                         logger.error("Error processing message: {}", e)
+                        # Try to save session state before erroring (preserve partial progress)
+                        try:
+                            key = msg.session_key or f"{msg.channel}:{msg.chat_id}"
+                            session = self.sessions.get_or_create(key)
+                            if session.messages:
+                                self.sessions.save(session)
+                        except Exception as save_err:
+                            logger.error("Failed to save session during error handling: {}", save_err)
                         await self.bus.publish_outbound(
                             OutboundMessage(
                                 channel=msg.channel,
@@ -1295,10 +1303,21 @@ class AgentLoop:
                     scratchpad_path=str(scratchpad_path),
                 )
                 # Phase B happens inside _run_agent_loop
-                final_content, _, all_msgs = await self._run_agent_loop(
-                    messages,
-                    job_class=JobClass.INTERACTIVE_RESPONSE,
-                )
+                final_content = None
+                all_msgs = messages
+                try:
+                    final_content, _, all_msgs = await self._run_agent_loop(
+                        messages,
+                        job_class=JobClass.INTERACTIVE_RESPONSE,
+                    )
+                except Exception as e:
+                    logger.error("Error in agent loop (system): {}", e)
+                    # Preserve partial progress
+                    if all_msgs and all_msgs != messages:
+                        self._save_turn(session, all_msgs, 1 + len(history))
+                        self.sessions.save(session)
+                        logger.info("Saved partial session state after error (system)")
+                    raise
                 # Phase C: Deterministic save
                 self._save_turn(session, all_msgs, 1 + len(history))
                 self.sessions.save(session)
@@ -1384,11 +1403,24 @@ class AgentLoop:
             # Phase B: Interactive response (LLM allowed, policy gated)
             # ====================================================================
 
-            final_content, tools_used, all_msgs = await self._run_agent_loop(
-                initial_messages,
-                on_progress=on_progress or _bus_progress,
-                job_class=JobClass.INTERACTIVE_RESPONSE,
-            )
+            final_content = None
+            tools_used = []
+            all_msgs = initial_messages
+
+            try:
+                final_content, tools_used, all_msgs = await self._run_agent_loop(
+                    initial_messages,
+                    on_progress=on_progress or _bus_progress,
+                    job_class=JobClass.INTERACTIVE_RESPONSE,
+                )
+            except Exception as e:
+                logger.error("Error in agent loop: {}", e)
+                # Preserve partial progress - save whatever messages we have
+                if all_msgs and all_msgs != initial_messages:
+                    self._save_turn(session, all_msgs, 1 + len(history))
+                    self.sessions.save(session)
+                    logger.info("Saved partial session state after error")
+                raise  # Re-raise to be handled by outer error handler
 
             if final_content is None:
                 final_content = "I've completed processing but have no response to give."
