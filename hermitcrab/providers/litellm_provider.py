@@ -488,13 +488,21 @@ class LiteLLMProvider(LLMProvider):
                 for tc in message.tool_calls:
                     # Parse arguments from JSON string if needed
                     args = tc.function.arguments
+
+                    # Ensure arguments are a dict
                     if isinstance(args, str):
                         args = json_repair.loads(args)
+                    elif not isinstance(args, dict):
+                        # Fallback: try to serialize and re-parse
+                        try:
+                            args = json_repair.loads(str(args))
+                        except Exception:
+                            args = {}
 
                     tool_calls.append(ToolCallRequest(
                         id=tc.id,
                         name=tc.function.name,
-                        arguments=args,
+                        arguments=args if isinstance(args, dict) else {},
                     ))
 
         usage = {}

@@ -116,6 +116,14 @@ class HeartbeatService:
             return "skip", ""
 
         args = response.tool_calls[0].arguments
+
+        # Ensure args is a dict (handle both string and dict cases)
+        if isinstance(args, str):
+            import json_repair
+            args = json_repair.loads(args)
+        elif not isinstance(args, dict):
+            args = {}
+
         return args.get("action", "skip"), args.get("tasks", "")
 
     async def start(self) -> None:
