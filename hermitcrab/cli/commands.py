@@ -418,6 +418,9 @@ def gateway(
         channels_config=config.channels,
         job_models=job_models,  # Pass job models (or None for defaults)
         model_aliases=config.agents.model_aliases,  # Pass model aliases
+        reasoning_effort_config={
+            "reasoning_effort": config.agents.defaults.job_models.reasoning_effort,
+        },
         inactivity_timeout_s=config.agents.defaults.inactivity_timeout_s,
         llm_max_retries=config.agents.defaults.llm_max_retries,
         llm_retry_base_delay_s=config.agents.defaults.llm_retry_base_delay_s,
@@ -733,6 +736,9 @@ def agent(
         channels_config=config.channels,
         job_models=job_models,  # Pass job models (or None for defaults)
         model_aliases=config.agents.model_aliases,  # Pass model aliases
+        reasoning_effort_config={
+            "reasoning_effort": config.agents.defaults.job_models.reasoning_effort,
+        },
         inactivity_timeout_s=config.agents.defaults.inactivity_timeout_s,
         llm_max_retries=config.agents.defaults.llm_max_retries,
         llm_retry_base_delay_s=config.agents.defaults.llm_retry_base_delay_s,
@@ -1261,6 +1267,9 @@ def cron_run(
         channels_config=config.channels,
         job_models=job_models,  # Pass job models (or None for defaults)
         model_aliases=config.agents.model_aliases,  # Pass model aliases
+        reasoning_effort_config={
+            "reasoning_effort": config.agents.defaults.job_models.reasoning_effort,
+        },
         inactivity_timeout_s=config.agents.defaults.inactivity_timeout_s,
         llm_max_retries=config.agents.defaults.llm_max_retries,
         llm_retry_base_delay_s=config.agents.defaults.llm_retry_base_delay_s,
