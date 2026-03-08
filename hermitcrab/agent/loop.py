@@ -1085,6 +1085,7 @@ class AgentLoop:
                 tool_signature = self._tool_cycle_signature(response.tool_calls)
                 if tool_signature == last_tool_signature:
                     repeated_tool_cycles += 1
+                    logger.warning("Repeated tool cycle detected ({}x): {}", repeated_tool_cycles, tool_signature[:100])
                 else:
                     repeated_tool_cycles = 1
                     last_tool_signature = tool_signature
@@ -1141,19 +1142,21 @@ class AgentLoop:
                 repeated_tool_cycles = 0
                 last_tool_signature = None
                 final_content = self._strip_think(response.content)
-                # If LLM returned no content but we have tool results, use last tool result
-                if not final_content and messages:
-                    last_msg = messages[-1]
-                    if last_msg.get("role") == "tool" and last_msg.get("content"):
-                        final_content = str(last_msg["content"])
                 break
 
         if final_content is None and iteration >= self.max_iterations:
-            logger.warning("Max iterations ({}) reached", self.max_iterations)
+            logger.warning("Max iterations ({}) reached. Tools used: {}", self.max_iterations, tools_used)
+            tools_summary = ""
+            if tools_used:
+                from collections import Counter
+                tool_counts = Counter(tools_used)
+                tools_summary = f" Tools called: {', '.join(f'{t}({c})' for t, c in tool_counts.most_common(5))}."
             final_content = (
                 f"I reached the maximum number of tool call iterations ({self.max_iterations}) "
-                "without completing the task. You can try breaking the task into smaller steps."
+                f"without completing the task.{tools_summary} You can try breaking the task into smaller steps."
             )
+        elif final_content is None:
+            logger.warning("Agent loop ended without content after {} iterations. Tools used: {}", iteration, tools_used)
 
         return final_content, tools_used, messages
 
@@ -1429,14 +1432,7 @@ class AgentLoop:
                 raise  # Re-raise to be handled by outer error handler
 
             if final_content is None:
-                # Fallback: check if we have any tool results to report
-                if all_msgs:
-                    for msg in reversed(all_msgs):
-                        if msg.get("role") == "tool" and msg.get("content"):
-                            final_content = str(msg["content"])
-                            break
-                if final_content is None:
-                    final_content = "Task completed."
+                final_content = "I've completed processing but have no response to give."
 
             preview = final_content[:120] + "..." if len(final_content) > 120 else final_content
             logger.info("Response to {}:{}: {}", msg.channel, msg.sender_id, preview)
@@ -1471,10 +1467,6 @@ class AgentLoop:
             # NOTE: Journal is NOT written per-turn anymore.
             # Journal synthesis happens only on session end (explicit or timeout).
             # This is intentional: journal is narrative, not authoritative.
-
-            if message_tool := self.tools.get("message"):
-                if isinstance(message_tool, MessageTool) and message_tool.has_sent_in_turn:
-                    return None
 
             return OutboundMessage(
                 channel=msg.channel,

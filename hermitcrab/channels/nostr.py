@@ -382,7 +382,8 @@ class NostrChannel(BaseChannel):
 
         recipient_pubkey = msg.chat_id
         content = msg.content.strip()
-        if not content or content.lower() in {"thinking...", "thinking..", "thinking.", "thinking"}:
+        if not content:
+            logger.debug("Skipping empty message")
             return
 
         try:
