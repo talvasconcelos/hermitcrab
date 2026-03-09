@@ -120,6 +120,14 @@ class AgentJobModels(Base):
       "summarisation": null                                 // Null = use primary
     }
     ```
+
+    Reasoning effort (for models that support it, e.g., OpenAI o1/o3, thinking models):
+    - "none": Disable reasoning/thinking (fast, deterministic tasks)
+    - "low": Minimal reasoning (quick tasks)
+    - "medium": Default reasoning (balanced)
+    - "high": Maximum reasoning (complex problems)
+
+    LiteLLM silently ignores this parameter for models that don't support it.
     """
 
     interactive_response: str = ""  # Required (falls back to primary if empty)
@@ -128,6 +136,9 @@ class AgentJobModels(Base):
     reflection: str | None = None  # None = use primary
     summarisation: str | None = None  # None = use primary
     subagent: str | None = None  # None = use primary (dedicated model for subagents)
+
+    # Reasoning effort control (passed to LiteLLM, ignored by unsupported models)
+    reasoning_effort: Literal["none", "low", "medium", "high"] = "medium"
 
     def get_model(self, job_class: str, primary_model: str) -> str | None:
         """

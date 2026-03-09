@@ -10,7 +10,7 @@ Includes Ollama-specific enhancements:
 import json
 import os
 import re
-from typing import Any
+from typing import Any, Literal
 
 import json_repair
 import litellm
@@ -397,6 +397,7 @@ class LiteLLMProvider(LLMProvider):
         model: str | None = None,
         max_tokens: int = 4096,
         temperature: float = 0.7,
+        reasoning_effort: Literal["none", "low", "medium", "high"] | None = None,
     ) -> LLMResponse:
         """
         Send a chat completion request via LiteLLM.
@@ -407,6 +408,8 @@ class LiteLLMProvider(LLMProvider):
             model: Model identifier (e.g., 'anthropic/claude-sonnet-4-5').
             max_tokens: Maximum tokens in response.
             temperature: Sampling temperature.
+            reasoning_effort: Control reasoning/thinking effort for supported models.
+                Values: "none", "low", "medium", "high". Silently ignored if unsupported.
 
         Returns:
             LLMResponse with content and/or tool calls.
@@ -457,6 +460,10 @@ class LiteLLMProvider(LLMProvider):
         if tools:
             kwargs["tools"] = tools
             kwargs["tool_choice"] = "auto"
+
+        # Add reasoning effort if specified (LiteLLM silently ignores if unsupported)
+        if reasoning_effort:
+            kwargs["reasoning_effort"] = reasoning_effort
 
         # Ollama reasoning model support (think parameter)
         # Some Ollama models (DeepSeek, etc.) support internal reasoning

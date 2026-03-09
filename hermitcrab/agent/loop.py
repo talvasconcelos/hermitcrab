@@ -144,6 +144,8 @@ class AgentLoop:
         reflection_config: dict[str, Any] | None = None,
         # Optional: model aliases (friendly names like "qwen", "local")
         model_aliases: dict[str, str] | None = None,
+        # Optional: reasoning effort config (loaded from config)
+        reasoning_effort_config: dict[str, Any] | None = None,
         inactivity_timeout_s: int = INACTIVITY_TIMEOUT_S,
         llm_max_retries: int = 2,
         llm_retry_base_delay_s: float = 0.5,
@@ -187,6 +189,13 @@ class AgentLoop:
                 JobClass.SUBAGENT: self.model,
             }
         self.model_aliases = model_aliases or {}
+
+        # Reasoning effort configuration (default: "medium")
+        self._reasoning_effort = (
+            reasoning_effort_config.get("reasoning_effort", "medium")
+            if reasoning_effort_config
+            else "medium"
+        )
 
         self.context = ContextBuilder(
             workspace,
@@ -360,6 +369,7 @@ class AgentLoop:
         max_tokens: int,
         tools: list[dict[str, Any]] | None = None,
         job_class: JobClass | None = None,
+        reasoning_effort: str | None = None,
     ):
         """Call provider.chat with bounded retries/backoff."""
         attempts = self.llm_max_retries + 1
@@ -371,6 +381,7 @@ class AgentLoop:
                     model=model,
                     temperature=temperature,
                     max_tokens=max_tokens,
+                    reasoning_effort=reasoning_effort,
                 )
             except asyncio.CancelledError:
                 raise
@@ -653,6 +664,7 @@ class AgentLoop:
                         temperature=0.05,
                         max_tokens=256,
                         job_class=JobClass.JOURNAL_SYNTHESIS,
+                        reasoning_effort=self._reasoning_effort,
                     )
                     content = self._strip_think(response.content)
                     if content:
@@ -773,6 +785,7 @@ class AgentLoop:
                     temperature=0.1,
                     max_tokens=2048,
                     job_class=JobClass.DISTILLATION,
+                    reasoning_effort=self._reasoning_effort,
                 )
 
                 content = self._strip_think(response.content)
@@ -1065,6 +1078,7 @@ class AgentLoop:
                 temperature=self.temperature,
                 max_tokens=self.max_tokens,
                 job_class=job_class,
+                reasoning_effort=self._reasoning_effort,
             )
 
             if response.has_tool_calls:
