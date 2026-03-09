@@ -89,6 +89,34 @@ Move your workspace anywhere. The agent picks up exactly where it left off.
      }
    }
    ```
+
+   Advanced local Ollama example with cloud-routed models, subagent aliases, and reasoning control:
+   ```json
+   {
+     "providers": {
+       "ollama": {
+         "apiBase": "http://localhost:11434"
+       }
+     },
+     "agents": {
+       "modelAliases": {
+         "coder": "ollama/qwen3.5:4b",
+         "fast": "ollama/lfm2.5-thinking:latest"
+       },
+       "defaults": {
+         "model": "ollama/kimi-k2.5:cloud",
+         "jobModels": {
+           "subagent": "ollama/qwen3.5:4b",
+           "reasoningEffort": "medium"
+         }
+       }
+     }
+   }
+   ```
+   Notes:
+   - Keep the `ollama/` prefix when targeting Ollama models.
+   - `:cloud` models still route through the local Ollama provider/library when supported by Ollama.
+   - Subagents can use aliases such as `coder` for heavier delegated work.
    
    **Option B: Cloud model (OpenRouter)**
    ```bash
@@ -200,6 +228,18 @@ HermitCrab gets smarter over time by:
 
 This keeps costs low while letting the agent learn without constant supervision.
 
+### Subagents and model aliases
+
+HermitCrab can delegate longer-running or specialized work to subagents while the main agent stays responsive.
+
+- Configure aliases in `agents.modelAliases`
+- Set a dedicated subagent model in `agents.defaults.jobModels.subagent`
+- The agent can use these aliases when spawning delegated work
+
+Example use cases:
+- "Build a simple website for X, use the coder subagent"
+- "Investigate this bug in the background and report back"
+
 ### Architecture at a glance
 
 Total core agent code: 6,927 lines (run `./core_agent_lines.sh` to verify).
@@ -293,4 +333,3 @@ Let's make it remember everything that matters.
 - Build: `docker compose build`
 - Run gateway: `docker compose up -d hermitcrab-gateway`
 - Persisted data lives at `~/.hermitcrab` (mounted into container).
-
