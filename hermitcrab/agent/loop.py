@@ -798,12 +798,26 @@ class AgentLoop:
                 if json_start >= 0 and json_end > json_start:
                     json_str = content[json_start:json_end]
                     data = json.loads(json_str)
+                    if not isinstance(data, dict):
+                        logger.warning(
+                            "Distillation response root is not an object: {} ({})",
+                            session.key,
+                            type(data).__name__,
+                        )
+                        return
 
                     candidates = data.get("candidates", [])
                     validated_count = 0
 
                     for candidate_data in candidates:
                         try:
+                            if not isinstance(candidate_data, dict):
+                                logger.debug(
+                                    "Skipping non-dict distillation candidate for {}: {}",
+                                    session.key,
+                                    type(candidate_data).__name__,
+                                )
+                                continue
                             candidate = AtomicCandidate.from_dict(candidate_data)
                             candidate.source_session = session.key
 
@@ -825,7 +839,9 @@ class AgentLoop:
                         except Exception as e:
                             logger.warning(
                                 "Failed to parse candidate: {}: {}",
-                                candidate_data.get("title", "unknown"),
+                                candidate_data.get("title", "unknown")
+                                if isinstance(candidate_data, dict)
+                                else "unknown",
                                 e,
                             )
 
