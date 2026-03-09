@@ -20,6 +20,7 @@ from hermitcrab.bus.events import InboundMessage
 from hermitcrab.bus.queue import MessageBus
 from hermitcrab.config.schema import ExecToolConfig
 from hermitcrab.providers.base import LLMProvider
+from hermitcrab.utils.helpers import resolve_model_alias
 
 
 class SubagentManager:
@@ -42,6 +43,7 @@ class SubagentManager:
         brave_api_key: str | None = None,
         exec_config: ExecToolConfig | None = None,
         restrict_to_workspace: bool = False,
+        model_aliases: dict[str, str] | None = None,
     ):
         self.provider = provider
         self.workspace = workspace
@@ -52,6 +54,7 @@ class SubagentManager:
         self.brave_api_key = brave_api_key
         self.exec_config = exec_config or ExecToolConfig()
         self.restrict_to_workspace = restrict_to_workspace
+        self.model_aliases = model_aliases or {}
         self._running_tasks: dict[str, asyncio.Task[None]] = {}
 
     async def spawn(
@@ -60,6 +63,7 @@ class SubagentManager:
         label: str | None = None,
         origin_channel: str = "cli",
         origin_chat_id: str = "direct",
+        model: str | None = None,
     ) -> str:
         """
         Spawn a subagent to execute a task in the background.
@@ -69,12 +73,16 @@ class SubagentManager:
             label: Optional human-readable label for the task.
             origin_channel: The channel to announce results to.
             origin_chat_id: The chat ID to announce results to.
+            model: Optional model name or alias (e.g., "qwen", "local", "claude").
 
         Returns:
             Status message indicating the subagent was started.
         """
         task_id = str(uuid.uuid4())[:8]
         display_label = label or task[:30] + ("..." if len(task) > 30 else "")
+
+        # Resolve model alias if provided
+        resolved_model = resolve_model_alias(model, self.model_aliases) if model else self.model
 
         origin = {
             "channel": origin_channel,
@@ -83,14 +91,14 @@ class SubagentManager:
 
         # Create background task
         bg_task = asyncio.create_task(
-            self._run_subagent(task_id, task, display_label, origin)
+            self._run_subagent(task_id, task, display_label, origin, resolved_model)
         )
         self._running_tasks[task_id] = bg_task
 
         # Cleanup when done
         bg_task.add_done_callback(lambda _: self._running_tasks.pop(task_id, None))
 
-        logger.info("Spawned subagent [{}]: {}", task_id, display_label)
+        logger.info("Spawned subagent [{}]: {} (model: {})", task_id, display_label, resolved_model)
         return f"Subagent [{display_label}] started (id: {task_id}). I'll notify you when it completes."
 
     async def _run_subagent(
@@ -99,9 +107,13 @@ class SubagentManager:
         task: str,
         label: str,
         origin: dict[str, str],
+        model: str | None = None,
     ) -> None:
         """Execute the subagent task and announce the result."""
         logger.info("Subagent [{}] starting task: {}", task_id, label)
+
+        # Use provided model or fall back to default
+        subagent_model = model or self.model
 
         try:
             # Build subagent tools (no message tool, no spawn tool)
@@ -137,7 +149,7 @@ class SubagentManager:
                 response = await self.provider.chat(
                     messages=messages,
                     tools=tools.get_definitions(),
-                    model=self.model,
+                    model=subagent_model,
                     temperature=self.temperature,
                     max_tokens=self.max_tokens,
                 )

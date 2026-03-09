@@ -5,11 +5,12 @@ from unittest.mock import patch
 import pytest
 from typer.testing import CliRunner
 
-from hermitcrab.cli.commands import app
+from hermitcrab.cli.commands import _build_job_models_from_config, app
 from hermitcrab.config.schema import Config
 from hermitcrab.providers.litellm_provider import LiteLLMProvider
 from hermitcrab.providers.openai_codex_provider import _strip_model_prefix
 from hermitcrab.providers.registry import find_by_model
+from hermitcrab.utils.helpers import resolve_model_alias
 
 runner = CliRunner()
 
@@ -136,3 +137,33 @@ def test_litellm_provider_canonicalizes_github_copilot_hyphen_prefix():
 def test_openai_codex_strip_prefix_supports_hyphen_and_underscore():
     assert _strip_model_prefix("openai-codex/gpt-5.1-codex") == "gpt-5.1-codex"
     assert _strip_model_prefix("openai_codex/gpt-5.1-codex") == "gpt-5.1-codex"
+
+
+def test_build_job_models_includes_subagent_model():
+    config = Config.model_validate(
+        {
+            "agents": {
+                "defaults": {
+                    "model": "anthropic/claude-opus-4-5",
+                    "jobModels": {
+                        "subagent": "ollama/qwen3.5:4b",
+                    },
+                }
+            }
+        }
+    )
+
+    job_models = _build_job_models_from_config(config)
+
+    assert job_models is not None
+    assert job_models["subagent"] == "ollama/qwen3.5:4b"
+
+
+def test_resolve_model_alias_returns_configured_model():
+    aliases = {
+        "coder": "ollama/qwen3.5:4b",
+        "fast": "ollama/lfm2.5-thinking:latest",
+    }
+
+    assert resolve_model_alias("coder", aliases) == "ollama/qwen3.5:4b"
+    assert resolve_model_alias("anthropic/claude-opus-4-5", aliases) == "anthropic/claude-opus-4-5"

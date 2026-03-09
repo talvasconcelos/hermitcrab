@@ -60,6 +60,7 @@ def _build_job_models_from_config(config: Config) -> dict | None:
         or job_models_config.distillation is not None
         or job_models_config.reflection is not None
         or job_models_config.summarisation is not None
+        or job_models_config.subagent is not None
     )
 
     if not has_config:
@@ -75,6 +76,7 @@ def _build_job_models_from_config(config: Config) -> dict | None:
         JobClass.DISTILLATION: job_models_config.get_model("distillation", primary_model),
         JobClass.REFLECTION: job_models_config.get_model("reflection", primary_model),
         JobClass.SUMMARISATION: job_models_config.get_model("summarisation", primary_model),
+        JobClass.SUBAGENT: job_models_config.get_model("subagent", primary_model),
     }
 
 
@@ -304,6 +306,35 @@ def _make_provider(config: Config):
     from hermitcrab.providers.registry import find_by_name
 
     spec = find_by_name(provider_name)
+    
+    # Special handling for Ollama - show helpful message if misconfigured
+    if provider_name == "ollama" or "ollama" in model.lower():
+        # Check if api_base is explicitly set to None/empty (not using default)
+        ollama_config = config.providers.ollama if hasattr(config.providers, 'ollama') else None
+        api_base = config.get_api_base(model)
+        
+        # If user explicitly configured ollama provider but with null/empty api_base
+        if ollama_config and ollama_config.api_base is None and api_base is None:
+            console.print("[yellow]Warning: Ollama provider configured without api_base.[/yellow]")
+            console.print("Using default: http://localhost:11434")
+            console.print("\n[dim]If this is wrong, edit ~/.hermitcrab/config.json:[/dim]")
+            console.print("""{
+  "providers": {
+    "ollama": {
+      "apiBase": "http://localhost:11434"
+    }
+  },
+  "agents": {
+    "defaults": {
+      "model": "ollama_chat/llama3.1"
+    }
+  }
+}""")
+            console.print("\n[dim]Notes:[/dim]")
+            console.print("  • Use [bold]ollama_chat/[/bold] prefix for chat models (recommended)")
+            console.print("  • Or [bold]ollama/[/bold] for text completion")
+            console.print("  • api_base should NOT include /v1 suffix")
+    
     if (
         not model.startswith("bedrock/")
         and not (p and p.api_key)
@@ -386,6 +417,7 @@ def gateway(
         mcp_servers=config.tools.mcp_servers,
         channels_config=config.channels,
         job_models=job_models,  # Pass job models (or None for defaults)
+        model_aliases=config.agents.model_aliases,  # Pass model aliases
         inactivity_timeout_s=config.agents.defaults.inactivity_timeout_s,
         llm_max_retries=config.agents.defaults.llm_max_retries,
         llm_retry_base_delay_s=config.agents.defaults.llm_retry_base_delay_s,
@@ -700,6 +732,7 @@ def agent(
         mcp_servers=config.tools.mcp_servers,
         channels_config=config.channels,
         job_models=job_models,  # Pass job models (or None for defaults)
+        model_aliases=config.agents.model_aliases,  # Pass model aliases
         inactivity_timeout_s=config.agents.defaults.inactivity_timeout_s,
         llm_max_retries=config.agents.defaults.llm_max_retries,
         llm_retry_base_delay_s=config.agents.defaults.llm_retry_base_delay_s,
@@ -1227,6 +1260,7 @@ def cron_run(
         mcp_servers=config.tools.mcp_servers,
         channels_config=config.channels,
         job_models=job_models,  # Pass job models (or None for defaults)
+        model_aliases=config.agents.model_aliases,  # Pass model aliases
         inactivity_timeout_s=config.agents.defaults.inactivity_timeout_s,
         llm_max_retries=config.agents.defaults.llm_max_retries,
         llm_retry_base_delay_s=config.agents.defaults.llm_retry_base_delay_s,
