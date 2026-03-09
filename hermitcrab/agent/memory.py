@@ -220,8 +220,8 @@ class MemoryStore:
 
     def _validate_required_fields(self, meta: dict, category: MemoryCategory) -> None:
         """Validate required fields for a memory category."""
-        # Common required fields
-        for field_name in ["id", "created_at", "type"]:
+        # Common required fields (id is optional - auto-generated if missing)
+        for field_name in ["created_at", "type"]:
             if field_name not in meta:
                 raise ValueError(f"Missing required field '{field_name}' in {category.value} memory")
 
