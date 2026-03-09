@@ -15,6 +15,7 @@ import json
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+import json_repair
 from loguru import logger
 
 if TYPE_CHECKING:
@@ -159,7 +160,7 @@ Rules:
         lines = []
         for msg in recent:
             role = msg.get("role", "unknown")
-            content = msg.get("content", "")[:500]  # Truncate long messages
+            content = (msg.get("content") or "")[:500]  # Truncate long messages
             lines.append(f"{role}: {content}")
         return "\n\n".join(lines)
 
@@ -170,19 +171,26 @@ Rules:
 
         lines = ["Recent reflections (avoid duplicating):"]
         for i, ref in enumerate(recent[:5], 1):
-            content_preview = ref.content[:100].replace("\n", " ")
+            if ref is None:
+                continue
+            content_preview = (ref.content or "")[:100].replace("\n", " ")
             lines.append(f"{i}. {ref.title}: {content_preview}...")
         return "\n".join(lines)
 
-    def _parse_response(self, content: str) -> dict:
+    def _parse_response(self, content: str | None) -> dict:
         """Parse LLM JSON response."""
+        if not content:
+            return {"skip": True, "reason": "Invalid response format"}
+
         try:
             # Extract JSON from response
             start = content.find("{")
             end = content.rfind("}") + 1
             if start >= 0 and end > start:
                 json_str = content[start:end]
-                return json.loads(json_str)
+                result = json_repair.loads(json_str)
+                if isinstance(result, dict):
+                    return result
         except Exception as e:
             logger.warning("Failed to parse reflection JSON: {}", e)
 
