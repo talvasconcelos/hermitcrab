@@ -99,7 +99,9 @@ class LiteLLMProvider(LLMProvider):
             model: Model name, potentially with :cloud suffix
 
         Returns:
-            Tuple of (stripped_model_name, should_use_cloud)
+            Tuple of (model_name_for_api, should_use_cloud)
+            - For local Ollama: keeps :cloud suffix (Ollama needs it for routing)
+            - For direct cloud: strips :cloud suffix (API handles routing)
 
         Raises:
             ValueError: If :cloud requested but no local Ollama and no API key
@@ -116,9 +118,9 @@ class LiteLLMProvider(LLMProvider):
             any(host in self.api_base.lower() for host in ['localhost', '127.0.0.1', '::1'])
         )
 
-        # If local Ollama is available, :cloud just routes through it
+        # If local Ollama is available, keep :cloud suffix for Ollama to route
         if is_local_ollama:
-            return normalized_model, True
+            return model, True
 
         # No local Ollama - need API key for direct cloud access
         if not self._ollama_cloud_api_key:
@@ -128,7 +130,7 @@ class LiteLLMProvider(LLMProvider):
                 f"Start Ollama locally or set api_key in provider config."
             )
 
-        # Use API key for direct cloud access
+        # Use API key for direct cloud access (stripped model name)
         return normalized_model, True
 
     def _extract_ollama_images(self, content: str) -> tuple[str | None, list[str]]:
@@ -295,7 +297,20 @@ class LiteLLMProvider(LLMProvider):
                 model = f"{prefix}/{model}"
             return model
 
-        # Standard mode: auto-prefix for known providers
+        # Standard mode: respect explicit provider prefixes first.
+        if "/" in model:
+            from hermitcrab.providers.registry import find_by_name
+
+            explicit_prefix = model.split("/", 1)[0]
+            explicit_spec = find_by_name(explicit_prefix)
+            if explicit_spec and explicit_spec.litellm_prefix:
+                return self._canonicalize_explicit_prefix(
+                    model,
+                    explicit_spec.name,
+                    explicit_spec.litellm_prefix,
+                )
+
+        # Otherwise, auto-prefix for known providers inferred from model name.
         spec = find_by_model(model)
         if spec and spec.litellm_prefix:
             model = self._canonicalize_explicit_prefix(model, spec.name, spec.litellm_prefix)
