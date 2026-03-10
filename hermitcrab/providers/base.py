@@ -159,6 +159,7 @@ class LLMProvider(ABC):
         reasoning_effort: str | None = None,
     ) -> LLMResponse:
         """Call chat() with retry on transient provider failures."""
+        attempts = len(self._CHAT_RETRY_DELAYS) + 1
         for attempt, delay in enumerate(self._CHAT_RETRY_DELAYS, start=1):
             try:
                 response = await self.chat(
@@ -185,14 +186,14 @@ class LLMProvider(ABC):
             logger.warning(
                 "LLM transient error (attempt {}/{}), retrying in {}s: {}",
                 attempt,
-                len(self._CHAT_RETRY_DELAYS),
+                attempts,
                 delay,
                 (response.content or "")[:120].lower(),
             )
             await asyncio.sleep(delay)
 
         try:
-            return await self.chat(
+            response = await self.chat(
                 messages=messages,
                 tools=tools,
                 model=model,
@@ -200,13 +201,22 @@ class LLMProvider(ABC):
                 temperature=temperature,
                 reasoning_effort=reasoning_effort,
             )
+            if response.finish_reason == "error" and self._is_transient_error(response.content):
+                return LLMResponse(
+                    content="I hit a temporary provider error while generating the response. Please retry this request.",
+                    finish_reason="error",
+                )
+            return response
         except asyncio.CancelledError:
             raise
         except Exception as exc:
-            return LLMResponse(
-                content=f"Error calling LLM: {exc}",
-                finish_reason="error",
-            )
+            content = f"Error calling LLM: {exc}"
+            if self._is_transient_error(content):
+                content = (
+                    "I hit a temporary provider error while generating the response. "
+                    "Please retry this request."
+                )
+            return LLMResponse(content=content, finish_reason="error")
 
     @abstractmethod
     def get_default_model(self) -> str:

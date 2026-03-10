@@ -25,6 +25,7 @@ Core Principles:
 from __future__ import annotations
 
 import asyncio
+import inspect
 import json
 import re
 import time
@@ -493,32 +494,27 @@ class AgentLoop:
         reasoning_effort: str | None = None,
     ):
         """Call provider.chat with bounded retries/backoff."""
-        attempts = self.llm_max_retries + 1
-        for attempt in range(attempts):
-            try:
-                return await self.provider.chat(
-                    messages=messages,
-                    tools=tools,
-                    model=model,
-                    temperature=temperature,
-                    max_tokens=max_tokens,
-                    reasoning_effort=reasoning_effort,
-                )
-            except asyncio.CancelledError:
-                raise
-            except Exception as e:
-                if attempt >= attempts - 1:
-                    raise
-                delay = self.llm_retry_base_delay_s * (2**attempt)
-                logger.warning(
-                    "LLM call failed (attempt {}/{}; job={}): {}",
-                    attempt + 1,
-                    attempts,
-                    job_class.value if job_class else "unknown",
-                    e,
-                )
-                if delay > 0:
-                    await asyncio.sleep(delay)
+        chat_with_retry = getattr(self.provider, "chat_with_retry", None)
+        if callable(chat_with_retry):
+            response = chat_with_retry(
+                messages=messages,
+                tools=tools,
+                model=model,
+                temperature=temperature,
+                max_tokens=max_tokens,
+                reasoning_effort=reasoning_effort,
+            )
+            if inspect.isawaitable(response):
+                return await response
+
+        return await self.provider.chat(
+            messages=messages,
+            tools=tools,
+            model=model,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            reasoning_effort=reasoning_effort,
+        )
 
     @staticmethod
     def _tool_cycle_signature(tool_calls: list) -> str:
@@ -1765,7 +1761,6 @@ class AgentLoop:
                     len(initial_messages) - 1,
                     {"role": "system", "content": self._build_delegation_hint()},
                 )
-
             async def _bus_progress(content: str, *, tool_hint: bool = False) -> None:
                 meta = dict(msg.metadata or {})
                 meta["_progress"] = True

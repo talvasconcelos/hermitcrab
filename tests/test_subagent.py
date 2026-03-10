@@ -13,7 +13,7 @@ from hermitcrab.providers.base import LLMResponse, ToolCallRequest
 async def test_subagent_spawn_resolves_model_alias_and_reports_result(tmp_path):
     provider = MagicMock()
     provider.get_default_model = MagicMock(return_value="anthropic/claude-opus-4-5")
-    provider.chat = AsyncMock(return_value=LLMResponse(content="done"))
+    provider.chat_with_retry = AsyncMock(return_value=LLMResponse(content="done"))
 
     bus = MessageBus()
     bus.publish_inbound = AsyncMock()
@@ -42,8 +42,8 @@ async def test_subagent_spawn_resolves_model_alias_and_reports_result(tmp_path):
             break
         await asyncio.sleep(0)
 
-    provider.chat.assert_awaited()
-    assert provider.chat.await_args.kwargs["model"] == "ollama/qwen3.5:4b"
+    provider.chat_with_retry.assert_awaited()
+    assert provider.chat_with_retry.await_args.kwargs["model"] == "ollama/qwen3.5:4b"
     bus.publish_inbound.assert_awaited()
 
 
@@ -51,7 +51,7 @@ async def test_subagent_spawn_resolves_model_alias_and_reports_result(tmp_path):
 async def test_subagent_recovers_inline_json_tool_call(tmp_path):
     provider = MagicMock()
     provider.get_default_model = MagicMock(return_value="anthropic/claude-opus-4-5")
-    provider.chat = AsyncMock(
+    provider.chat_with_retry = AsyncMock(
         side_effect=[
             LLMResponse(
                 content=(
@@ -89,7 +89,7 @@ async def test_subagent_recovers_inline_json_tool_call(tmp_path):
 async def test_subagent_recovers_inline_xml_tool_call(tmp_path):
     provider = MagicMock()
     provider.get_default_model = MagicMock(return_value="anthropic/claude-opus-4-5")
-    provider.chat = AsyncMock(
+    provider.chat_with_retry = AsyncMock(
         side_effect=[
             LLMResponse(
                 content=(
@@ -130,7 +130,7 @@ async def test_subagent_recovers_inline_xml_tool_call(tmp_path):
 async def test_subagent_normalizes_string_tool_arguments(tmp_path):
     provider = MagicMock()
     provider.get_default_model = MagicMock(return_value="anthropic/claude-opus-4-5")
-    provider.chat = AsyncMock(
+    provider.chat_with_retry = AsyncMock(
         side_effect=[
             LLMResponse(
                 content=None,
@@ -161,4 +161,45 @@ async def test_subagent_normalizes_string_tool_arguments(tmp_path):
             break
         await asyncio.sleep(0)
 
+    bus.publish_inbound.assert_awaited()
+
+
+@pytest.mark.asyncio
+async def test_subagent_reprompts_intent_only_post_tool_response(tmp_path):
+    provider = MagicMock()
+    provider.get_default_model = MagicMock(return_value="anthropic/claude-opus-4-5")
+    provider.chat_with_retry = AsyncMock(
+        side_effect=[
+            LLMResponse(
+                content=None,
+                tool_calls=[
+                    ToolCallRequest(id="1", name="read_file", arguments={"path": "README.md"})
+                ],
+                finish_reason="tool_calls",
+            ),
+            LLMResponse(content="Let me inspect the rest of the file first."),
+            LLMResponse(content="README inspected successfully."),
+        ]
+    )
+
+    bus = MessageBus()
+    bus.publish_inbound = AsyncMock()
+    (tmp_path / "README.md").write_text("hello", encoding="utf-8")
+
+    manager = SubagentManager(
+        provider=provider,
+        workspace=tmp_path,
+        bus=bus,
+        model="anthropic/claude-opus-4-5",
+        exec_config=ExecToolConfig(),
+    )
+
+    await manager.spawn(task="Inspect README", label="readme", origin_channel="cli", origin_chat_id="direct")
+
+    for _ in range(20):
+        if manager.get_running_count() == 0:
+            break
+        await asyncio.sleep(0)
+
+    provider.chat_with_retry.assert_awaited()
     bus.publish_inbound.assert_awaited()

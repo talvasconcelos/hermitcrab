@@ -39,6 +39,13 @@ def _short_tool_id() -> str:
     return "".join(secrets.choice(_ALNUM) for _ in range(9))
 
 
+def _tool_function_parts(function: Any) -> tuple[str | None, Any]:
+    """Extract tool function name and arguments from object- or dict-shaped payloads."""
+    if isinstance(function, dict):
+        return function.get("name"), function.get("arguments")
+    return getattr(function, "name", None), getattr(function, "arguments", None)
+
+
 class LiteLLMProvider(LLMProvider):
     """
     LLM provider using LiteLLM for multi-provider support.
@@ -554,9 +561,8 @@ class LiteLLMProvider(LLMProvider):
         else:
             tool_calls = []
             for tc in raw_tool_calls:
-                function = getattr(tc, "function", None)
-                name = getattr(function, "name", None)
-                args = getattr(function, "arguments", None)
+                function = tc.get("function") if isinstance(tc, dict) else getattr(tc, "function", None)
+                name, args = _tool_function_parts(function)
 
                 if not name:
                     continue
@@ -568,7 +574,7 @@ class LiteLLMProvider(LLMProvider):
                     args = json_repair.loads(args)
 
                 tool_calls.append(ToolCallRequest(
-                    id=getattr(tc, "id", None) or _short_tool_id(),
+                    id=(tc.get("id") if isinstance(tc, dict) else getattr(tc, "id", None)) or _short_tool_id(),
                     name=name,
                     arguments=args,
                 ))
@@ -576,13 +582,16 @@ class LiteLLMProvider(LLMProvider):
             if not raw_tool_calls and hasattr(message, "tool_calls") and message.tool_calls:
                 for tc in message.tool_calls:
                     # Parse arguments from JSON string if needed
-                    args = tc.function.arguments
+                    function = tc.get("function") if isinstance(tc, dict) else getattr(tc, "function", None)
+                    name, args = _tool_function_parts(function)
+                    if not name:
+                        continue
                     if isinstance(args, str):
                         args = json_repair.loads(args)
 
                     tool_calls.append(ToolCallRequest(
-                        id=getattr(tc, "id", None) or _short_tool_id(),
-                        name=tc.function.name,
+                        id=(tc.get("id") if isinstance(tc, dict) else getattr(tc, "id", None)) or _short_tool_id(),
+                        name=name,
                         arguments=args,
                     ))
 
@@ -596,10 +605,36 @@ class LiteLLMProvider(LLMProvider):
 
         reasoning_content = getattr(message, "reasoning_content", None) or None
 
+        if not tool_calls:
+            legacy_function_call = getattr(message, "function_call", None)
+            legacy_name, legacy_args = _tool_function_parts(legacy_function_call)
+            if legacy_name:
+                legacy_args = legacy_args or {}
+                if isinstance(legacy_args, str):
+                    try:
+                        legacy_args = json_repair.loads(legacy_args)
+                    except Exception:
+                        legacy_args = {}
+                if isinstance(legacy_args, dict):
+                    tool_calls = [
+                        ToolCallRequest(
+                            id=_short_tool_id(),
+                            name=legacy_name,
+                            arguments=legacy_args,
+                        )
+                    ]
+
+        normalized_finish_reason = finish_reason or "stop"
+        if normalized_finish_reason == "tool_calls" and not tool_calls:
+            logger.warning(
+                "LiteLLM returned finish_reason=tool_calls but no tool calls were parsed; downgrading to stop"
+            )
+            normalized_finish_reason = "stop"
+
         return LLMResponse(
             content=content,
             tool_calls=tool_calls,
-            finish_reason=finish_reason or "stop",
+            finish_reason=normalized_finish_reason,
             usage=usage,
             reasoning_content=reasoning_content,
         )

@@ -22,6 +22,7 @@ def mock_bus():
 def mock_provider():
     provider = MagicMock()
     provider.chat = AsyncMock()
+    provider.chat_with_retry = provider.chat
     provider.get_default_model = MagicMock(return_value="test-model")
     return provider
 
@@ -36,22 +37,6 @@ def agent_loop(mock_bus, mock_provider, tmp_path):
         llm_retry_base_delay_s=0.0,
         max_identical_tool_cycles=2,
     )
-
-
-@pytest.mark.asyncio
-async def test_run_agent_loop_retries_then_succeeds(agent_loop, mock_provider):
-    """Transient provider failure should be retried once."""
-    mock_provider.chat.side_effect = [
-        RuntimeError("temporary outage"),
-        LLMResponse(content="done"),
-    ]
-
-    final_content, _, _ = await agent_loop._run_agent_loop(
-        [{"role": "user", "content": "hello"}]
-    )
-
-    assert final_content == "done"
-    assert mock_provider.chat.await_count == 2
 
 
 @pytest.mark.asyncio

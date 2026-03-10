@@ -175,6 +175,26 @@ class SubagentManager:
         return normalized
 
     @staticmethod
+    def _is_intent_only_response(text: str | None) -> bool:
+        """Detect planning-only text that should not be treated as a final result."""
+        if not text:
+            return False
+        normalized = " ".join(text.strip().lower().split())
+        if not normalized:
+            return False
+        return bool(
+            re.match(
+                r"^(let me|i(?:'ll| will)|first[, ]+let me|now[, ]+let me|next[, ]+i(?:'ll| will)|i am going to)\b",
+                normalized,
+            )
+        )
+
+    @staticmethod
+    def _is_empty_response(text: str | None) -> bool:
+        """Treat blank or whitespace-only replies as missing output."""
+        return text is None or not text.strip()
+
+    @staticmethod
     def _parse_xml_tool_calls(body: str, tools: ToolRegistry) -> list[ToolCallRequest]:
         """Recover XML-like inline tool calls from assistant text."""
         recovered: list[ToolCallRequest] = []
@@ -243,11 +263,14 @@ class SubagentManager:
             max_iterations = 15
             iteration = 0
             final_result: str | None = None
+            tools_used: list[str] = []
+            intent_reprompt_count = 0
+            empty_reprompt_count = 0
 
             while iteration < max_iterations:
                 iteration += 1
 
-                response = await self.provider.chat(
+                response = await self.provider.chat_with_retry(
                     messages=messages,
                     tools=tools.get_definitions(),
                     model=subagent_model,
@@ -261,6 +284,9 @@ class SubagentManager:
                     if inline_tool_calls:
                         response.content = content
                         response.tool_calls = inline_tool_calls
+
+                if response.finish_reason == "error" and not response.has_tool_calls:
+                    raise RuntimeError(response.content or "Subagent model call failed.")
 
                 if response.has_tool_calls:
                     # Add assistant message with tool calls
@@ -283,6 +309,7 @@ class SubagentManager:
 
                     # Execute tools
                     for tool_call in response.tool_calls:
+                        tools_used.append(tool_call.name)
                         args_str = json.dumps(tool_call.arguments, ensure_ascii=False)
                         logger.debug("Subagent [{}] executing: {} with arguments: {}", task_id, tool_call.name, args_str)
                         result = await tools.execute(tool_call.name, tool_call.arguments)
@@ -294,6 +321,47 @@ class SubagentManager:
                         })
                 else:
                     final_result = response.content
+                    if not tools_used and self._is_empty_response(final_result):
+                        empty_reprompt_count += 1
+                        if empty_reprompt_count >= 2:
+                            final_result = "Task completed but no final response was generated."
+                            break
+                        messages.append(
+                            {
+                                "role": "system",
+                                "content": (
+                                    "You must provide a direct final result for this task. "
+                                    "Do not return an empty reply."
+                                ),
+                            }
+                        )
+                        final_result = None
+                        continue
+
+                    needs_reprompt = tools_used and (
+                        self._is_empty_response(final_result)
+                        or self._is_intent_only_response(final_result)
+                    )
+                    if needs_reprompt:
+                        intent_reprompt_count += 1
+                        if intent_reprompt_count >= 2:
+                            final_result = (
+                                "I used tools for the task, but the model kept stopping without "
+                                "a usable final result."
+                            )
+                            break
+                        messages.append(
+                            {
+                                "role": "system",
+                                "content": (
+                                    "Do not stop with an empty reply or an intention statement. "
+                                    "You already used tools. Either call the next tool now, or "
+                                    "reply with the actual task result."
+                                ),
+                            }
+                        )
+                        final_result = None
+                        continue
                     break
 
             if final_result is None:
