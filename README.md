@@ -78,13 +78,14 @@ Move your workspace anywhere. The agent picks up exactly where it left off.
    ```json
    {
      "providers": {
-       "ollama": {
-         "apiBase": "http://localhost:11434"
+       "openai": {
+         "apiKey": "ollama",
+         "apiBase": "http://localhost:11434/v1"
        }
      },
      "agents": {
        "defaults": {
-         "model": "ollama/lfm2.5-thinking:latest"
+         "model": "openai/lfm2.5-thinking:latest"
        }
      }
    }
@@ -94,19 +95,20 @@ Move your workspace anywhere. The agent picks up exactly where it left off.
    ```json
    {
      "providers": {
-       "ollama": {
-         "apiBase": "http://localhost:11434"
+       "openai": {
+         "apiKey": "ollama",
+         "apiBase": "http://localhost:11434/v1"
        }
      },
      "agents": {
        "modelAliases": {
-         "coder": "ollama/qwen3.5:4b",
-         "fast": "ollama/lfm2.5-thinking:latest"
+         "coder": "openai/qwen3.5:4b",
+         "fast": "openai/lfm2.5-thinking:latest"
        },
        "defaults": {
-         "model": "ollama/kimi-k2.5:cloud",
+         "model": "openai/kimi-k2.5:cloud",
          "jobModels": {
-           "subagent": "ollama/qwen3.5:4b",
+           "subagent": "openai/qwen3.5:4b",
            "reasoningEffort": "medium"
          }
        }
@@ -114,8 +116,9 @@ Move your workspace anywhere. The agent picks up exactly where it left off.
    }
    ```
    Notes:
-   - Keep the `ollama/` prefix when targeting Ollama models.
-   - `:cloud` models still route through the local Ollama provider/library when supported by Ollama.
+   - For Ollama, prefer the `openai` provider pointed at `http://localhost:11434/v1`. In practice this has much better tool-calling reliability than LiteLLM's native `ollama` route.
+   - The `ollama` provider is still available, but it currently has weaker tool coverage and more provider-specific tool-call quirks.
+   - Keep the model name exactly as Ollama exposes it when using the OpenAI-compatible route.
    - Subagents can use aliases such as `coder` for heavier delegated work.
    
    **Option B: Cloud model (OpenRouter)**

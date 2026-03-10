@@ -27,6 +27,15 @@ Recent history uses Conventional Commit prefixes, especially `fix:`. Continue wi
 ## Security & Configuration Tips
 Do not commit secrets or local workspace state. Runtime config is created outside the repo in `~/.hermitcrab/`. When changing tool execution, web access, or channel integrations, review `SECURITY.md` and keep Python as the enforcement layer rather than trusting model output.
 
+## Recent Debugging Takeaways
+- When mining `nanobot` for fixes, prefer reimplementation over cherry-picking. The most useful source of ideas has been `providers/` compatibility work, not wholesale `agent/` loop changes.
+- `nanobot/main` is worth checking for provider hardening ideas such as OpenAI-compatible provider support, request sanitization, tool-call ID normalization, and multi-choice parsing.
+- HermitCrab's biggest reliability risk has been the provider/tool-call boundary, not the higher-level CLI or session lifecycle.
+- Ollama works more reliably through its OpenAI-compatible `/v1` endpoint using the `openai` provider than through LiteLLM's native `ollama` route.
+- The native `ollama` provider currently has poorer tool-calling coverage and more malformed output variants; keep it only as a compatibility path unless it is revalidated.
+- Empty replies after tool use, raw JSON tool calls, and XML-like inline tool calls are all real failure modes that must be handled in Python, not assumed away.
+- Subagent delegation should be encouraged deterministically for substantial implementation grunt work; do not rely only on vague prompt wording.
+
 ## Current Rebuild Decision
 The `broken_changes` branch must not be cherry-picked or merged incrementally. Rebuild the desired work fresh on top of `main`, on clean branch(es), and validate tool-calling after each feature lands.
 
@@ -66,3 +75,98 @@ Current validation status:
 Current manual merge gate before merging this branch to `main`:
 - Run one successful manual subagent test end-to-end.
 - If that passes, this branch is considered merge-ready.
+
+## Next Steps TODO
+
+Priority direction for the next implementation wave:
+- Keep HermitCrab reliable, memory-aware, and adaptive without turning it into a heavy framework.
+- Prefer deterministic Python enforcement for correctness, and use LLMs for judgment, summarization, and adaptation only where they add clear value.
+- Keep local-first and low-footprint as a product constraint, not a nice-to-have.
+
+### Memory and Distillation
+
+Distillation should remain a fallback recovery layer, not the primary memory path.
+
+TODO:
+- Add duplicate and near-duplicate checks before committing distilled candidates into memory.
+- Restrict distilled candidate types by default to `fact`, `goal`, and `task`.
+- Treat distilled `decision` candidates as high-scrutiny items and only allow them with stronger validation.
+- Stop using distillation as a general reflection path; reserve reflection learning for the dedicated reflection service.
+- Add conservative novelty checks so low-value or repeated facts do not accumulate over time.
+- Add tests covering repeated-session distillation, duplicate suppression, and conflicting candidate handling.
+- Update documentation so memory is described accurately: explicit typed memory writes are authoritative; distillation only proposes fallback candidates.
+
+### Reflection
+
+Reflection is one of HermitCrab's strongest differentiators and should be treated as a core product feature.
+
+TODO:
+- Strengthen reflection validation so each reflection is grounded in concrete evidence from the session.
+- Require reflection outputs to point to the user behavior, correction, or repeated pattern that triggered the learning.
+- Add duplicate and contradiction checks before writing new reflections.
+- Make bootstrap-file auto-promotion stricter than plain reflection writing.
+- Prefer promoting corrections, preferences, and workflow learnings over vague "insights".
+- Add tests for reflection deduplication, contradiction handling, and promotion gating.
+- Keep reflection focused on user-specific adaptation, not generic summaries or bug logging.
+
+### Reliability and Cleanliness
+
+HermitCrab should feel dependable before it feels clever.
+
+TODO:
+- Continue hardening provider/tool-call boundaries so malformed model output cannot stall the agent loop.
+- Expand deterministic guards around background services such as heartbeat, cron, journaling, distillation, and reflection.
+- Add more focused regression tests for failure modes that can block the gateway or corrupt memory state.
+- Prefer explicit fallback behavior over silent skipping when the system can recover safely.
+- Review hot paths for over-coupling between prompts, provider parsing, and execution logic.
+- Keep the Python layer authoritative for security, file access, and memory integrity.
+
+### Low-Footprint Product Direction
+
+HermitCrab should sit between bloated generalist agents and ultra-raw minimalist systems:
+- more approachable and complete than low-level Rust experiments,
+- cleaner and much lighter than large Node-based agent stacks,
+- simple to run on modest local hardware,
+- still capable of persistence, delegation, and adaptation.
+
+Implementation priorities for that direction:
+- Keep default models small and local where possible, especially for background cognition.
+- Make every optional background pass skippable and separately configurable.
+- Track and reduce memory, startup, and idle overhead across CLI and gateway modes.
+- Avoid adding heavy orchestration layers, always-on daemons, or unnecessary in-memory state.
+- Favor straightforward architecture over framework-like abstraction growth.
+- Preserve fast cold-start and predictable runtime behavior on consumer hardware.
+
+### Product Roadmap
+
+Recommended roadmap order:
+
+1. Memory quality and reflection quality
+- Distillation deduplication, reflection evidence checks, stricter promotion rules.
+
+2. Session reliability
+- More resilient background task scheduling, failure isolation, and end-of-session processing.
+
+3. Subagent maturity
+- Validate real delegation flows, improve task handoff clarity, and keep the main agent responsive.
+
+4. Memory retrieval quality
+- Improve how existing memory is surfaced back into active context so stored learnings actually affect behavior.
+
+5. Configuration ergonomics
+- Make it easy to run HermitCrab well with a small local setup, while still allowing stronger models when available.
+
+6. Channel robustness
+- Keep Nostr and CLI first-class, since they are the primary ways users interact with HermitCrab.
+- Treat Telegram, email, and gateway as secondary integrations that should remain solid without driving core architecture decisions.
+
+### Product Standard
+
+When deciding what to build next, prefer work that improves one or more of these:
+- reliability under imperfect model output,
+- useful memory that stays clean over time,
+- better adaptation to a specific user,
+- lower hardware and operational footprint,
+- simpler architecture with fewer hidden behaviors.
+
+Reject work that mainly adds surface area, prompt churn, or cleverness without improving those five qualities.

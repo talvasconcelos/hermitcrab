@@ -35,6 +35,7 @@ from enum import Enum
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Awaitable, Callable
 
+import json_repair
 from loguru import logger
 
 from hermitcrab.agent.context import ContextBuilder
@@ -55,6 +56,8 @@ from hermitcrab.agent.tools.knowledge import (
 )
 from hermitcrab.agent.tools.mcp import connect_mcp_servers
 from hermitcrab.agent.tools.memory import (
+    ReadMemoryTool,
+    SearchMemoryTool,
     WriteDecisionTool,
     WriteFactTool,
     WriteGoalTool,
@@ -69,7 +72,7 @@ from hermitcrab.agent.tools.web import WebFetchTool, WebSearchTool
 from hermitcrab.bus.events import InboundMessage, OutboundMessage
 from hermitcrab.bus.queue import MessageBus
 from hermitcrab.config.schema import ExecToolConfig
-from hermitcrab.providers.base import LLMProvider
+from hermitcrab.providers.base import LLMProvider, ToolCallRequest
 from hermitcrab.session.manager import Session, SessionManager
 from hermitcrab.utils.helpers import ensure_dir, safe_filename
 
@@ -263,6 +266,8 @@ class AgentLoop:
         self.tools.register(MessageTool(send_callback=self.bus.publish_outbound))
         self.tools.register(SpawnTool(manager=self.subagents))
 
+        self.tools.register(ReadMemoryTool(self.memory))
+        self.tools.register(SearchMemoryTool(self.memory))
         self.tools.register(WriteFactTool(self.memory))
         self.tools.register(WriteDecisionTool(self.memory))
         self.tools.register(WriteGoalTool(self.memory))
@@ -326,7 +331,12 @@ class AgentLoop:
         """Format tool calls as concise hint, e.g. 'web_search("query")'."""
 
         def _fmt(tc):
-            val = next(iter(tc.arguments.values()), None) if tc.arguments else None
+            if isinstance(tc.arguments, dict):
+                val = next(iter(tc.arguments.values()), None) if tc.arguments else None
+            elif isinstance(tc.arguments, str):
+                val = tc.arguments
+            else:
+                val = None
             if isinstance(val, str):
                 return f'{tc.name}("{val[:40]}…")' if len(val) > 40 else f'{tc.name}("{val}")'
             if val is None:
@@ -337,6 +347,26 @@ class AgentLoop:
             )
 
         return ", ".join(_fmt(tc) for tc in tool_calls)
+
+    @staticmethod
+    def _is_intent_only_response(text: str | None) -> bool:
+        """Detect non-final assistant replies that only narrate the next step."""
+        if not text:
+            return False
+        normalized = " ".join(text.strip().lower().split())
+        if not normalized:
+            return False
+        return bool(
+            re.match(
+                r"^(let me|i(?:'ll| will)|first[, ]+let me|now[, ]+let me|next[, ]+i(?:'ll| will)|i am going to)\b",
+                normalized,
+            )
+        )
+
+    @staticmethod
+    def _is_empty_response(text: str | None) -> bool:
+        """Treat blank or whitespace-only replies as missing output."""
+        return text is None or not text.strip()
 
     def _get_model_for_job(self, job_class: JobClass) -> str | None:
         """
@@ -359,6 +389,59 @@ class AgentLoop:
         if model is None and job_class != JobClass.DISTILLATION:
             return self.model
         return model
+
+    def _should_hint_subagent_delegation(self, user_message: str) -> bool:
+        """Return True when the request looks like substantial implementation grunt work."""
+        if not self.tools.has("spawn"):
+            return False
+
+        subagent_model = self._job_models.get(JobClass.SUBAGENT)
+        if not subagent_model:
+            return False
+
+        normalized = " ".join(user_message.lower().split())
+        if not normalized:
+            return False
+
+        action_markers = (
+            "build",
+            "create",
+            "implement",
+            "refactor",
+            "update",
+            "rewrite",
+            "start with",
+            "work on",
+        )
+        scope_markers = (
+            "project",
+            "folder",
+            "html",
+            "css",
+            "javascript",
+            "app.js",
+            "index.html",
+            "web-chat",
+            "page",
+            "ui",
+            "frontend",
+            "files",
+        )
+
+        return any(marker in normalized for marker in action_markers) and any(
+            marker in normalized for marker in scope_markers
+        )
+
+    def _build_delegation_hint(self) -> str:
+        """Build a deterministic reminder to delegate substantial implementation work."""
+        subagent_model = self._job_models.get(JobClass.SUBAGENT) or self.model
+        return (
+            "This request looks like substantial implementation grunt work. "
+            "Prefer using spawn() to delegate the execution to a subagent and keep the main "
+            f"agent responsive. Use the configured subagent model `{subagent_model}` or an "
+            "appropriate alias when delegating, unless there is a clear reason to stay in the "
+            "main agent."
+        )
 
     async def _chat_with_retry(
         self,
@@ -404,6 +487,114 @@ class AgentLoop:
         """Create deterministic signature for a batch of tool calls."""
         payload = [{"name": tc.name, "arguments": tc.arguments} for tc in tool_calls]
         return json.dumps(payload, sort_keys=True, ensure_ascii=False, default=str)
+
+    def _coerce_inline_tool_calls(self, content: str | None) -> tuple[str | None, list[ToolCallRequest]]:
+        """Recover a raw JSON tool call appended to assistant text.
+
+        Some weaker models emit a plain-text JSON object such as
+        `{"name":"read_memory","arguments":{...}}` instead of using structured
+        tool-calling. Others emit XML-like wrappers such as
+        `<minimax:tool_call><invoke name="list_dir">...</invoke></minimax:tool_call>`.
+        Recover only narrow cases that cleanly parse and match registered tools.
+        """
+        if not content or not isinstance(content, str):
+            return content, []
+
+        text = content.strip()
+        starts = [idx for idx, ch in enumerate(text) if ch in "{["]
+
+        for start in reversed(starts):
+            prefix = text[:start].rstrip()
+            candidate = text[start:].strip()
+            try:
+                payload = json_repair.loads(candidate)
+            except Exception:
+                continue
+
+            entries = payload if isinstance(payload, list) else [payload]
+            recovered: list[ToolCallRequest] = []
+            for idx, entry in enumerate(entries, start=1):
+                if not isinstance(entry, dict):
+                    recovered = []
+                    break
+                name = entry.get("name")
+                arguments = entry.get("arguments")
+                if isinstance(arguments, str):
+                    try:
+                        arguments = json_repair.loads(arguments)
+                    except Exception:
+                        recovered = []
+                        break
+                if not isinstance(name, str) or not isinstance(arguments, dict):
+                    recovered = []
+                    break
+                if not self.tools.has(name):
+                    recovered = []
+                    break
+                recovered.append(
+                    ToolCallRequest(
+                        id=f"inline_call_{idx}",
+                        name=name,
+                        arguments=arguments,
+                    )
+                )
+
+            if recovered:
+                return prefix or None, recovered
+
+        xml_match = re.search(r"<(?:[\w.-]+:)?tool_call>\s*(.*?)\s*</(?:[\w.-]+:)?tool_call>", text, re.DOTALL)
+        if xml_match:
+            prefix = text[:xml_match.start()].rstrip()
+            body = xml_match.group(1)
+            recovered = self._parse_xml_tool_calls(body)
+            if recovered:
+                return prefix or None, recovered
+
+        return content, []
+
+    def _normalize_tool_calls(self, tool_calls: list[ToolCallRequest]) -> list[ToolCallRequest]:
+        """Repair provider quirks where tool arguments arrive as JSON strings."""
+        normalized: list[ToolCallRequest] = []
+        for tc in tool_calls:
+            arguments = tc.arguments
+            if isinstance(arguments, str):
+                try:
+                    arguments = json_repair.loads(arguments)
+                except Exception:
+                    pass
+            normalized.append(ToolCallRequest(id=tc.id, name=tc.name, arguments=arguments))
+        return normalized
+
+    def _parse_xml_tool_calls(self, body: str) -> list[ToolCallRequest]:
+        """Recover XML-like inline tool calls from assistant text."""
+        recovered: list[ToolCallRequest] = []
+        invoke_pattern = re.compile(
+            r"<invoke\s+name=\"([^\"]+)\">\s*(.*?)\s*</invoke>",
+            re.DOTALL,
+        )
+        param_pattern = re.compile(
+            r"<parameter\s+name=\"([^\"]+)\">(.*?)</parameter>",
+            re.DOTALL,
+        )
+
+        for idx, match in enumerate(invoke_pattern.finditer(body), start=1):
+            name = match.group(1).strip()
+            if not self.tools.has(name):
+                return []
+
+            arguments: dict[str, str] = {}
+            for param_name, raw_value in param_pattern.findall(match.group(2)):
+                arguments[param_name.strip()] = raw_value.strip()
+
+            recovered.append(
+                ToolCallRequest(
+                    id=f"inline_xml_call_{idx}",
+                    name=name,
+                    arguments=arguments,
+                )
+            )
+
+        return recovered
 
     def _schedule_background(
         self,
@@ -1069,6 +1260,7 @@ class AgentLoop:
         started_at = time.monotonic()
         last_tool_signature: str | None = None
         repeated_tool_cycles = 0
+        intent_reprompt_count = 0
 
         # Get model for this job class
         model = self._get_model_for_job(job_class)
@@ -1086,6 +1278,13 @@ class AgentLoop:
                 break
 
             iteration += 1
+            logger.info(
+                "Agent loop iteration {}/{} started (job={}, model={})",
+                iteration,
+                self.max_iterations,
+                job_class.value,
+                model,
+            )
 
             response = await self._chat_with_retry(
                 messages=messages,
@@ -1096,6 +1295,25 @@ class AgentLoop:
                 job_class=job_class,
                 reasoning_effort=self._reasoning_effort,
             )
+            response.tool_calls = self._normalize_tool_calls(response.tool_calls)
+            logger.info(
+                "LLM response received (job={}, finish_reason={}, content_chars={}, tool_calls={})",
+                job_class.value,
+                response.finish_reason,
+                len(response.content or ""),
+                len(response.tool_calls),
+            )
+
+            if not response.has_tool_calls:
+                content, inline_tool_calls = self._coerce_inline_tool_calls(response.content)
+                if inline_tool_calls:
+                    logger.warning(
+                        "Recovered {} inline tool call(s) from assistant text in iteration {}",
+                        len(inline_tool_calls),
+                        iteration,
+                    )
+                    response.content = content
+                    response.tool_calls = inline_tool_calls
 
             if response.has_tool_calls:
                 tool_signature = self._tool_cycle_signature(response.tool_calls)
@@ -1139,23 +1357,78 @@ class AgentLoop:
                     tool_call_dicts,
                     reasoning_content=response.reasoning_content,
                 )
+                logger.info(
+                    "Assistant tool-call turn appended (iteration={}, tool_names={})",
+                    iteration,
+                    [tc.name for tc in response.tool_calls],
+                )
 
+                spawned_result: str | None = None
                 for tool_call in response.tool_calls:
                     tools_used.append(tool_call.name)
                     args_str = json.dumps(tool_call.arguments, ensure_ascii=False)
                     logger.info("Tool call: {}({})", tool_call.name, args_str[:200])
                     try:
                         result = await self.tools.execute(tool_call.name, tool_call.arguments)
+                        logger.info(
+                            "Tool completed: {} -> {} chars",
+                            tool_call.name,
+                            len(result) if isinstance(result, str) else 0,
+                        )
                     except Exception as e:
                         logger.error("Tool execution failed: {}: {}", tool_call.name, e)
                         result = f"Tool error: {type(e).__name__}: {e}"
                     messages = self.context.add_tool_result(
                         messages, tool_call.id, tool_call.name, result
                     )
+                    if tool_call.name == "spawn" and spawned_result is None:
+                        spawned_result = result
+
+                if spawned_result is not None:
+                    final_content = spawned_result
+                    logger.info("Returning immediately after spawn to keep main agent responsive")
+                    break
             else:
                 repeated_tool_cycles = 0
                 last_tool_signature = None
                 final_content = self._strip_think(response.content)
+                needs_reprompt = tools_used and (
+                    self._is_empty_response(final_content)
+                    or self._is_intent_only_response(final_content)
+                )
+                if needs_reprompt:
+                    intent_reprompt_count += 1
+                    logger.warning(
+                        "Non-final response after tool usage; reprompting model (attempt {}, empty={}, intent_only={})",
+                        intent_reprompt_count,
+                        self._is_empty_response(final_content),
+                        self._is_intent_only_response(final_content),
+                    )
+                    if intent_reprompt_count >= 2:
+                        logger.warning("Stopping after repeated non-final responses post-tool usage")
+                        final_content = (
+                            "I checked the available context, but the model kept stopping without a "
+                            "usable answer after tool calls. Please retry this request or switch to "
+                            "a stronger tool-calling model."
+                        )
+                    else:
+                        messages.append(
+                            {
+                                "role": "system",
+                                "content": (
+                                    "Do not stop with an empty reply or an intention statement. "
+                                    "You already used tools. Either call the next tool now, or reply "
+                                    "with the actual result for the user."
+                                ),
+                            }
+                        )
+                        final_content = None
+                        continue
+                logger.info(
+                    "Agent loop completed without tool calls at iteration {} (final_chars={})",
+                    iteration,
+                    len(final_content or ""),
+                )
                 break
 
         if final_content is None and iteration >= self.max_iterations:
@@ -1165,6 +1438,13 @@ class AgentLoop:
                 "without completing the task. You can try breaking the task into smaller steps."
             )
 
+        logger.info(
+            "Agent loop finished (job={}, iterations={}, tools_used={}, final_chars={})",
+            job_class.value,
+            iteration,
+            tools_used,
+            len(final_content or ""),
+        )
         return final_content, tools_used, messages
 
     async def run(self) -> None:
@@ -1382,6 +1662,11 @@ class AgentLoop:
                 chat_id=msg.chat_id,
                 scratchpad_path=str(scratchpad_path),
             )
+            if self._should_hint_subagent_delegation(msg.content):
+                initial_messages.insert(
+                    len(initial_messages) - 1,
+                    {"role": "system", "content": self._build_delegation_hint()},
+                )
 
             async def _bus_progress(content: str, *, tool_hint: bool = False) -> None:
                 meta = dict(msg.metadata or {})

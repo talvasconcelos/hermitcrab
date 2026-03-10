@@ -5,6 +5,7 @@
 Checked every 30 minutes by the heartbeat service.
 
 **Usage:** Add tasks under "Active Tasks" below. If file has only this comment/header (no tasks), heartbeat skips execution.
+Add `<!-- HEARTBEAT_DIRECT -->` at the top of this file to bypass LLM triage and run the "Active Tasks" section directly.
 
 ## Active Tasks
 

@@ -1,10 +1,11 @@
-"""Resilience tests for AgentLoop retries and loop guards."""
+"""Resilience tests for AgentLoop retries, loop guards, and delegation hints."""
 
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
 from hermitcrab.agent.loop import AgentLoop
+from hermitcrab.bus.events import InboundMessage
 from hermitcrab.providers.base import LLMResponse, ToolCallRequest
 
 
@@ -64,6 +65,213 @@ async def test_run_agent_loop_breaks_repeated_tool_cycles(agent_loop, mock_provi
 
     assert final_content is not None
     assert "repeated tool calls" in final_content.lower()
+
+
+@pytest.mark.asyncio
+async def test_run_agent_loop_recovers_inline_json_tool_call(agent_loop, mock_provider):
+    """Raw JSON tool-call text should be recovered and executed."""
+    mock_provider.chat.side_effect = [
+        LLMResponse(
+            content=(
+                'Let me first check memory. '
+                '{"name":"read_memory","arguments":{"category":"facts"}}'
+            )
+        ),
+        LLMResponse(content="done"),
+    ]
+
+    final_content, tools_used, _ = await agent_loop._run_agent_loop(
+        [{"role": "user", "content": "check memory"}]
+    )
+
+    assert final_content == "done"
+    assert tools_used == ["read_memory"]
+
+
+@pytest.mark.asyncio
+async def test_run_agent_loop_recovers_inline_xml_tool_call(agent_loop, mock_provider):
+    """XML-like inline tool calls should be recovered and executed."""
+    mock_provider.chat.side_effect = [
+        LLMResponse(
+            content=(
+                '<minimax:tool_call>\n'
+                '<invoke name="read_memory">\n'
+                '<parameter name="category">facts</parameter>\n'
+                '</invoke>\n'
+                '</minimax:tool_call>'
+            )
+        ),
+        LLMResponse(content="done"),
+    ]
+
+    final_content, tools_used, _ = await agent_loop._run_agent_loop(
+        [{"role": "user", "content": "check memory"}]
+    )
+
+    assert final_content == "done"
+    assert tools_used == ["read_memory"]
+
+
+@pytest.mark.asyncio
+async def test_run_agent_loop_normalizes_string_tool_arguments(agent_loop, mock_provider):
+    """Provider tool calls with stringified JSON arguments should still execute."""
+    mock_provider.chat.side_effect = [
+        LLMResponse(
+            content=None,
+            tool_calls=[
+                ToolCallRequest(id="1", name="read_memory", arguments='{"category":"facts"}')
+            ],
+        ),
+        LLMResponse(content="done"),
+    ]
+
+    final_content, tools_used, _ = await agent_loop._run_agent_loop(
+        [{"role": "user", "content": "check memory"}]
+    )
+
+    assert final_content == "done"
+    assert tools_used == ["read_memory"]
+
+
+@pytest.mark.asyncio
+async def test_run_agent_loop_returns_immediately_after_spawn(agent_loop, mock_provider):
+    """Spawn should end the interactive turn so subagent results can arrive later."""
+    mock_provider.chat.return_value = LLMResponse(
+        content="I'll delegate this now.",
+        tool_calls=[
+            ToolCallRequest(
+                id="1",
+                name="spawn",
+                arguments={"task": "Handle web chat", "label": "web-chat", "model": "coder"},
+            )
+        ],
+    )
+
+    final_content, tools_used, _ = await agent_loop._run_agent_loop(
+        [{"role": "user", "content": "delegate this"}]
+    )
+
+    assert "started" in final_content.lower()
+    assert tools_used == ["spawn"]
+    assert mock_provider.chat.await_count == 1
+
+
+@pytest.mark.asyncio
+async def test_process_message_injects_subagent_hint_for_substantial_implementation_work(
+    agent_loop, mock_provider
+):
+    """Large implementation requests should get an explicit delegation reminder."""
+    mock_provider.chat.return_value = LLMResponse(content="done")
+
+    await agent_loop._process_message(
+        InboundMessage(
+            channel="cli",
+            sender_id="user",
+            chat_id="direct",
+            content="Start with the web-chat folder and build a simple HTML page from it.",
+        )
+    )
+
+    sent_messages = mock_provider.chat.await_args.kwargs["messages"]
+    assert any(
+        msg.get("role") == "system" and "Prefer using spawn()" in (msg.get("content") or "")
+        for msg in sent_messages
+    )
+
+
+@pytest.mark.asyncio
+async def test_run_agent_loop_reprompts_intent_only_post_tool_response(agent_loop, mock_provider):
+    """Intent-only text after tool use should not be accepted as final."""
+    mock_provider.chat.side_effect = [
+        LLMResponse(
+            content=None,
+            tool_calls=[
+                ToolCallRequest(id="1", name="read_memory", arguments={"category": "facts"})
+            ],
+        ),
+        LLMResponse(content="Let me gather the complete picture first."),
+        LLMResponse(content="There is no saved web-chat task yet. I can start by inspecting the codebase."),
+    ]
+
+    final_content, tools_used, _ = await agent_loop._run_agent_loop(
+        [{"role": "user", "content": "check memory"}]
+    )
+
+    assert "no saved web-chat task" in final_content.lower()
+    assert tools_used == ["read_memory"]
+    assert mock_provider.chat.await_count == 3
+
+
+@pytest.mark.asyncio
+async def test_run_agent_loop_reprompts_empty_post_tool_response(agent_loop, mock_provider):
+    """Blank text after tool use should be treated as a bad model turn, not success."""
+    mock_provider.chat.side_effect = [
+        LLMResponse(
+            content=None,
+            tool_calls=[
+                ToolCallRequest(id="1", name="read_memory", arguments={"category": "facts"})
+            ],
+        ),
+        LLMResponse(content=""),
+        LLMResponse(content="There are no matching tasks in memory yet."),
+    ]
+
+    final_content, tools_used, _ = await agent_loop._run_agent_loop(
+        [{"role": "user", "content": "check memory"}]
+    )
+
+    assert "no matching tasks" in final_content.lower()
+    assert tools_used == ["read_memory"]
+    assert mock_provider.chat.await_count == 3
+
+
+@pytest.mark.asyncio
+async def test_run_agent_loop_returns_honest_fallback_after_repeated_intent_only(agent_loop, mock_provider):
+    """Repeated planning-only replies should not be forwarded as final output."""
+    mock_provider.chat.side_effect = [
+        LLMResponse(
+            content=None,
+            tool_calls=[
+                ToolCallRequest(id="1", name="read_memory", arguments={"category": "facts"})
+            ],
+        ),
+        LLMResponse(content="Let me gather the complete picture first."),
+        LLMResponse(content="I'll inspect the codebase and figure out the current state."),
+    ]
+
+    final_content, tools_used, _ = await agent_loop._run_agent_loop(
+        [{"role": "user", "content": "check memory"}]
+    )
+
+    assert "without a usable answer after tool calls" in final_content.lower()
+    assert tools_used == ["read_memory"]
+    assert mock_provider.chat.await_count == 3
+
+
+@pytest.mark.asyncio
+async def test_run_agent_loop_returns_honest_fallback_after_repeated_empty_post_tool_response(
+    agent_loop, mock_provider
+):
+    """Repeated blank replies after tool use should yield an explicit failure message."""
+    mock_provider.chat.side_effect = [
+        LLMResponse(
+            content=None,
+            tool_calls=[
+                ToolCallRequest(id="1", name="read_memory", arguments={"category": "facts"})
+            ],
+        ),
+        LLMResponse(content=""),
+        LLMResponse(content="   "),
+    ]
+
+    final_content, tools_used, _ = await agent_loop._run_agent_loop(
+        [{"role": "user", "content": "check memory"}]
+    )
+
+    assert "without a usable answer after tool calls" in final_content.lower()
+    assert tools_used == ["read_memory"]
+    assert mock_provider.chat.await_count == 3
+
 
 @pytest.mark.asyncio
 async def test_distillation_skips_null_candidates(agent_loop, mock_provider):

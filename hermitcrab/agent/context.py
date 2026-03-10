@@ -194,7 +194,7 @@ To spawn a subagent with a specific model:
 - spawn(task="...", label="...", model="qwen")
 - spawn(task="...", label="...", model="local")
 
-Use subagents for complex, time-consuming, or specialized tasks. You act as the coordinator — delegate grunt work to subagents and stay responsive to the user."""
+Use subagents for complex, time-consuming, or specialized tasks. If the user asks you to build, implement, refactor, or update a substantial piece of code or a multi-file project, prefer delegating that execution with spawn() instead of doing all of the grunt work inline. You act as the coordinator — delegate grunt work to subagents and stay responsive to the user."""
 
     def _load_bootstrap_files(self) -> str:
         """Load all bootstrap files from workspace."""

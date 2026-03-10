@@ -6,7 +6,7 @@ import pytest
 from hermitcrab.agent.subagent import SubagentManager
 from hermitcrab.bus.queue import MessageBus
 from hermitcrab.config.schema import ExecToolConfig
-from hermitcrab.providers.base import LLMResponse
+from hermitcrab.providers.base import LLMResponse, ToolCallRequest
 
 
 @pytest.mark.asyncio
@@ -44,4 +44,121 @@ async def test_subagent_spawn_resolves_model_alias_and_reports_result(tmp_path):
 
     provider.chat.assert_awaited()
     assert provider.chat.await_args.kwargs["model"] == "ollama/qwen3.5:4b"
+    bus.publish_inbound.assert_awaited()
+
+
+@pytest.mark.asyncio
+async def test_subagent_recovers_inline_json_tool_call(tmp_path):
+    provider = MagicMock()
+    provider.get_default_model = MagicMock(return_value="anthropic/claude-opus-4-5")
+    provider.chat = AsyncMock(
+        side_effect=[
+            LLMResponse(
+                content=(
+                    'Let me inspect the file. '
+                    '{"name":"read_file","arguments":{"path":"README.md"}}'
+                )
+            ),
+            LLMResponse(content="done"),
+        ]
+    )
+
+    bus = MessageBus()
+    bus.publish_inbound = AsyncMock()
+    (tmp_path / "README.md").write_text("hello", encoding="utf-8")
+
+    manager = SubagentManager(
+        provider=provider,
+        workspace=tmp_path,
+        bus=bus,
+        model="anthropic/claude-opus-4-5",
+        exec_config=ExecToolConfig(),
+    )
+
+    await manager.spawn(task="Inspect README", label="readme", origin_channel="cli", origin_chat_id="direct")
+
+    for _ in range(20):
+        if manager.get_running_count() == 0:
+            break
+        await asyncio.sleep(0)
+
+    bus.publish_inbound.assert_awaited()
+
+
+@pytest.mark.asyncio
+async def test_subagent_recovers_inline_xml_tool_call(tmp_path):
+    provider = MagicMock()
+    provider.get_default_model = MagicMock(return_value="anthropic/claude-opus-4-5")
+    provider.chat = AsyncMock(
+        side_effect=[
+            LLMResponse(
+                content=(
+                    '<minimax:tool_call>\n'
+                    '<invoke name="read_file">\n'
+                    '<parameter name="path">README.md</parameter>\n'
+                    '</invoke>\n'
+                    '</minimax:tool_call>'
+                )
+            ),
+            LLMResponse(content="done"),
+        ]
+    )
+
+    bus = MessageBus()
+    bus.publish_inbound = AsyncMock()
+    (tmp_path / "README.md").write_text("hello", encoding="utf-8")
+
+    manager = SubagentManager(
+        provider=provider,
+        workspace=tmp_path,
+        bus=bus,
+        model="anthropic/claude-opus-4-5",
+        exec_config=ExecToolConfig(),
+    )
+
+    await manager.spawn(task="Inspect README", label="readme", origin_channel="cli", origin_chat_id="direct")
+
+    for _ in range(20):
+        if manager.get_running_count() == 0:
+            break
+        await asyncio.sleep(0)
+
+    bus.publish_inbound.assert_awaited()
+
+
+@pytest.mark.asyncio
+async def test_subagent_normalizes_string_tool_arguments(tmp_path):
+    provider = MagicMock()
+    provider.get_default_model = MagicMock(return_value="anthropic/claude-opus-4-5")
+    provider.chat = AsyncMock(
+        side_effect=[
+            LLMResponse(
+                content=None,
+                tool_calls=[
+                    ToolCallRequest(id="1", name="read_file", arguments='{"path":"README.md"}')
+                ],
+            ),
+            LLMResponse(content="done"),
+        ]
+    )
+
+    bus = MessageBus()
+    bus.publish_inbound = AsyncMock()
+    (tmp_path / "README.md").write_text("hello", encoding="utf-8")
+
+    manager = SubagentManager(
+        provider=provider,
+        workspace=tmp_path,
+        bus=bus,
+        model="anthropic/claude-opus-4-5",
+        exec_config=ExecToolConfig(),
+    )
+
+    await manager.spawn(task="Inspect README", label="readme", origin_channel="cli", origin_chat_id="direct")
+
+    for _ in range(20):
+        if manager.get_running_count() == 0:
+            break
+        await asyncio.sleep(0)
+
     bus.publish_inbound.assert_awaited()
