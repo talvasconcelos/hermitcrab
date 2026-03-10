@@ -446,6 +446,41 @@ class AgentLoop:
             "main agent."
         )
 
+    @staticmethod
+    def _fallback_system_task_summary(content: str) -> str:
+        """Create a deterministic fallback summary for background task results."""
+        lines = [line.strip() for line in content.splitlines() if line.strip()]
+        if not lines:
+            return "Background task finished."
+
+        label = "Background task"
+        task = ""
+        result = ""
+
+        for idx, line in enumerate(lines):
+            if line.startswith("[Subagent '") and "' " in line:
+                label = line.strip("[]")
+            elif line.startswith("Task:"):
+                task = line[5:].strip()
+            elif line == "Result:":
+                result = "\n".join(lines[idx + 1 :]).strip()
+                break
+
+        if result:
+            summary = result.splitlines()[0].strip()
+            summary = summary[:280]
+            if task:
+                return (
+                    f"{label} finished in the background. I reviewed the result for '{task}'. "
+                    f"{summary}"
+                )
+            return f"{label} finished in the background. {summary}"
+
+        if task:
+            return f"{label} finished in the background. The task '{task}' has completed."
+
+        return f"{label} finished in the background."
+
     async def _chat_with_retry(
         self,
         *,
@@ -921,7 +956,7 @@ class AgentLoop:
 
     async def _distill_session(self, session: Session) -> None:
         """
-        Extract atomic candidates from session (fact, task, goal, decision, reflection).
+        Extract atomic candidates from session (fact, task, goal, decision).
 
         Distillation:
         - Produces proposals only (not authoritative)
@@ -941,15 +976,14 @@ class AgentLoop:
 
             # Build distillation prompt
             prompt = (
-                "Extract atomic knowledge candidates from this agent session.\n\n"
+                "Extract conservative atomic knowledge candidates from this session.\n\n"
                 "Look for:\n"
                 "- FACTS: User preferences, project context, established truths\n"
                 "- DECISIONS: Architectural choices, trade-offs, locked decisions\n"
                 "- GOALS: Objectives, outcomes the user wants to achieve\n"
-                "- TASKS: Action items, todos, things to do (MUST include task_assignee)\n"
-                "- REFLECTIONS: Insights, patterns, observations about the work\n\n"
-                "IMPORTANT: For TASK type candidates, you MUST specify task_assignee field.\n"
-                "Use 'user' for user tasks, or the specific person/system responsible.\n\n"
+                "- TASKS: Action items, todos, things to do (must include task_assignee)\n\n"
+                "Do not produce reflections here.\n"
+                "For TASK candidates, include task_assignee. Use 'user' for user tasks.\n\n"
                 "Session content:\n"
             )
 
@@ -965,10 +999,11 @@ class AgentLoop:
                 "\n\nReturn candidates as a JSON object with 'candidates' array.\n"
                 "Each candidate must have: type, title, content.\n"
                 "Optional: confidence (0-1), tags, and type-specific fields.\n"
-                "For TASK type: task_assignee (REQUIRED), task_status, task_deadline, task_priority\n"
+                "Allowed types by default: fact, goal, task. Use decision only for clear locked choices with rationale.\n"
+                "For TASK type: task_assignee (required), task_status, task_deadline, task_priority\n"
                 "For GOAL type: goal_status, goal_priority, goal_horizon\n"
                 "For DECISION type: decision_status, decision_rationale, decision_supersedes\n"
-                "Be conservative - only extract clear, atomic knowledge."
+                "Be conservative. Skip weak, duplicate, or speculative items."
             )
 
             # Try LLM distillation
@@ -1664,7 +1699,7 @@ class AgentLoop:
                 return OutboundMessage(
                     channel=channel,
                     chat_id=chat_id,
-                    content=final_content or "Background task completed.",
+                    content=final_content or self._fallback_system_task_summary(msg.content),
                 )
 
         # Regular user message

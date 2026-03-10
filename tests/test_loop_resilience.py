@@ -181,6 +181,32 @@ async def test_process_message_injects_subagent_hint_for_substantial_implementat
 
 
 @pytest.mark.asyncio
+async def test_system_message_uses_background_task_fallback_when_model_returns_nothing(
+    agent_loop, mock_provider
+):
+    """System task completions should not degrade to a generic placeholder."""
+    mock_provider.chat.return_value = LLMResponse(content=None)
+
+    response = await agent_loop._process_message(
+        InboundMessage(
+            channel="system",
+            sender_id="subagent",
+            chat_id="cli:direct",
+            content=(
+                "[Subagent 'website' completed successfully]\n\n"
+                "Task: Build the website\n\n"
+                "Result:\n"
+                "Created projects/site/index.html and projects/site/app.js."
+            ),
+        )
+    )
+
+    assert response is not None
+    assert "finished in the background" in response.content
+    assert "projects/site/index.html" in response.content
+
+
+@pytest.mark.asyncio
 async def test_run_agent_loop_reprompts_intent_only_post_tool_response(agent_loop, mock_provider):
     """Intent-only text after tool use should not be accepted as final."""
     mock_provider.chat.side_effect = [

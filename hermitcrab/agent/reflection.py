@@ -32,21 +32,20 @@ class ReflectionService:
     Single LLM call → 0-1 reflection → auto-promote if pattern.
     """
 
-    SYSTEM_PROMPT = """You are reflecting on your recent conversation with the user.
+    SYSTEM_PROMPT = """Reflect on the recent conversation for your future self.
 
-Think about:
-- What did you learn about how THIS user prefers to work?
-- Did the user correct you? What should you remember?
-- Did you notice any patterns in what the user asks or needs?
-- How could you be more helpful, proactive, or symbiotic next time?
+Focus on one concrete user-specific learning:
+- a preference
+- a correction
+- a repeated pattern
+- a workflow lesson
 
-Be specific and actionable. Write for YOUR future self.
-
-DO NOT log bugs or tool errors - those are code issues, not reflections.
-DO NOT create multiple reflections - pick the ONE most valuable insight.
+Be specific and actionable.
+Do not log bugs or tool failures.
+Do not produce more than one insight.
 """
 
-    USER_PROMPT = """Review this conversation and extract your key learning.
+    USER_PROMPT = """Review this conversation and extract one high-value learning.
 
 Recent conversation:
 {messages}
@@ -64,13 +63,13 @@ Respond with JSON:
   "promote_content": "Specific instruction for your future self"
 }}
 
-If nothing worth remembering, respond: {{"skip": true, "reason": "No new insights"}}
+If nothing is worth remembering, respond: {{"skip": true, "reason": "No new insights"}}
 
 Rules:
 - ONE insight only (pick the most valuable)
 - First-person voice ("I learned...", not "The assistant should...")
 - evidence must cite a concrete user behavior, correction, or repeated pattern from this session
-- Check recent_reflections - don't duplicate what you already learned
+- avoid duplicating recent reflections
 - promote_content should be actionable instruction for bootstrap files
 """
 
