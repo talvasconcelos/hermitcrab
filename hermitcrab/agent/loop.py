@@ -31,6 +31,7 @@ import time
 from collections import defaultdict
 from contextlib import AsyncExitStack
 from datetime import datetime, timezone
+from difflib import SequenceMatcher
 from enum import Enum
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Awaitable, Callable
@@ -145,6 +146,7 @@ class AgentLoop:
         job_models: dict[JobClass, str | None] | None = None,
         # Optional: reflection promotion config
         reflection_config: dict[str, Any] | None = None,
+        distillation_enabled: bool = False,
         # Optional: model aliases (friendly names like "qwen", "local")
         model_aliases: dict[str, str] | None = None,
         # Optional: reasoning effort config (loaded from config)
@@ -172,6 +174,7 @@ class AgentLoop:
         self.llm_retry_base_delay_s = max(0.0, llm_retry_base_delay_s)
         self.max_loop_seconds = max(1, max_loop_seconds)
         self.max_identical_tool_cycles = max(2, max_identical_tool_cycles)
+        self.distillation_enabled = distillation_enabled
         self.brave_api_key = brave_api_key
         self.exec_config = exec_config or ExecToolConfig()
         self.cron_service = cron_service
@@ -765,14 +768,19 @@ class AgentLoop:
         # Optional: distillation (atomic extraction, local only)
         # Skip if no local model available
         distillation_model = self._get_model_for_job(JobClass.DISTILLATION)
-        if distillation_model:
+        if self.distillation_enabled and distillation_model:
             self._schedule_background(
                 self._distill_session_from_messages(messages_for_background, session.key),
                 f"distill:{session.key}",
             )
             logger.debug("Scheduled distillation for {}", session.key)
         else:
-            logger.debug("Distillation skipped (no local model): {}", session.key)
+            logger.debug(
+                "Distillation skipped (enabled={}, model={}): {}",
+                self.distillation_enabled,
+                bool(distillation_model),
+                session.key,
+            )
 
         # Optional: reflection (meta-analysis)
         reflection_model = self._get_model_for_job(JobClass.REFLECTION)
@@ -1169,6 +1177,10 @@ class AgentLoop:
             - This is Tier 0 logic - deterministic, Python-authoritative
         """
         try:
+            if not self._should_commit_distilled_candidate(candidate):
+                logger.info("Distillation filtered candidate '{}'", candidate.title)
+                return
+
             params = candidate.to_memory_params()
 
             if candidate.type == CandidateType.FACT:
@@ -1202,6 +1214,57 @@ class AgentLoop:
                 candidate.title,
                 e,
             )
+
+    @staticmethod
+    def _normalize_memory_text(text: str) -> str:
+        """Normalize text for conservative duplicate checks."""
+        return " ".join(re.sub(r"[^a-z0-9\s]+", " ", text.lower()).split())
+
+    def _is_near_duplicate_memory_item(self, candidate: AtomicCandidate, existing: Any) -> bool:
+        """Return True when the candidate is effectively already stored."""
+        title_ratio = SequenceMatcher(
+            None,
+            self._normalize_memory_text(candidate.title),
+            self._normalize_memory_text(existing.title),
+        ).ratio()
+        content_ratio = SequenceMatcher(
+            None,
+            self._normalize_memory_text(candidate.content),
+            self._normalize_memory_text(existing.content),
+        ).ratio()
+        return title_ratio >= 0.9 or (title_ratio >= 0.8 and content_ratio >= 0.85)
+
+    def _find_existing_memory_duplicates(self, candidate: AtomicCandidate) -> list[Any]:
+        """Search the target category for likely duplicates."""
+        category_map = {
+            CandidateType.FACT: "facts",
+            CandidateType.DECISION: "decisions",
+            CandidateType.GOAL: "goals",
+            CandidateType.TASK: "tasks",
+            CandidateType.REFLECTION: "reflections",
+        }
+        category = category_map[candidate.type]
+        existing = self.memory.read_memory(category)
+        return [item for item in existing if self._is_near_duplicate_memory_item(candidate, item)]
+
+    def _should_commit_distilled_candidate(self, candidate: AtomicCandidate) -> bool:
+        """Apply conservative distillation acceptance rules before writing memory."""
+        allowed_types = {CandidateType.FACT, CandidateType.GOAL, CandidateType.TASK}
+        if candidate.type == CandidateType.DECISION:
+            has_rationale = bool((candidate.decision_rationale or "").strip())
+            if candidate.confidence < 0.9 or not has_rationale:
+                return False
+        elif candidate.type not in allowed_types:
+            return False
+
+        if candidate.confidence < 0.65:
+            return False
+
+        duplicates = self._find_existing_memory_duplicates(candidate)
+        if duplicates:
+            return False
+
+        return True
 
     async def _reflect_on_session(self, session: Session) -> None:
         """

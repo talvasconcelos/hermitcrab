@@ -36,45 +36,37 @@ Do not commit secrets or local workspace state. Runtime config is created outsid
 - Empty replies after tool use, raw JSON tool calls, and XML-like inline tool calls are all real failure modes that must be handled in Python, not assumed away.
 - Subagent delegation should be encouraged deterministically for substantial implementation grunt work; do not rely only on vague prompt wording.
 
-## Current Rebuild Decision
-The `broken_changes` branch must not be cherry-picked or merged incrementally. Rebuild the desired work fresh on top of `main`, on clean branch(es), and validate tool-calling after each feature lands.
+## Current Release Focus
+The immediate goal is a small, reliable release that stabilizes tool-calling, delegation, and adaptive memory quality without expanding the architecture too much.
 
-Features confirmed worth rebuilding:
-- Proper Ollama `:cloud` handling while still using the local Ollama provider/library. Example: `ollama/kimi-k2.5:cloud` must remain routed through local Ollama and keep the `:cloud` suffix when required.
-- Subagents with model aliases and delegated task execution. The main agent should stay responsive and delegate substantial work to subagents when appropriate. Users may specify aliases like `coder`, but the agent should also be able to choose delegation/model routing on its own.
-- `reasoning_effort` configuration for supported thinking models.
-- General memory sanitation and deduplication improvements.
+Release-scope priorities:
+- Keep Ollama reliable by preferring the OpenAI-compatible `/v1` route with the `openai` provider.
+- Keep subagent delegation practical and deterministic for substantial implementation work.
+- Keep distillation conservative, optional, and low-risk.
+- Keep reflection useful, grounded, deduplicated, and safe from self-contradiction.
 
-Feature inventory from `broken_changes` that is worth using as a reference only, not as a cherry-pick source:
-- Subagent model aliases and per-task model selection.
-- `reasoning_effort` config propagation.
-- Ollama `:cloud` suffix preservation.
-- Optional memory item `id` support.
-- Blocking `write_file` from writing directly into `memory/`.
+## Release Checklist
+Before cutting the next release, confirm all of the following:
+- Ollama `/v1` via the `openai` provider is the documented and tested recommended path.
+- Native `ollama` provider remains clearly documented as lower-confidence for tool-calling unless revalidated.
+- One manual CLI tool-calling test passes on the recommended Ollama `/v1` configuration.
+- One manual subagent delegation test passes end-to-end.
+- Distillation is opt-in in config and stays disabled by default.
+- Distilled candidates are conservatively filtered: duplicates suppressed, low-confidence noise rejected, and `decision` candidates held to higher scrutiny.
+- Reflection requires evidence from the session and rejects duplicates or obvious contradictions before writing memory.
+- Focused regression tests for provider parsing, routing, subagents, reflection, and distillation pass.
+- README and onboarding examples reflect the current recommended provider setup.
 
-Areas explicitly considered unsafe from `broken_changes` and should be reimplemented carefully or skipped:
-- Tool-call parsing and fallback behavior in the provider/agent loop boundary.
-- Silent-failure/raw-JSON/tool-hint UX fixes that were layered on top of regressions.
-- Any web-chat deletions or unrelated prompt churn.
+## Next Milestone
+After the release, the next milestone should stay narrow and product-relevant:
+- NIP-17 support for more private Nostr messaging and group workflows.
+- Better delegation/task handoff clarity between main agent and subagents.
+- Memory retrieval quality so stored learnings influence active behavior more reliably.
 
-## Clean Rebuild Status
-Current clean rebuild branch: `fix/clean-rebuild-from-main`
-
-Commits currently on that branch:
-- `09ef714` `fix: preserve ollama cloud routing`
-- `e1a1c8a` `feat: add subagent model aliases`
-- `05ce54e` `feat: add reasoning effort control`
-- `f2d3417` `fix: support legacy memory files`
-- `f96429c` `fix: harden distillation candidate parsing`
-- `890b9f1` `test: cover reflection parsing and subagent spawn`
-
-Current validation status:
-- Tool-calling on CLI and Nostr was manually confirmed working again on this branch.
-- Focused automated tests for routing, commands, subagents, reflection, distillation resilience, and memory compatibility are passing.
-
-Current manual merge gate before merging this branch to `main`:
-- Run one successful manual subagent test end-to-end.
-- If that passes, this branch is considered merge-ready.
+NIP-17 direction:
+- Add first-class NIP-17 channel support without weakening current CLI and Nostr reliability.
+- Treat NIP-17 as a focused channel capability milestone, not as a reason to redesign the whole agent loop.
+- Preserve local-first and low-footprint constraints while adding group and private-message support.
 
 ## Next Steps TODO
 
@@ -88,11 +80,7 @@ Priority direction for the next implementation wave:
 Distillation should remain a fallback recovery layer, not the primary memory path.
 
 TODO:
-- Add duplicate and near-duplicate checks before committing distilled candidates into memory.
-- Restrict distilled candidate types by default to `fact`, `goal`, and `task`.
-- Treat distilled `decision` candidates as high-scrutiny items and only allow them with stronger validation.
-- Stop using distillation as a general reflection path; reserve reflection learning for the dedicated reflection service.
-- Add conservative novelty checks so low-value or repeated facts do not accumulate over time.
+- Add stronger novelty checks so low-value but not-quite-duplicate facts do not accumulate over time.
 - Add tests covering repeated-session distillation, duplicate suppression, and conflicting candidate handling.
 - Update documentation so memory is described accurately: explicit typed memory writes are authoritative; distillation only proposes fallback candidates.
 
@@ -101,9 +89,6 @@ TODO:
 Reflection is one of HermitCrab's strongest differentiators and should be treated as a core product feature.
 
 TODO:
-- Strengthen reflection validation so each reflection is grounded in concrete evidence from the session.
-- Require reflection outputs to point to the user behavior, correction, or repeated pattern that triggered the learning.
-- Add duplicate and contradiction checks before writing new reflections.
 - Make bootstrap-file auto-promotion stricter than plain reflection writing.
 - Prefer promoting corrections, preferences, and workflow learnings over vague "insights".
 - Add tests for reflection deduplication, contradiction handling, and promotion gating.

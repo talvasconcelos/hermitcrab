@@ -417,6 +417,7 @@ def gateway(
         mcp_servers=config.tools.mcp_servers,
         channels_config=config.channels,
         job_models=job_models,  # Pass job models (or None for defaults)
+        distillation_enabled=config.agents.defaults.enable_distillation,
         model_aliases=config.agents.model_aliases,  # Pass model aliases
         reasoning_effort_config={
             "reasoning_effort": config.agents.defaults.job_models.reasoning_effort,
@@ -735,6 +736,7 @@ def agent(
         mcp_servers=config.tools.mcp_servers,
         channels_config=config.channels,
         job_models=job_models,  # Pass job models (or None for defaults)
+        distillation_enabled=config.agents.defaults.enable_distillation,
         model_aliases=config.agents.model_aliases,  # Pass model aliases
         reasoning_effort_config={
             "reasoning_effort": config.agents.defaults.job_models.reasoning_effort,
@@ -1266,6 +1268,7 @@ def cron_run(
         mcp_servers=config.tools.mcp_servers,
         channels_config=config.channels,
         job_models=job_models,  # Pass job models (or None for defaults)
+        distillation_enabled=config.agents.defaults.enable_distillation,
         model_aliases=config.agents.model_aliases,  # Pass model aliases
         reasoning_effort_config={
             "reasoning_effort": config.agents.defaults.job_models.reasoning_effort,

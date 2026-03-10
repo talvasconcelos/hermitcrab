@@ -30,7 +30,7 @@ Just move the `workspace/` folder and you’re back in business — same memorie
 
 - Supports **fully offline** operation with local models (Ollama via LiteLLM)  
 - Remembers things in **plain, human-readable Markdown files** (Obsidian compatible, git-friendly)  
-- Automatically **distills** conversations into facts, tasks, decisions, goals, reflections  
+- Can **distill** conversations into facts, tasks, decisions, goals, and reflections when that optional background pass is enabled  
 - **Reflects** on itself — spots patterns, mistakes, contradictions, and suggests improvements  
 - Talks via **Nostr** (primary), Telegram, email, or plain CLI — your choice  
 - Stays tiny, fast, and cheap — no 100k+ line monolith
@@ -151,7 +151,7 @@ Every session follows a clean lifecycle:
 1. You talk → agent responds → tools run if needed  
 2. Session ends (you exit, or 30 min of silence)  
 3. **Journal synthesis** — narrative summary of what happened (cheap model)  
-4. **Distillation** — extracts new facts, tasks, goals, decisions (cheap model)  
+4. **Optional distillation** — proposes fallback facts, tasks, goals, and decisions when enabled  
 5. **Reflection** — looks for mistakes, contradictions, patterns (smarter model)
 6. **Scratchpad archival** — per-session transient notes are archived on session end
 
@@ -178,6 +178,8 @@ Everything is:
 - Deterministic — Python, not the LLM, writes the files
 
 No vector databases. No silent embeddings. No hidden state corruption.
+
+Distillation is conservative and optional by design. Explicit memory writes remain authoritative.
 
 ### Scratchpad and channel prompts
 

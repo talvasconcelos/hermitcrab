@@ -4,6 +4,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
+from hermitcrab.agent.distillation import AtomicCandidate, CandidateType
 from hermitcrab.agent.loop import AgentLoop
 from hermitcrab.bus.events import InboundMessage
 from hermitcrab.providers.base import LLMResponse, ToolCallRequest
@@ -283,3 +284,41 @@ async def test_distillation_skips_null_candidates(agent_loop, mock_provider):
     mock_provider.chat.return_value = LLMResponse(content='{"candidates": [null]}')
 
     await agent_loop._distill_session(session)
+
+
+def test_commit_candidate_to_memory_skips_duplicate_fact(agent_loop):
+    """Distillation should not write near-duplicate facts repeatedly."""
+    agent_loop.memory.write_fact(
+        title="User prefers concise answers",
+        content="The user prefers concise answers for quick operational questions.",
+        confidence=0.9,
+        source="manual",
+    )
+
+    candidate = AtomicCandidate(
+        type=CandidateType.FACT,
+        title="User prefers concise answers",
+        content="User prefers concise answers for operational questions.",
+        confidence=0.95,
+    )
+
+    agent_loop._commit_candidate_to_memory(candidate)
+
+    facts = agent_loop.memory.list_memories("facts")
+    assert len(facts) == 1
+
+
+def test_commit_candidate_to_memory_rejects_low_scrutiny_decision(agent_loop):
+    """Distilled decisions should need stronger evidence before being stored."""
+    candidate = AtomicCandidate(
+        type=CandidateType.DECISION,
+        title="Use framework X",
+        content="We should use framework X.",
+        confidence=0.8,
+        decision_rationale=None,
+    )
+
+    agent_loop._commit_candidate_to_memory(candidate)
+
+    decisions = agent_loop.memory.list_memories("decisions")
+    assert decisions == []

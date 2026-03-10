@@ -177,6 +177,7 @@ class AgentDefaults(Base):
     workspace: str = "~/.hermitcrab/workspace"
     model: str = "anthropic/claude-opus-4-5"  # Primary model for interactive responses
     job_models: AgentJobModels = Field(default_factory=AgentJobModels)
+    enable_distillation: bool = False  # Distillation is fallback cognition, disabled unless explicitly enabled
     max_tokens: int = 8192
     temperature: float = 0.1
     max_tool_iterations: int = 40

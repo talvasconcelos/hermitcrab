@@ -94,6 +94,7 @@ class TestReflectionService:
                 "title": "User prefers concise answers",
                 "content": "I learned that the user prefers brief, direct answers rather than long explanations.",
                 "type": "preference",
+                "evidence": "The user explicitly asked for a short answer and responded positively to a brief reply.",
                 "should_promote": false
             }
             '''
@@ -131,6 +132,7 @@ class TestReflectionService:
                 "title": "Task status values",
                 "content": "I learned to use 'open' not 'pending' for task status.",
                 "type": "correction",
+                "evidence": "During the session I used status open and avoided the invalid pending variant.",
                 "should_promote": true,
                 "promote_to": "TOOLS.md",
                 "promote_content": "Task status values: use 'open', 'in_progress', 'done', 'deferred'"
@@ -211,6 +213,82 @@ class TestReflectionService:
         result = service._parse_response(text)
         assert result["title"] == "Test"
         assert result["content"] == "Test content"
+
+    @pytest.mark.asyncio
+    async def test_reflect_on_session_skips_duplicate_reflection(self, memory_store, mock_provider):
+        service = ReflectionService(
+            memory=memory_store,
+            provider=mock_provider,
+            model="test-model",
+        )
+
+        memory_store.write_reflection(
+            title="User prefers concise answers",
+            content="I learned that the user prefers brief, direct answers rather than long explanations.",
+            tags=["preference", "reflection", "learning"],
+            context="Evidence: The user explicitly asked for short answers in the previous session.",
+        )
+
+        async def duplicate_chat(**kwargs):
+            response = MagicMock()
+            response.content = """
+            {
+                "title": "User prefers concise answers",
+                "content": "I learned that the user prefers brief, direct answers instead of long explanations.",
+                "type": "preference",
+                "evidence": "The user again asked for a short answer in this session.",
+                "should_promote": false
+            }
+            """
+            return response
+
+        mock_provider.chat.side_effect = duplicate_chat
+
+        await service.reflect_on_session(
+            messages=[{"role": "user", "content": "Short answer please"}],
+            session_key="test-session",
+        )
+
+        reflections = memory_store.list_memories("reflections")
+        assert len(reflections) == 1
+
+    @pytest.mark.asyncio
+    async def test_reflect_on_session_skips_contradictory_preference(self, memory_store, mock_provider):
+        service = ReflectionService(
+            memory=memory_store,
+            provider=mock_provider,
+            model="test-model",
+        )
+
+        memory_store.write_reflection(
+            title="Answer length preference",
+            content="I learned that the user prefers concise answers.",
+            tags=["preference", "reflection", "learning"],
+            context="Evidence: The user asked me to keep replies brief.",
+        )
+
+        async def contradictory_chat(**kwargs):
+            response = MagicMock()
+            response.content = """
+            {
+                "title": "Answer length preference",
+                "content": "I learned that the user prefers detailed, verbose answers.",
+                "type": "preference",
+                "evidence": "The user asked for more detail this time.",
+                "should_promote": false
+            }
+            """
+            return response
+
+        mock_provider.chat.side_effect = contradictory_chat
+
+        await service.reflect_on_session(
+            messages=[{"role": "user", "content": "Explain in detail"}],
+            session_key="test-session",
+        )
+
+        reflections = memory_store.list_memories("reflections")
+        assert len(reflections) == 1
 
     @pytest.mark.asyncio
     async def test_format_messages_truncates_long_content(self, memory_store, mock_provider):

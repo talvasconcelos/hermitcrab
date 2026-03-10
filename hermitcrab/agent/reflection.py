@@ -13,6 +13,8 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+import re
+from difflib import SequenceMatcher
 from typing import TYPE_CHECKING
 
 import json_repair
@@ -56,6 +58,7 @@ Respond with JSON:
   "title": "Short, descriptive title",
   "content": "What did you learn? Write in first person: 'I learned...', 'I should...', 'The user prefers...'",
   "type": "preference|correction|pattern|insight|workflow",
+  "evidence": "Concrete behavior, correction, or repeated pattern from this session that caused this learning",
   "should_promote": true,
   "promote_to": "AGENTS.md|TOOLS.md|SOUL.md|IDENTITY.md|none",
   "promote_content": "Specific instruction for your future self"
@@ -66,6 +69,7 @@ If nothing worth remembering, respond: {{"skip": true, "reason": "No new insight
 Rules:
 - ONE insight only (pick the most valuable)
 - First-person voice ("I learned...", not "The assistant should...")
+- evidence must cite a concrete user behavior, correction, or repeated pattern from this session
 - Check recent_reflections - don't duplicate what you already learned
 - promote_content should be actionable instruction for bootstrap files
 """
@@ -107,7 +111,7 @@ Rules:
                 return
 
             # 1. Load recent reflections for dedup context
-            recent = self.memory.list_memories("reflections")[:5]
+            recent = self.memory.list_memories("reflections")[:10]
 
             # 2. Build prompt
             messages_text = self._format_messages(messages)
@@ -137,8 +141,12 @@ Rules:
                 return
 
             # 5. Validate required fields
-            if not result.get("title") or not result.get("content"):
+            if not result.get("title") or not result.get("content") or not result.get("evidence"):
                 logger.warning("Reflection missing required fields: {}", result)
+                return
+
+            if self._is_duplicate_or_contradictory(result, recent):
+                logger.info("Reflection skipped after duplicate/contradiction guard: {}", result["title"])
                 return
 
             # 6. Write reflection
@@ -202,7 +210,7 @@ Rules:
         tags = [reflection_type, "reflection", "learning"]
 
         # Build context from promote info
-        context_parts = []
+        context_parts = [f"Evidence: {result.get('evidence', '').strip()}"]
         if result.get("should_promote"):
             context_parts.append(f"Marked for promotion to {result.get('promote_to', 'unknown')}")
 
@@ -212,6 +220,55 @@ Rules:
             tags=tags,
             context="\n".join(context_parts) if context_parts else None,
         )
+
+    @staticmethod
+    def _normalize_text(text: str | None) -> str:
+        """Normalize text for conservative duplicate checks."""
+        return " ".join(re.sub(r"[^a-z0-9\s]+", " ", (text or "").lower()).split())
+
+    @classmethod
+    def _similarity(cls, a: str | None, b: str | None) -> float:
+        return SequenceMatcher(None, cls._normalize_text(a), cls._normalize_text(b)).ratio()
+
+    @classmethod
+    def _extract_preference_polarity(cls, text: str | None) -> str | None:
+        normalized = cls._normalize_text(text)
+        positive_markers = ("prefer", "likes", "wants", "values", "more ", "concise", "brief")
+        negative_markers = ("avoid", "dislike", "does not like", "less ", "detailed", "verbose")
+        has_positive = any(marker in normalized for marker in positive_markers)
+        has_negative = any(marker in normalized for marker in negative_markers)
+        if has_positive and not has_negative:
+            return "positive"
+        if has_negative and not has_positive:
+            return "negative"
+        return None
+
+    def _is_duplicate_or_contradictory(self, result: dict, recent: list) -> bool:
+        """Reject duplicate or obviously contradictory reflections."""
+        title = result.get("title")
+        content = result.get("content")
+        evidence = result.get("evidence")
+        reflection_type = result.get("type", "insight")
+
+        for item in recent:
+            if item is None:
+                continue
+
+            title_similarity = self._similarity(title, item.title)
+            content_similarity = self._similarity(content, item.content)
+            evidence_similarity = self._similarity(evidence, item.metadata.get("context", ""))
+
+            if title_similarity >= 0.88 and (content_similarity >= 0.82 or evidence_similarity >= 0.75):
+                return True
+
+            if reflection_type == "preference" and "preference" in (item.tags or []):
+                same_subject = title_similarity >= 0.75
+                new_polarity = self._extract_preference_polarity(content)
+                old_polarity = self._extract_preference_polarity(item.content)
+                if same_subject and new_polarity and old_polarity and new_polarity != old_polarity:
+                    return True
+
+        return False
 
     async def _promote(self, result: dict) -> None:
         """Auto-promote reflection to bootstrap file."""
