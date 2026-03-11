@@ -31,6 +31,7 @@ import re
 import time
 from collections import defaultdict
 from contextlib import AsyncExitStack
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from difflib import SequenceMatcher
 from enum import Enum
@@ -104,6 +105,23 @@ class JobClass(str, Enum):
 
 # Session inactivity timeout (30 minutes)
 INACTIVITY_TIMEOUT_S = 30 * 60
+
+
+@dataclass
+class SessionDigest:
+    """Deterministic summary of a session for background cognition."""
+
+    session_key: str
+    channel: str
+    chat_id: str
+    first_timestamp: str
+    last_timestamp: str
+    event_lines: list[str]
+    user_requests: list[str]
+    user_corrections: list[str]
+    outcomes: list[str]
+    failures: list[str]
+    wikilinks: list[str]
 
 
 class AgentLoop:
@@ -231,13 +249,15 @@ class AgentLoop:
 
         # Initialize reflection service
         reflection_model = self._get_model_for_job(JobClass.REFLECTION) or self.model
+        reflection_promotion = reflection_config or {}
         self._reflection_service = ReflectionService(
             memory=self.memory,
-            provider=provider,
+            chat_callable=self._chat_with_retry,
             model=reflection_model,
+            auto_promote=bool(reflection_promotion.get("auto_promote", False)),
+            allowed_targets=reflection_promotion.get("target_files") or [],
+            max_file_lines=int(reflection_promotion.get("max_file_lines", 500) or 500),
         )
-        self._reflection_auto_promote = reflection_config.get("auto_promote", True) if reflection_config else False
-        self._reflection_notify = reflection_config.get("notify_user", True) if reflection_config else True
 
         self._running = False
         self._mcp_servers = mcp_servers or {}
@@ -249,6 +269,8 @@ class AgentLoop:
         self._background_tasks: set[asyncio.Task] = set()
         # Session timeout tracking (checked on each message)
         self._session_timers: dict[str, datetime] = {}
+        self._session_active_turns: defaultdict[str, int] = defaultdict(int)
+        self._session_end_in_progress: set[str] = set()
         # Per-session lock to prevent concurrent turn processing races
         self._session_locks: defaultdict[str, asyncio.Lock] = defaultdict(asyncio.Lock)
         self._register_default_tools()
@@ -697,6 +719,39 @@ class AgentLoop:
         """
         self._session_timers[session_key] = datetime.now(timezone.utc)
 
+    async def process_expired_sessions(self) -> int:
+        """Finalize sessions that exceeded the inactivity timeout."""
+        expired_keys = [
+            key
+            for key in list(self._session_timers.keys())
+            if (
+                key not in self._session_end_in_progress
+                and self._session_active_turns.get(key, 0) == 0
+                and self._check_session_timeout(key)
+            )
+        ]
+
+        for session_key in expired_keys:
+            self._session_end_in_progress.add(session_key)
+            session = self.sessions.get_or_create(session_key)
+            self._schedule_background(
+                self._run_session_end(session, reason="timeout"),
+                f"session_end:{session_key}",
+            )
+
+        return len(expired_keys)
+
+    async def _run_session_end(self, session: Session, reason: str) -> None:
+        """Run the session-end pipeline and clear in-progress tracking."""
+        try:
+            async with self._get_session_lock(session.key):
+                if self._session_active_turns.get(session.key, 0) > 0:
+                    logger.debug("Skipping session end while session is active: {}", session.key)
+                    return
+                await self._on_session_end(session, reason=reason)
+        finally:
+            self._session_end_in_progress.discard(session.key)
+
     def _get_session_lock(self, session_key: str) -> asyncio.Lock:
         """Get/create lock for a session key."""
         return self._session_locks[session_key]
@@ -787,6 +842,8 @@ class AgentLoop:
             reason,
             len(messages_for_background),
         )
+        if not messages_for_background:
+            return
 
         # Phase E: Deferred journal synthesis (non-blocking)
         # Journal is narrative, lossy, non-authoritative
@@ -841,47 +898,25 @@ class AgentLoop:
             session: Session to synthesize.
         """
         try:
-            # Gather session data for synthesis
             messages = session.messages
             if not messages:
                 return  # Empty session, no journal needed
-
-            # Extract tool call names (not raw outputs) for context
-            tool_names = set()
-            for msg in messages:
-                if msg.get("role") == "tool":
-                    tool_names.add(msg.get("name", "unknown"))
-
-            # Build synthesis prompt
-            user_messages = [m for m in messages if m.get("role") == "user"]
-            assistant_messages = [m for m in messages if m.get("role") == "assistant"]
-            timestamps = [
-                m.get("timestamp") for m in messages if isinstance(m.get("timestamp"), str)
-            ]
-            time_span = (
-                f"{timestamps[0]} -> {timestamps[-1]}" if len(timestamps) >= 2 else "unknown"
-            )
-            user_preview = "; ".join(
-                (m.get("content", "") or "").strip().replace("\n", " ")[:120]
-                for m in user_messages[:3]
-                if m.get("content")
-            )
-
-            channel = (
-                getattr(session, "channel", None) or getattr(session, "chat_id", None) or "unknown"
-            )
+            digest = self._build_session_digest(messages, session.key)
+            candidate_links = ", ".join(digest.wikilinks) if digest.wikilinks else "none"
             prompt = (
-                f"This is your own journal, written in your own words, to help the user and yourself.\n"
-                f"Your workspace is your house, your memories are here to help you help the user.\n"
-                f"Summarize this session as a brief narrative, framing yourself as 'I' (the assistant).\n"
-                f"Channel: {channel}\n"
-                f"Time span (ISO): {time_span}\n"
-                f"User messages: {len(user_messages)}\n"
-                f"My responses: {len(assistant_messages)}\n"
-                f"Tools used: {', '.join(tool_names) if tool_names else 'none'}\n\n"
-                f"User intent snippets: {user_preview or 'none'}\n\n"
-                "Write 3-5 concise sentences that mention what the user requested, what I attempted, what succeeded or failed, and any important outcome.\n"
-                "Each entry should state the channel it came from."
+                "Write a short first-person journal entry about what happened in this session.\n"
+                "Sound like a useful human journal, not telemetry.\n"
+                "Focus on what the user wanted, what I tried, what changed, and the outcome.\n"
+                "Use Obsidian-style wikilinks when referencing tasks, goals, decisions, reflections, or named work items.\n"
+                "Do not mention counts of messages, requests, or tool calls.\n\n"
+                f"Session: {digest.session_key}\n"
+                f"Channel: {digest.channel}\n"
+                f"Chat: {digest.chat_id}\n"
+                f"Time range: {digest.first_timestamp} -> {digest.last_timestamp}\n"
+                f"Candidate wikilinks: {candidate_links}\n\n"
+                "Event trace:\n"
+                f"{chr(10).join(digest.event_lines[:18])}\n\n"
+                "Write 3-6 sentences only."
             )
 
             # Try LLM synthesis if model available
@@ -899,7 +934,7 @@ class AgentLoop:
                     content = self._strip_think(response.content)
                     if content:
                         self.journal.write_entry(
-                            content=content,
+                            content=self._format_journal_entry(digest, content),
                             session_keys=[session.key],
                             tags=["session", "synthesis"],
                         )
@@ -909,11 +944,9 @@ class AgentLoop:
                     logger.warning("Journal LLM failed, using fallback: {}", e)
 
             # Fallback: deterministic summary
-            fallback = (
-                f"## Session: {session.key}\n\n"
-                f"User sent {len(user_messages)} message(s). "
-                f"Agent responded {len(assistant_messages)} time(s). "
-                f"Tools: {', '.join(sorted(tool_names)) if tool_names else 'none'}."
+            fallback = self._format_journal_entry(
+                digest,
+                self._build_fallback_journal_body(digest),
             )
             self.journal.write_entry(
                 content=fallback,
@@ -1309,6 +1342,7 @@ class AgentLoop:
         await self._reflection_service.reflect_on_session(
             messages=session.messages,
             session_key=session.key,
+            digest=self._build_session_digest(session.messages, session.key),
         )
 
     async def _reflect_on_session_from_messages(
@@ -1326,6 +1360,7 @@ class AgentLoop:
         await self._reflection_service.reflect_on_session(
             messages=messages,
             session_key=session_key,
+            digest=self._build_session_digest(messages, session_key),
         )
 
     async def _run_agent_loop(
@@ -1669,34 +1704,37 @@ class AgentLoop:
             logger.info("Processing system message from {}", msg.sender_id)
             key = f"{channel}:{chat_id}"
             async with self._get_session_lock(key):
+                self._session_active_turns[key] += 1
+                self._update_session_timer(key)
                 session = self.sessions.get_or_create(key)
                 scratchpad_path = self._ensure_scratchpad(key)
                 self._set_tool_context(channel, chat_id, msg.metadata.get("message_id"))
-
-                # Update session timer (reset inactivity clock)
-                self._update_session_timer(key)
-
-                history = session.get_history(max_messages=self.memory_window)
-                messages = self.context.build_messages(
-                    history=history,
-                    current_message=msg.content,
-                    channel=channel,
-                    chat_id=chat_id,
-                    scratchpad_path=str(scratchpad_path),
-                )
-                # Phase B happens inside _run_agent_loop
-                final_content, _, all_msgs = await self._run_agent_loop(
-                    messages,
-                    job_class=JobClass.INTERACTIVE_RESPONSE,
-                )
-                # Phase C: Deterministic save
-                self._save_turn(session, all_msgs, 1 + len(history))
-                self.sessions.save(session)
-                return OutboundMessage(
-                    channel=channel,
-                    chat_id=chat_id,
-                    content=final_content or self._fallback_system_task_summary(msg.content),
-                )
+                try:
+                    history = session.get_history(max_messages=self.memory_window)
+                    messages = self.context.build_messages(
+                        history=history,
+                        current_message=msg.content,
+                        channel=channel,
+                        chat_id=chat_id,
+                        scratchpad_path=str(scratchpad_path),
+                    )
+                    # Phase B happens inside _run_agent_loop
+                    final_content, _, all_msgs = await self._run_agent_loop(
+                        messages,
+                        job_class=JobClass.INTERACTIVE_RESPONSE,
+                    )
+                    # Phase C: Deterministic save
+                    self._save_turn(session, all_msgs, 1 + len(history))
+                    self.sessions.save(session)
+                    return OutboundMessage(
+                        channel=channel,
+                        chat_id=chat_id,
+                        content=final_content or self._fallback_system_task_summary(msg.content),
+                    )
+                finally:
+                    self._session_active_turns[key] -= 1
+                    if self._session_active_turns[key] <= 0:
+                        self._session_active_turns.pop(key, None)
 
         # Regular user message
         preview = msg.content[:80] + "..." if len(msg.content) > 80 else msg.content
@@ -1704,133 +1742,272 @@ class AgentLoop:
 
         key = session_key or msg.session_key
         async with self._get_session_lock(key):
+            self._session_active_turns[key] += 1
+            self._update_session_timer(key)
             session = self.sessions.get_or_create(key)
             scratchpad_path = self._ensure_scratchpad(key)
+            try:
+                # ====================================================================
+                # Phase D (early): Session end detection - explicit reset
+                # ====================================================================
 
-            # Update session timer (reset inactivity clock)
-            self._update_session_timer(key)
+                # Slash commands
+                cmd = msg.content.strip().lower()
+                if cmd == "/new":
+                    # Explicit session end - pass snapshot before clearing to preserve data for background tasks
+                    messages_snapshot = list(session.messages)
+                    await self._on_session_end(
+                        session, reason="explicit", messages_snapshot=messages_snapshot
+                    )
 
-            # ====================================================================
-            # Phase D (early): Session end detection - explicit reset
-            # ====================================================================
+                    session.clear()
+                    session.metadata.pop("last_cognition_index", None)
+                    self.sessions.save(session)
+                    self.sessions.invalidate(session.key)
+                    return OutboundMessage(
+                        channel=msg.channel, chat_id=msg.chat_id, content="New session started."
+                    )
 
-            # Slash commands
-            cmd = msg.content.strip().lower()
-            if cmd == "/new":
-                # Explicit session end - pass snapshot before clearing to preserve data for background tasks
-                messages_snapshot = list(session.messages)
-                await self._on_session_end(
-                    session, reason="explicit", messages_snapshot=messages_snapshot
+                if cmd == "/help":
+                    return OutboundMessage(
+                        channel=msg.channel,
+                        chat_id=msg.chat_id,
+                        content="🐈 hermitcrab commands:\n/new — Start a new conversation\n/help — Show available commands",
+                    )
+
+                # ====================================================================
+                # Phase A (continued): Tool context setup
+                # ====================================================================
+
+                self._set_tool_context(msg.channel, msg.chat_id, msg.metadata.get("message_id"))
+                if message_tool := self.tools.get("message"):
+                    if isinstance(message_tool, MessageTool):
+                        message_tool.start_turn()
+
+                history = session.get_history(max_messages=self.memory_window)
+                initial_messages = self.context.build_messages(
+                    history=history,
+                    current_message=msg.content,
+                    media=msg.media if msg.media else None,
+                    channel=msg.channel,
+                    chat_id=msg.chat_id,
+                    scratchpad_path=str(scratchpad_path),
+                )
+                if self._should_hint_subagent_delegation(msg.content):
+                    initial_messages.insert(
+                        len(initial_messages) - 1,
+                        {"role": "system", "content": self._build_delegation_hint()},
+                    )
+
+                async def _bus_progress(content: str, *, tool_hint: bool = False) -> None:
+                    meta = dict(msg.metadata or {})
+                    meta["_progress"] = True
+                    meta["_tool_hint"] = tool_hint
+                    await self.bus.publish_outbound(
+                        OutboundMessage(
+                            channel=msg.channel,
+                            chat_id=msg.chat_id,
+                            content=content,
+                            metadata=meta,
+                        )
+                    )
+
+                final_content, tools_used, all_msgs = await self._run_agent_loop(
+                    initial_messages,
+                    on_progress=on_progress or _bus_progress,
+                    job_class=JobClass.INTERACTIVE_RESPONSE,
                 )
 
-                session.clear()
-                session.metadata.pop("last_cognition_index", None)
+                if final_content is None:
+                    final_content = "I've completed processing but have no response to give."
+
+                preview = final_content[:120] + "..." if len(final_content) > 120 else final_content
+                logger.info("Response to {}:{}: {}", msg.channel, msg.sender_id, preview)
+
+                self._save_turn(session, all_msgs, 1 + len(history))
                 self.sessions.save(session)
-                self.sessions.invalidate(session.key)
-                return OutboundMessage(
-                    channel=msg.channel, chat_id=msg.chat_id, content="New session started."
-                )
 
-            if cmd == "/help":
+                if message_tool := self.tools.get("message"):
+                    if isinstance(message_tool, MessageTool) and message_tool.has_sent_in_turn:
+                        return None
+
                 return OutboundMessage(
                     channel=msg.channel,
                     chat_id=msg.chat_id,
-                    content="🐈 hermitcrab commands:\n/new — Start a new conversation\n/help — Show available commands",
+                    content=final_content,
+                    metadata=msg.metadata or {},
                 )
+            finally:
+                self._session_active_turns[key] -= 1
+                if self._session_active_turns[key] <= 0:
+                    self._session_active_turns.pop(key, None)
 
-            # ====================================================================
-            # Phase A (continued): Tool context setup
-            # ====================================================================
+    @staticmethod
+    def _derive_channel_chat(session_key: str) -> tuple[str, str]:
+        """Split a session key into channel/chat identifiers."""
+        if ":" not in session_key:
+            return session_key, "direct"
+        return session_key.split(":", 1)
 
-            self._set_tool_context(msg.channel, msg.chat_id, msg.metadata.get("message_id"))
-            if message_tool := self.tools.get("message"):
-                if isinstance(message_tool, MessageTool):
-                    message_tool.start_turn()
+    @staticmethod
+    def _safe_iso_timestamp(value: str | None) -> str:
+        """Return a best-effort ISO timestamp string."""
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+        return datetime.now(timezone.utc).isoformat()
 
-            history = session.get_history(max_messages=self.memory_window)
-            initial_messages = self.context.build_messages(
-                history=history,
-                current_message=msg.content,
-                media=msg.media if msg.media else None,
-                channel=msg.channel,
-                chat_id=msg.chat_id,
-                scratchpad_path=str(scratchpad_path),
-            )
-            if self._should_hint_subagent_delegation(msg.content):
-                initial_messages.insert(
-                    len(initial_messages) - 1,
-                    {"role": "system", "content": self._build_delegation_hint()},
-                )
-            async def _bus_progress(content: str, *, tool_hint: bool = False) -> None:
-                meta = dict(msg.metadata or {})
-                meta["_progress"] = True
-                meta["_tool_hint"] = tool_hint
-                await self.bus.publish_outbound(
-                    OutboundMessage(
-                        channel=msg.channel,
-                        chat_id=msg.chat_id,
-                        content=content,
-                        metadata=meta,
-                    )
-                )
+    @staticmethod
+    def _clean_snippet(value: Any, *, max_chars: int = 160) -> str:
+        """Normalize text snippets for prompts and logs."""
+        if value is None:
+            return ""
+        text = str(value).strip().replace("\n", " ")
+        text = re.sub(r"\s+", " ", text)
+        if len(text) > max_chars:
+            return text[: max_chars - 3].rstrip() + "..."
+        return text
 
-            # ====================================================================
-            # Phase B: Interactive response (LLM allowed, policy gated)
-            # ====================================================================
+    @staticmethod
+    def _extract_tool_name(call: dict[str, Any]) -> str:
+        """Read a tool name from a stored tool-call payload."""
+        function = call.get("function")
+        if isinstance(function, dict) and isinstance(function.get("name"), str):
+            return function["name"]
+        if isinstance(call.get("name"), str):
+            return call["name"]
+        return "unknown"
 
-            final_content, tools_used, all_msgs = await self._run_agent_loop(
-                initial_messages,
-                on_progress=on_progress or _bus_progress,
-                job_class=JobClass.INTERACTIVE_RESPONSE,
-            )
+    @staticmethod
+    def _extract_tool_arguments(call: dict[str, Any]) -> dict[str, Any]:
+        """Read normalized tool-call arguments from a stored payload."""
+        function = call.get("function")
+        raw_arguments = function.get("arguments") if isinstance(function, dict) else call.get("arguments")
+        if isinstance(raw_arguments, dict):
+            return raw_arguments
+        if isinstance(raw_arguments, str):
+            try:
+                parsed = json.loads(raw_arguments)
+            except json.JSONDecodeError:
+                try:
+                    parsed = json_repair.loads(raw_arguments)
+                except Exception:
+                    return {}
+            return parsed if isinstance(parsed, dict) else {}
+        return {}
 
-            if final_content is None:
-                final_content = "I've completed processing but have no response to give."
+    def _build_session_digest(self, messages: list[dict[str, Any]], session_key: str) -> SessionDigest:
+        """Build a deterministic digest of a session for weak-model jobs."""
+        channel, chat_id = self._derive_channel_chat(session_key)
+        timestamps = [
+            self._safe_iso_timestamp(msg.get("timestamp"))
+            for msg in messages
+            if msg.get("role") in {"user", "assistant", "tool"}
+        ]
+        first_timestamp = timestamps[0] if timestamps else self._safe_iso_timestamp(None)
+        last_timestamp = timestamps[-1] if timestamps else first_timestamp
 
-            preview = final_content[:120] + "..." if len(final_content) > 120 else final_content
-            logger.info("Response to {}:{}: {}", msg.channel, msg.sender_id, preview)
+        event_lines: list[str] = []
+        user_requests: list[str] = []
+        user_corrections: list[str] = []
+        outcomes: list[str] = []
+        failures: list[str] = []
+        wikilinks: list[str] = []
 
-            # ====================================================================
-            # Phase C: Deterministic session save (Tier 0)
-            # ====================================================================
+        for msg in messages[-40:]:
+            role = msg.get("role")
+            content = self._clean_snippet(msg.get("content"))
+            if role == "user":
+                if not content:
+                    continue
+                event_lines.append(f"- User: {content}")
+                user_requests.append(content)
+                lowered = content.lower()
+                if any(
+                    marker in lowered
+                    for marker in ("don't", "do not", "stop", "instead", "should", "not ")
+                ):
+                    user_corrections.append(content)
+            elif role == "assistant":
+                if content:
+                    event_lines.append(f"- Assistant: {content}")
+                    if any(word in content.lower() for word in ("done", "completed", "saved", "updated")):
+                        outcomes.append(content)
+                tool_calls = msg.get("tool_calls") if isinstance(msg.get("tool_calls"), list) else []
+                for call in tool_calls:
+                    if not isinstance(call, dict):
+                        continue
+                    tool_name = self._extract_tool_name(call)
+                    arguments = self._extract_tool_arguments(call)
+                    title = self._clean_snippet(arguments.get("title"), max_chars=80)
+                    if title and tool_name.startswith("write_"):
+                        wikilinks.append(f"[[{title}]]")
+                    if title and tool_name in {"write_task", "write_goal", "write_decision", "write_fact"}:
+                        event_lines.append(f"- Assistant saved {tool_name[6:]} [[{title}]].")
+                    else:
+                        focus = title or self._clean_snippet(arguments.get("query") or arguments.get("path"))
+                        if focus:
+                            event_lines.append(f"- Assistant used {tool_name}: {focus}")
+            elif role == "tool":
+                tool_name = self._clean_snippet(msg.get("name"), max_chars=60) or "tool"
+                if not content:
+                    continue
+                lowered = content.lower()
+                if lowered.startswith("error") or "tool error" in lowered or "failed" in lowered:
+                    failure = f"{tool_name}: {content}"
+                    failures.append(failure)
+                    event_lines.append(f"- Tool failure ({tool_name}): {content}")
+                elif lowered.startswith(("task saved:", "goal saved:", "decision saved:", "fact saved:")):
+                    outcomes.append(content)
 
-            self._save_turn(session, all_msgs, 1 + len(history))
-            self.sessions.save(session)
+        unique_links: list[str] = []
+        seen_links: set[str] = set()
+        for link in wikilinks:
+            if link not in seen_links:
+                unique_links.append(link)
+                seen_links.add(link)
 
-            # ====================================================================
-            # Phase D: Session end detection - inactivity timeout check
-            # ====================================================================
+        return SessionDigest(
+            session_key=session_key,
+            channel=channel,
+            chat_id=chat_id,
+            first_timestamp=first_timestamp,
+            last_timestamp=last_timestamp,
+            event_lines=event_lines[-20:] or ["- No significant events captured."],
+            user_requests=user_requests[-8:],
+            user_corrections=user_corrections[-6:],
+            outcomes=outcomes[-8:],
+            failures=failures[-6:],
+            wikilinks=unique_links[:10],
+        )
 
-            # Check if any other sessions have timed out
-            timed_out_sessions = [
-                k for k in list(self._session_timers.keys()) if self._check_session_timeout(k)
-            ]
-            for timed_out_key in timed_out_sessions:
-                timed_out_session = self.sessions.get_or_create(timed_out_key)
-                # Trigger session end asynchronously (non-blocking)
-                self._schedule_background(
-                    self._on_session_end(timed_out_session, reason="timeout"),
-                    f"session_end:{timed_out_key}",
-                )
+    @staticmethod
+    def _format_digest_timestamp(value: str) -> str:
+        """Render digest timestamp for journal headings."""
+        try:
+            dt = datetime.fromisoformat(value)
+        except ValueError:
+            return value
+        return dt.astimezone(timezone.utc).strftime("%H:%M UTC")
 
-            # ====================================================================
-            # Phase E: Deferred journal + background cognition (non-blocking)
-            # ====================================================================
+    def _format_journal_entry(self, digest: SessionDigest, body: str) -> str:
+        """Wrap a journal body with deterministic per-entry metadata."""
+        heading = f"## {self._format_digest_timestamp(digest.last_timestamp)} · {digest.channel} · `{digest.session_key}`"
+        meta = f"_Session:_ `{digest.session_key}`  \n_Channel:_ `{digest.channel}`"
+        if digest.wikilinks:
+            meta += f"  \n_Links:_ {' '.join(digest.wikilinks[:4])}"
+        return f"{heading}\n\n{meta}\n\n{body.strip()}"
 
-            # NOTE: Journal is NOT written per-turn anymore.
-            # Journal synthesis happens only on session end (explicit or timeout).
-            # This is intentional: journal is narrative, not authoritative.
-
-            if message_tool := self.tools.get("message"):
-                if isinstance(message_tool, MessageTool) and message_tool.has_sent_in_turn:
-                    return None
-
-            return OutboundMessage(
-                channel=msg.channel,
-                chat_id=msg.chat_id,
-                content=final_content,
-                metadata=msg.metadata or {},
-            )
+    def _build_fallback_journal_body(self, digest: SessionDigest) -> str:
+        """Build a deterministic journal narrative when LLM synthesis fails."""
+        request = digest.user_requests[-1] if digest.user_requests else "The user continued the conversation."
+        parts = [f"I worked on {request}"]
+        if digest.outcomes:
+            parts.append(f"The clearest outcome was {digest.outcomes[-1]}")
+        if digest.failures:
+            parts.append(f"A notable snag was {digest.failures[-1]}")
+        if digest.wikilinks:
+            parts.append(f"Related notes: {' '.join(digest.wikilinks[:4])}")
+        return " ".join(parts)
 
     _TOOL_RESULT_MAX_CHARS = 500
 

@@ -306,13 +306,13 @@ def _make_provider(config: Config):
     from hermitcrab.providers.registry import find_by_name
 
     spec = find_by_name(provider_name)
-    
+
     # Special handling for Ollama - show helpful message if misconfigured
     if provider_name == "ollama" or "ollama" in model.lower():
         # Check if api_base is explicitly set to None/empty (not using default)
         ollama_config = config.providers.ollama if hasattr(config.providers, 'ollama') else None
         api_base = config.get_api_base(model)
-        
+
         # If user explicitly configured ollama provider but with null/empty api_base
         if ollama_config and ollama_config.api_base is None and api_base is None:
             console.print("[yellow]Warning: Ollama provider configured without api_base.[/yellow]")
@@ -334,7 +334,7 @@ def _make_provider(config: Config):
             console.print("  • Use [bold]ollama_chat/[/bold] prefix for chat models (recommended)")
             console.print("  • Or [bold]ollama/[/bold] for text completion")
             console.print("  • api_base should NOT include /v1 suffix")
-    
+
     if (
         not model.startswith("bedrock/")
         and not (p and p.api_key)
@@ -379,6 +379,7 @@ def gateway(
     from hermitcrab.cron.types import CronJob
     from hermitcrab.heartbeat.service import HeartbeatService
     from hermitcrab.session.manager import SessionManager
+    from hermitcrab.session.timeout_service import SessionTimeoutService
 
     configured_level = "DEBUG" if verbose else log_level.upper()
     logger.remove()
@@ -517,6 +518,11 @@ def gateway(
         interval_s=hb_cfg.interval_s,
         enabled=hb_cfg.enabled,
     )
+    timeout_monitor = SessionTimeoutService(
+        agent.process_expired_sessions,
+        interval_s=min(60, max(5, config.agents.defaults.inactivity_timeout_s // 6)),
+        enabled=True,
+    )
 
     if channels.enabled_channels:
         console.print(f"[green]✓[/green] Channels enabled: {', '.join(channels.enabled_channels)}")
@@ -533,6 +539,7 @@ def gateway(
         try:
             await cron.start()
             await heartbeat.start()
+            await timeout_monitor.start()
             await asyncio.gather(
                 agent.run(),
                 channels.start_all(),
@@ -541,6 +548,7 @@ def gateway(
             console.print("\nShutting down...")
         finally:
             await agent.close_mcp()
+            timeout_monitor.stop()
             heartbeat.stop()
             cron.stop()
             agent.stop()
@@ -560,6 +568,7 @@ def _run_nostr_mode(
     nostr_pubkey: str,
     markdown: bool,
     thinking_ctx: Any,
+    timeout_monitor: Any,
 ) -> None:
     """
     Run agent in Nostr listen mode.
@@ -572,6 +581,7 @@ def _run_nostr_mode(
         nostr_pubkey: Nostr pubkey (npub or hex) to listen for.
         markdown: Whether to render responses as Markdown.
         thinking_ctx: Context manager for "thinking" spinner.
+        timeout_monitor: Session timeout monitor service.
     """
 
     # Normalize pubkey to hex
@@ -602,6 +612,7 @@ def _run_nostr_mode(
     signal.signal(signal.SIGINT, _exit_on_sigint)
 
     async def run_nostr_listen():
+        await timeout_monitor.start()
         bus_task = asyncio.create_task(agent_loop.run())
         turn_done = asyncio.Event()
         turn_done.set()
@@ -662,6 +673,7 @@ def _run_nostr_mode(
                 except asyncio.CancelledError:
                     break
         finally:
+            timeout_monitor.stop()
             agent_loop.stop()
             outbound_task.cancel()
             await asyncio.gather(bus_task, outbound_task, return_exceptions=True)
@@ -702,6 +714,7 @@ def agent(
     from hermitcrab.bus.queue import MessageBus
     from hermitcrab.config.loader import get_data_dir, load_config
     from hermitcrab.cron.service import CronService
+    from hermitcrab.session.timeout_service import SessionTimeoutService
 
     config = load_config()
 
@@ -756,6 +769,11 @@ def agent(
             "notify_user": config.reflection.promotion.notify_user,
         },
     )
+    timeout_monitor = SessionTimeoutService(
+        agent_loop.process_expired_sessions,
+        interval_s=min(60, max(5, config.agents.defaults.inactivity_timeout_s // 6)),
+        enabled=bool(nostr_pubkey or not message),
+    )
 
     # Show spinner when logs are off (no output to miss); skip when logs are on
     def _thinking_ctx():
@@ -793,6 +811,7 @@ def agent(
             nostr_pubkey=nostr_pubkey,
             markdown=markdown,
             thinking_ctx=_thinking_ctx,
+            timeout_monitor=timeout_monitor,
         )
     else:
         # Interactive mode — route through bus like other channels
@@ -816,6 +835,7 @@ def agent(
         signal.signal(signal.SIGINT, _exit_on_sigint)
 
         async def run_interactive():
+            await timeout_monitor.start()
             bus_task = asyncio.create_task(agent_loop.run())
             turn_done = asyncio.Event()
             turn_done.set()
@@ -910,6 +930,7 @@ def agent(
                         console.print("\nGoodbye!")
                         break
             finally:
+                timeout_monitor.stop()
                 agent_loop.stop()
                 outbound_task.cancel()
                 await asyncio.gather(bus_task, outbound_task, return_exceptions=True)

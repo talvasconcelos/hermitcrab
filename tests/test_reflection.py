@@ -1,12 +1,32 @@
 """Tests for the new reflection service."""
 
-import pytest
 import tempfile
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
-from hermitcrab.agent.reflection import ReflectionService
+import pytest
+
 from hermitcrab.agent.memory import MemoryStore
+from hermitcrab.agent.reflection import ReflectionService
+
+
+def make_digest(**overrides):
+    base = {
+        "session_key": "test-session",
+        "channel": "cli",
+        "chat_id": "direct",
+        "first_timestamp": "2026-03-11T10:00:00+00:00",
+        "last_timestamp": "2026-03-11T10:05:00+00:00",
+        "event_lines": ["- User: Keep answers short."],
+        "user_requests": ["Keep answers short."],
+        "user_corrections": ["Keep answers short."],
+        "outcomes": [],
+        "failures": [],
+        "wikilinks": [],
+    }
+    base.update(overrides)
+    return SimpleNamespace(**base)
 
 
 @pytest.fixture
@@ -44,11 +64,18 @@ class TestReflectionService:
         """Test that empty sessions are skipped."""
         service = ReflectionService(
             memory=memory_store,
-            provider=mock_provider,
+            chat_callable=mock_provider.chat,
             model="test-model",
+            auto_promote=False,
+            allowed_targets=["AGENTS.md", "TOOLS.md", "SOUL.md", "IDENTITY.md"],
+            max_file_lines=500,
         )
 
-        await service.reflect_on_session(messages=[], session_key="test-session")
+        await service.reflect_on_session(
+            messages=[],
+            session_key="test-session",
+            digest=make_digest(),
+        )
 
         # LLM should not be called
         mock_provider.chat.assert_not_called()
@@ -58,8 +85,11 @@ class TestReflectionService:
         """Test that sessions are skipped when LLM returns skip=true."""
         service = ReflectionService(
             memory=memory_store,
-            provider=mock_provider,
+            chat_callable=mock_provider.chat,
             model="test-model",
+            auto_promote=False,
+            allowed_targets=["AGENTS.md", "TOOLS.md", "SOUL.md", "IDENTITY.md"],
+            max_file_lines=500,
         )
 
         # Mock LLM response with skip
@@ -72,6 +102,7 @@ class TestReflectionService:
         await service.reflect_on_session(
             messages=[{"role": "user", "content": "Hello"}],
             session_key="test-session",
+            digest=make_digest(user_requests=["Hello"], user_corrections=[]),
         )
 
         # LLM should be called but no reflection written
@@ -82,8 +113,11 @@ class TestReflectionService:
         """Test that reflections are written to memory."""
         service = ReflectionService(
             memory=memory_store,
-            provider=mock_provider,
+            chat_callable=mock_provider.chat,
             model="test-model",
+            auto_promote=False,
+            allowed_targets=["AGENTS.md", "TOOLS.md", "SOUL.md", "IDENTITY.md"],
+            max_file_lines=500,
         )
 
         # Mock LLM response with reflection
@@ -107,6 +141,10 @@ class TestReflectionService:
                 {"role": "assistant", "content": "Sure, brief response here."},
             ],
             session_key="test-session",
+            digest=make_digest(
+                user_requests=["Give me a short answer"],
+                user_corrections=["Give me a short answer"],
+            ),
         )
 
         # Check reflection was written
@@ -120,8 +158,11 @@ class TestReflectionService:
         """Test that reflections are promoted when should_promote=true."""
         service = ReflectionService(
             memory=memory_store,
-            provider=mock_provider,
+            chat_callable=mock_provider.chat,
             model="test-model",
+            auto_promote=True,
+            allowed_targets=["AGENTS.md", "TOOLS.md", "SOUL.md", "IDENTITY.md"],
+            max_file_lines=500,
         )
 
         # Mock LLM response with promotion
@@ -147,6 +188,10 @@ class TestReflectionService:
                 {"role": "assistant", "content": "Using status: open"},
             ],
             session_key="test-session",
+            digest=make_digest(
+                user_requests=["Create a task"],
+                user_corrections=["Use status open, not pending."],
+            ),
         )
 
         # Check reflection was written
@@ -164,8 +209,11 @@ class TestReflectionService:
         """Test that invalid JSON is handled gracefully."""
         service = ReflectionService(
             memory=memory_store,
-            provider=mock_provider,
+            chat_callable=mock_provider.chat,
             model="test-model",
+            auto_promote=False,
+            allowed_targets=["AGENTS.md", "TOOLS.md", "SOUL.md", "IDENTITY.md"],
+            max_file_lines=500,
         )
 
         # Test parsing invalid JSON
@@ -178,8 +226,11 @@ class TestReflectionService:
         """Test that JSON is extracted from surrounding text."""
         service = ReflectionService(
             memory=memory_store,
-            provider=mock_provider,
+            chat_callable=mock_provider.chat,
             model="test-model",
+            auto_promote=False,
+            allowed_targets=["AGENTS.md", "TOOLS.md", "SOUL.md", "IDENTITY.md"],
+            max_file_lines=500,
         )
 
         # Test parsing JSON embedded in text
@@ -197,8 +248,11 @@ class TestReflectionService:
         """Relaxed JSON with trailing commas should still parse."""
         service = ReflectionService(
             memory=memory_store,
-            provider=mock_provider,
+            chat_callable=mock_provider.chat,
             model="test-model",
+            auto_promote=False,
+            allowed_targets=["AGENTS.md", "TOOLS.md", "SOUL.md", "IDENTITY.md"],
+            max_file_lines=500,
         )
 
         text = """
@@ -218,8 +272,11 @@ class TestReflectionService:
     async def test_reflect_on_session_skips_duplicate_reflection(self, memory_store, mock_provider):
         service = ReflectionService(
             memory=memory_store,
-            provider=mock_provider,
+            chat_callable=mock_provider.chat,
             model="test-model",
+            auto_promote=False,
+            allowed_targets=["AGENTS.md", "TOOLS.md", "SOUL.md", "IDENTITY.md"],
+            max_file_lines=500,
         )
 
         memory_store.write_reflection(
@@ -247,6 +304,10 @@ class TestReflectionService:
         await service.reflect_on_session(
             messages=[{"role": "user", "content": "Short answer please"}],
             session_key="test-session",
+            digest=make_digest(
+                user_requests=["Short answer please"],
+                user_corrections=["Short answer please"],
+            ),
         )
 
         reflections = memory_store.list_memories("reflections")
@@ -256,8 +317,11 @@ class TestReflectionService:
     async def test_reflect_on_session_skips_contradictory_preference(self, memory_store, mock_provider):
         service = ReflectionService(
             memory=memory_store,
-            provider=mock_provider,
+            chat_callable=mock_provider.chat,
             model="test-model",
+            auto_promote=False,
+            allowed_targets=["AGENTS.md", "TOOLS.md", "SOUL.md", "IDENTITY.md"],
+            max_file_lines=500,
         )
 
         memory_store.write_reflection(
@@ -285,38 +349,126 @@ class TestReflectionService:
         await service.reflect_on_session(
             messages=[{"role": "user", "content": "Explain in detail"}],
             session_key="test-session",
+            digest=make_digest(
+                user_requests=["Explain in detail"],
+                user_corrections=["Explain in detail"],
+            ),
         )
 
         reflections = memory_store.list_memories("reflections")
         assert len(reflections) == 1
 
     @pytest.mark.asyncio
-    async def test_format_messages_truncates_long_content(self, memory_store, mock_provider):
-        """Test that long messages are truncated."""
+    async def test_reflect_on_session_rejects_tool_failure_reflection(self, memory_store, mock_provider):
         service = ReflectionService(
             memory=memory_store,
-            provider=mock_provider,
+            chat_callable=mock_provider.chat,
             model="test-model",
+            auto_promote=False,
+            allowed_targets=["AGENTS.md", "TOOLS.md", "SOUL.md", "IDENTITY.md"],
+            max_file_lines=500,
         )
 
-        messages = [
-            {"role": "user", "content": "Short"},
-            {"role": "assistant", "content": "X" * 1000},  # Very long message
-        ]
+        async def tool_failure_chat(**kwargs):
+            response = MagicMock()
+            response.content = """
+            {
+                "title": "Tool failure: read_file",
+                "content": "I learned that read_file failed and should be retried.",
+                "type": "insight",
+                "evidence": "The session had a read_file tool error after a missing file.",
+                "should_promote": false
+            }
+            """
+            return response
 
-        formatted = service._format_messages(messages)
+        mock_provider.chat.side_effect = tool_failure_chat
 
-        # Should be truncated to 500 chars
-        assert len(formatted) < 600
-        assert "Short" in formatted
+        await service.reflect_on_session(
+            messages=[{"role": "user", "content": "Please inspect the config"}],
+            session_key="test-session",
+            digest=make_digest(
+                user_requests=["Please inspect the config"],
+                user_corrections=[],
+                failures=["read_file: Error: File not found"],
+            ),
+        )
+
+        reflections = memory_store.list_memories("reflections")
+        assert reflections == []
+
+    @pytest.mark.asyncio
+    async def test_reflect_on_session_accepts_missing_evidence_when_digest_supports_it(self, memory_store, mock_provider):
+        service = ReflectionService(
+            memory=memory_store,
+            chat_callable=mock_provider.chat,
+            model="test-model",
+            auto_promote=False,
+            allowed_targets=["AGENTS.md", "TOOLS.md", "SOUL.md", "IDENTITY.md"],
+            max_file_lines=500,
+        )
+
+        async def no_evidence_chat(**kwargs):
+            response = MagicMock()
+            response.content = """
+            {
+                "title": "User prefers concise answers",
+                "content": "I learned that the user prefers concise answers and direct replies.",
+                "type": "preference",
+                "should_promote": false
+            }
+            """
+            return response
+
+        mock_provider.chat.side_effect = no_evidence_chat
+
+        await service.reflect_on_session(
+            messages=[{"role": "user", "content": "Please keep it concise"}],
+            session_key="test-session",
+            digest=make_digest(
+                user_requests=["Please keep it concise"],
+                user_corrections=["Please keep it concise"],
+            ),
+        )
+
+        reflections = memory_store.list_memories("reflections")
+        assert len(reflections) == 1
+        assert "Please keep it concise" in reflections[0].metadata.get("context", "")
+
+    @pytest.mark.asyncio
+    async def test_format_digest_includes_core_sections(self, memory_store, mock_provider):
+        """Digest formatting preserves the structured reflection input."""
+        service = ReflectionService(
+            memory=memory_store,
+            chat_callable=mock_provider.chat,
+            model="test-model",
+            auto_promote=False,
+            allowed_targets=["AGENTS.md", "TOOLS.md", "SOUL.md", "IDENTITY.md"],
+            max_file_lines=500,
+        )
+
+        formatted = service._format_digest(
+            make_digest(
+                user_requests=["Short"],
+                user_corrections=["Keep it short."],
+                outcomes=["I answered briefly."],
+                failures=["tool failure: ignore me"],
+            )
+        )
+        assert "User requests:" in formatted
+        assert "User corrections / expectations:" in formatted
+        assert "Ignore these tool or provider failures:" in formatted
 
     @pytest.mark.asyncio
     async def test_format_recent_reflections_handles_empty(self, memory_store, mock_provider):
         """Test that empty recent reflections are handled."""
         service = ReflectionService(
             memory=memory_store,
-            provider=mock_provider,
+            chat_callable=mock_provider.chat,
             model="test-model",
+            auto_promote=False,
+            allowed_targets=["AGENTS.md", "TOOLS.md", "SOUL.md", "IDENTITY.md"],
+            max_file_lines=500,
         )
 
         formatted = service._format_recent_reflections([])
@@ -327,8 +479,11 @@ class TestReflectionService:
         """Test appending to non-existent bootstrap file."""
         service = ReflectionService(
             memory=memory_store,
-            provider=mock_provider,
+            chat_callable=mock_provider.chat,
             model="test-model",
+            auto_promote=False,
+            allowed_targets=["AGENTS.md", "TOOLS.md", "SOUL.md", "IDENTITY.md"],
+            max_file_lines=500,
         )
 
         file_path = temp_workspace / "NEW_FILE.md"
@@ -348,8 +503,11 @@ class TestReflectionService:
         """Test appending to existing bootstrap section."""
         service = ReflectionService(
             memory=memory_store,
-            provider=mock_provider,
+            chat_callable=mock_provider.chat,
             model="test-model",
+            auto_promote=False,
+            allowed_targets=["AGENTS.md", "TOOLS.md", "SOUL.md", "IDENTITY.md"],
+            max_file_lines=500,
         )
 
         # Create file with section
@@ -373,8 +531,11 @@ class TestReflectionService:
         """Test creating new section in existing file."""
         service = ReflectionService(
             memory=memory_store,
-            provider=mock_provider,
+            chat_callable=mock_provider.chat,
             model="test-model",
+            auto_promote=False,
+            allowed_targets=["AGENTS.md", "TOOLS.md", "SOUL.md", "IDENTITY.md"],
+            max_file_lines=500,
         )
 
         # Create file with different section
