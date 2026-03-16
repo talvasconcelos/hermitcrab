@@ -10,6 +10,7 @@ from typing import Any
 
 from hermitcrab.agent.memory import MemoryStore
 from hermitcrab.agent.skills import SkillsLoader
+from hermitcrab.config.schema import ModelAliasConfig
 from hermitcrab.utils.helpers import safe_filename
 
 
@@ -29,7 +30,7 @@ class ContextBuilder:
         memory_max_chars: int = 12000,
         memory_max_items_per_category: int = 25,
         memory_max_item_chars: int = 600,
-        model_aliases: dict[str, str] | None = None,
+        model_aliases: dict[str, str | ModelAliasConfig] | None = None,
     ):
         self.workspace = workspace
         self.memory = MemoryStore(workspace)
@@ -136,10 +137,18 @@ Skills with `available="false"` need dependencies installed first.
         # Format model aliases if configured
         aliases_section = ""
         if self.model_aliases:
-            alias_lines = [f"- **{alias}**: {model}" for alias, model in self.model_aliases.items()]
+            alias_lines = []
+            for alias, model in self.model_aliases.items():
+                if isinstance(model, ModelAliasConfig):
+                    details = model.model
+                    if model.effective_reasoning_effort() == "none":
+                        details += " (thinking disabled)"
+                    alias_lines.append(f"- **{alias}**: {details}")
+                else:
+                    alias_lines.append(f"- **{alias}**: {model}")
             aliases_section = "\n".join(alias_lines)
         else:
-            aliases_section = "- No custom aliases configured (use full model names)"
+            aliases_section = "- No custom aliases configured (use named models or full model names)"
 
         return f"""# hermitcrab
 
@@ -179,8 +188,8 @@ Reply directly for normal conversation. Only use `message` to send to a specific
 - Memory is category-based, atomic, and file-backed.
 - If memory might matter, search it first. Do not guess or invent memory content.
 
-## Model Aliases
-You can spawn subagents with model aliases. Choose the right model for the job:
+## Models For Subagents
+You can spawn subagents with configured named models or optional aliases. Choose the right model for the job:
 {aliases_section}
 
 To spawn a subagent with a specific model:
@@ -220,7 +229,7 @@ Use subagents for complex, time-consuming, or specialized tasks. For substantial
             current_message: The new user message.
             skill_names: Optional skills to include.
             media: Optional list of local file paths for images/media.
-            channel: Current channel (telegram, feishu, etc.).
+            channel: Current channel (cli, telegram, email, nostr, etc.).
             chat_id: Current chat/user ID.
             max_history: Maximum number of history messages to include (default: all).
 

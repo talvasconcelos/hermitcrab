@@ -31,7 +31,7 @@ class SpawnTool(Tool):
             "Spawn a subagent to handle a task in the background. "
             "Use this for complex or time-consuming tasks that can run independently. "
             "The subagent will complete the task and report back when done. "
-            "Optionally specify a model name or alias (e.g., 'qwen', 'local', 'claude') "
+            "Optionally specify a configured model name or shorthand alias (e.g., 'coder', 'local', 'claude') "
             "to use a specific model for this task."
         )
 
@@ -50,7 +50,8 @@ class SpawnTool(Tool):
                 },
                 "model": {
                     "type": "string",
-                    "description": "Optional model name or alias (e.g., 'qwen', 'local', 'claude'). "
+                    "description": "Optional configured model name or shorthand alias "
+                    "(e.g., 'coder', 'local', 'claude'). "
                     "If not specified, uses the default subagent model.",
                 },
             },

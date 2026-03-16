@@ -83,15 +83,29 @@ Move your workspace anywhere. The agent picks up exactly where it left off.
          "apiBase": "http://localhost:11434/v1"
        }
      },
-     "agents": {
-       "defaults": {
+     "models": {
+       "main": {
          "model": "openai/lfm2.5-thinking:latest"
+       },
+       "localCoder": {
+         "model": "ollama/qwen2.5-coder:7b"
+       }
+     },
+     "agents": {
+       "modelAliases": {
+         "coder": "localCoder"
+       },
+       "defaults": {
+         "model": "main",
+         "jobModels": {
+           "subagent": "localCoder"
+         }
        }
      }
    }
    ```
 
-   Advanced local Ollama example with cloud-routed models, subagent aliases, and reasoning control:
+   Advanced local Ollama example with named models, cloud-routed models, and optional shorthand aliases:
    ```json
    {
      "providers": {
@@ -100,15 +114,27 @@ Move your workspace anywhere. The agent picks up exactly where it left off.
          "apiBase": "http://localhost:11434/v1"
        }
      },
+     "models": {
+       "main": {
+         "model": "openai/kimi-k2.5:cloud"
+       },
+       "coder": {
+         "model": "ollama/qwen3.5:4b"
+       },
+       "fast": {
+         "model": "openai/lfm2.5-thinking:latest",
+         "reasoningEffort": "medium"
+       }
+     },
      "agents": {
        "modelAliases": {
-         "coder": "openai/qwen3.5:4b",
-         "fast": "openai/lfm2.5-thinking:latest"
+         "code": "coder"
        },
        "defaults": {
-         "model": "openai/kimi-k2.5:cloud",
+         "model": "main",
          "jobModels": {
-           "subagent": "openai/qwen3.5:4b",
+           "subagent": "coder",
+           "reflection": "fast",
            "reasoningEffort": "medium"
          }
        }
@@ -119,7 +145,10 @@ Move your workspace anywhere. The agent picks up exactly where it left off.
    - For Ollama, prefer the `openai` provider pointed at `http://localhost:11434/v1`. In practice this has much better tool-calling reliability than LiteLLM's native `ollama` route.
    - The `ollama` provider is still available, but it currently has weaker tool coverage and more provider-specific tool-call quirks.
    - Keep the model name exactly as Ollama exposes it when using the OpenAI-compatible route.
-   - Subagents can use aliases such as `coder` for heavier delegated work.
+   - Prefer the top-level `models` section as the canonical place for model definitions.
+   - Ollama's OpenAI-compatible `/v1` route does not currently support per-request context-size overrides; use `OLLAMA_CONTEXT_LENGTH` or custom Modelfile-based models when you need a larger local context window.
+   - `agents.modelAliases` is optional shorthand for runtime ergonomics; it is not required if your named model keys are already concise.
+   - Subagents can use named models directly, or aliases when you want shorter operator-facing names.
    
    **Option B: Cloud model (OpenRouter)**
    ```bash
@@ -132,6 +161,11 @@ Move your workspace anywhere. The agent picks up exactly where it left off.
        "openrouter": {
          "apiKey": "sk-or-..."
        }
+     },
+     "agents": {
+       "defaults": {
+         "model": "anthropic/claude-sonnet-4"
+       }
      }
    }
    ```
@@ -140,6 +174,12 @@ Move your workspace anywhere. The agent picks up exactly where it left off.
    ```bash
    hermitcrab agent
    ```
+
+   Notes:
+   - OpenRouter should be configured under `providers.openrouter`, not `providers.custom`.
+   - Recommended model forms are `anthropic/...`, `openai/...`, `google/...`, and similar upstream model IDs.
+   - `openrouter/anthropic/...` also works if you want to be explicit.
+   - If OpenRouter is your only configured provider, HermitCrab will still route the default `anthropic/claude-opus-4-5` model through OpenRouter.
 
 You're now talking to your own persistent, memory-aware agent.
 
@@ -212,7 +252,7 @@ All channels feed into the same memory & reflection engine.
 | web_fetch         | Fetch & extract URL content (sanitized)   |
 | knowledge_search  | Search your knowledge library             |
 | knowledge_ingest  | Save articles/docs to library             |
-| message           | Reply to you                              |
+| message           | Reply to you on the active channel        |
 | spawn             | Launch sub-agents                         |
 | cron              | Schedule recurring jobs                   |
 
@@ -233,13 +273,14 @@ HermitCrab gets smarter over time by:
 
 This keeps costs low while letting the agent learn without constant supervision.
 
-### Subagents and model aliases
+### Subagents and models
 
 HermitCrab can delegate longer-running or specialized work to subagents while the main agent stays responsive.
 
-- Configure aliases in `agents.modelAliases`
+- Define reusable models in top-level `models`
 - Set a dedicated subagent model in `agents.defaults.jobModels.subagent`
-- The agent can use these aliases when spawning delegated work
+- Optionally add short aliases in `agents.modelAliases` for runtime convenience
+- The agent can use either named models or aliases when spawning delegated work
 
 Example use cases:
 - "Build a simple website for X, use the coder subagent"

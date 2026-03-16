@@ -74,7 +74,7 @@ from hermitcrab.agent.tools.spawn import SpawnTool
 from hermitcrab.agent.tools.web import WebFetchTool, WebSearchTool
 from hermitcrab.bus.events import InboundMessage, OutboundMessage
 from hermitcrab.bus.queue import MessageBus
-from hermitcrab.config.schema import ExecToolConfig
+from hermitcrab.config.schema import ExecToolConfig, ModelAliasConfig
 from hermitcrab.providers.base import LLMProvider, ToolCallRequest
 from hermitcrab.session.manager import Session, SessionManager
 from hermitcrab.utils.helpers import ensure_dir, safe_filename
@@ -167,7 +167,7 @@ class AgentLoop:
         reflection_config: dict[str, Any] | None = None,
         distillation_enabled: bool = False,
         # Optional: model aliases (friendly names like "qwen", "local")
-        model_aliases: dict[str, str] | None = None,
+        model_aliases: dict[str, str | ModelAliasConfig] | None = None,
         # Optional: reasoning effort config (loaded from config)
         reasoning_effort_config: dict[str, Any] | None = None,
         inactivity_timeout_s: int = INACTIVITY_TIMEOUT_S,
@@ -544,7 +544,9 @@ class AgentLoop:
         payload = [{"name": tc.name, "arguments": tc.arguments} for tc in tool_calls]
         return json.dumps(payload, sort_keys=True, ensure_ascii=False, default=str)
 
-    def _coerce_inline_tool_calls(self, content: str | None) -> tuple[str | None, list[ToolCallRequest]]:
+    def _coerce_inline_tool_calls(
+        self, content: str | None
+    ) -> tuple[str | None, list[ToolCallRequest]]:
         """Recover a raw JSON tool call appended to assistant text.
 
         Some weaker models emit a plain-text JSON object such as
@@ -598,9 +600,11 @@ class AgentLoop:
             if recovered:
                 return prefix or None, recovered
 
-        xml_match = re.search(r"<(?:[\w.-]+:)?tool_call>\s*(.*?)\s*</(?:[\w.-]+:)?tool_call>", text, re.DOTALL)
+        xml_match = re.search(
+            r"<(?:[\w.-]+:)?tool_call>\s*(.*?)\s*</(?:[\w.-]+:)?tool_call>", text, re.DOTALL
+        )
         if xml_match:
-            prefix = text[:xml_match.start()].rstrip()
+            prefix = text[: xml_match.start()].rstrip()
             body = xml_match.group(1)
             recovered = self._parse_xml_tool_calls(body)
             if recovered:
@@ -1534,7 +1538,9 @@ class AgentLoop:
                         self._is_intent_only_response(final_content),
                     )
                     if intent_reprompt_count >= 2:
-                        logger.warning("Stopping after repeated non-final responses post-tool usage")
+                        logger.warning(
+                            "Stopping after repeated non-final responses post-tool usage"
+                        )
                         final_content = (
                             "I checked the available context, but the model kept stopping without a "
                             "usable answer after tool calls. Please retry this request or switch to "
@@ -1772,7 +1778,7 @@ class AgentLoop:
                     return OutboundMessage(
                         channel=msg.channel,
                         chat_id=msg.chat_id,
-                        content="🐈 hermitcrab commands:\n/new — Start a new conversation\n/help — Show available commands",
+                        content="🦀 hermitcrab commands:\n/new — Start a new conversation\n/help — Show available commands",
                     )
 
                 # ====================================================================
@@ -1881,7 +1887,9 @@ class AgentLoop:
     def _extract_tool_arguments(call: dict[str, Any]) -> dict[str, Any]:
         """Read normalized tool-call arguments from a stored payload."""
         function = call.get("function")
-        raw_arguments = function.get("arguments") if isinstance(function, dict) else call.get("arguments")
+        raw_arguments = (
+            function.get("arguments") if isinstance(function, dict) else call.get("arguments")
+        )
         if isinstance(raw_arguments, dict):
             return raw_arguments
         if isinstance(raw_arguments, str):
@@ -1895,7 +1903,9 @@ class AgentLoop:
             return parsed if isinstance(parsed, dict) else {}
         return {}
 
-    def _build_session_digest(self, messages: list[dict[str, Any]], session_key: str) -> SessionDigest:
+    def _build_session_digest(
+        self, messages: list[dict[str, Any]], session_key: str
+    ) -> SessionDigest:
         """Build a deterministic digest of a session for weak-model jobs."""
         channel, chat_id = self._derive_channel_chat(session_key)
         timestamps = [
@@ -1930,9 +1940,14 @@ class AgentLoop:
             elif role == "assistant":
                 if content:
                     event_lines.append(f"- Assistant: {content}")
-                    if any(word in content.lower() for word in ("done", "completed", "saved", "updated")):
+                    if any(
+                        word in content.lower()
+                        for word in ("done", "completed", "saved", "updated")
+                    ):
                         outcomes.append(content)
-                tool_calls = msg.get("tool_calls") if isinstance(msg.get("tool_calls"), list) else []
+                tool_calls = (
+                    msg.get("tool_calls") if isinstance(msg.get("tool_calls"), list) else []
+                )
                 for call in tool_calls:
                     if not isinstance(call, dict):
                         continue
@@ -1941,10 +1956,17 @@ class AgentLoop:
                     title = self._clean_snippet(arguments.get("title"), max_chars=80)
                     if title and tool_name.startswith("write_"):
                         wikilinks.append(f"[[{title}]]")
-                    if title and tool_name in {"write_task", "write_goal", "write_decision", "write_fact"}:
+                    if title and tool_name in {
+                        "write_task",
+                        "write_goal",
+                        "write_decision",
+                        "write_fact",
+                    }:
                         event_lines.append(f"- Assistant saved {tool_name[6:]} [[{title}]].")
                     else:
-                        focus = title or self._clean_snippet(arguments.get("query") or arguments.get("path"))
+                        focus = title or self._clean_snippet(
+                            arguments.get("query") or arguments.get("path")
+                        )
                         if focus:
                             event_lines.append(f"- Assistant used {tool_name}: {focus}")
             elif role == "tool":
@@ -1956,7 +1978,9 @@ class AgentLoop:
                     failure = f"{tool_name}: {content}"
                     failures.append(failure)
                     event_lines.append(f"- Tool failure ({tool_name}): {content}")
-                elif lowered.startswith(("task saved:", "goal saved:", "decision saved:", "fact saved:")):
+                elif lowered.startswith(
+                    ("task saved:", "goal saved:", "decision saved:", "fact saved:")
+                ):
                     outcomes.append(content)
 
         unique_links: list[str] = []
@@ -1999,7 +2023,11 @@ class AgentLoop:
 
     def _build_fallback_journal_body(self, digest: SessionDigest) -> str:
         """Build a deterministic journal narrative when LLM synthesis fails."""
-        request = digest.user_requests[-1] if digest.user_requests else "The user continued the conversation."
+        request = (
+            digest.user_requests[-1]
+            if digest.user_requests
+            else "The user continued the conversation."
+        )
         parts = [f"I worked on {request}"]
         if digest.outcomes:
             parts.append(f"The clearest outcome was {digest.outcomes[-1]}")

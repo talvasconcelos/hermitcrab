@@ -1,9 +1,10 @@
 """Configuration schema using Pydantic."""
 
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 from pydantic.alias_generators import to_camel
 from pydantic_settings import BaseSettings
 
@@ -22,7 +23,9 @@ class TelegramConfig(Base):
     enabled: bool = False
     token: str = ""  # Bot token from @BotFather
     allow_from: list[str] = Field(default_factory=list)  # Allowed user IDs or usernames
-    proxy: str | None = None  # HTTP/SOCKS5 proxy URL, e.g. "http://127.0.0.1:7890" or "socks5://127.0.0.1:1080"
+    proxy: str | None = (
+        None  # HTTP/SOCKS5 proxy URL, e.g. "http://127.0.0.1:7890" or "socks5://127.0.0.1:1080"
+    )
     reply_to_message: bool = False  # If true, bot replies quote the original message
 
 
@@ -50,7 +53,9 @@ class EmailConfig(Base):
     from_address: str = ""
 
     # Behavior
-    auto_reply_enabled: bool = True  # If false, inbound email is read but no automatic reply is sent
+    auto_reply_enabled: bool = (
+        True  # If false, inbound email is read but no automatic reply is sent
+    )
     poll_interval_seconds: int = 30
     mark_seen: bool = True
     max_body_chars: int = 12000
@@ -71,7 +76,9 @@ class NostrConfig(Base):
         ]
     )  # Default popular relays
     protocol: Literal["nip04", "nip17"] = "nip04"  # NIP-04 for DMs, NIP-17 for groups (future)
-    allowed_pubkeys: list[str] = Field(default_factory=list)  # npub/hex, or "*" for open mode, or [] for strict/deny-all
+    allowed_pubkeys: list[str] = Field(
+        default_factory=list
+    )  # npub/hex, or "*" for open mode, or [] for strict/deny-all
 
     def validate_for_use(self) -> None:
         """
@@ -85,14 +92,14 @@ class NostrConfig(Base):
                 "Nostr channel is enabled but private_key is not configured. "
                 "Set nostr.private_key in config.json (nsec or hex format). "
                 "Generate a key with: python -c 'from pynostr.key import PrivateKey; "
-                "k = PrivateKey(); print(f\"nsec: {k.bech32()}\")'"
+                'k = PrivateKey(); print(f"nsec: {k.bech32()}")\''
             )
 
 
 class ChannelsConfig(Base):
     """Configuration for chat channels."""
 
-    send_progress: bool = True    # stream agent's text progress to the channel
+    send_progress: bool = True  # stream agent's text progress to the channel
     send_tool_hints: bool = False  # stream tool-call hints (e.g. read_file("…"))
     telegram: TelegramConfig = Field(default_factory=TelegramConfig)
     email: EmailConfig = Field(default_factory=EmailConfig)
@@ -177,7 +184,9 @@ class AgentDefaults(Base):
     workspace: str = "~/.hermitcrab/workspace"
     model: str = "anthropic/claude-opus-4-5"  # Primary model for interactive responses
     job_models: AgentJobModels = Field(default_factory=AgentJobModels)
-    enable_distillation: bool = False  # Distillation is fallback cognition, disabled unless explicitly enabled
+    enable_distillation: bool = (
+        False  # Distillation is fallback cognition, disabled unless explicitly enabled
+    )
     max_tokens: int = 8192
     temperature: float = 0.1
     max_tool_iterations: int = 40
@@ -185,18 +194,60 @@ class AgentDefaults(Base):
     inactivity_timeout_s: int = 30 * 60
     llm_max_retries: int = 3
     llm_retry_base_delay_s: float = 0.6
-    max_loop_seconds: int = 240
+    max_loop_seconds: int = 5 * 60
     max_identical_tool_cycles: int = 2
     memory_context_max_chars: int = 10000
     memory_context_max_items_per_category: int = 20
     memory_context_max_item_chars: int = 500
 
 
+class NamedModelConfig(Base):
+    """Reusable named model definition with optional provider-specific request options."""
+
+    model: str
+    reasoning_effort: Literal["none", "low", "medium", "high"] | None = None
+    provider_options: dict[str, Any] = Field(default_factory=dict)
+
+    @model_validator(mode="after")
+    def validate_model(self) -> "NamedModelConfig":
+        """Require a non-empty model string."""
+        self.model = self.model.strip()
+        if not self.model:
+            raise ValueError("named model entries must include a non-empty model")
+        return self
+
+
+class ModelAliasConfig(Base):
+    """Structured model alias with optional thinking control."""
+
+    model: str
+    reasoning_effort: Literal["none", "low", "medium", "high"] | None = None
+    thinking: bool | None = None
+
+    @model_validator(mode="after")
+    def validate_model(self) -> "ModelAliasConfig":
+        """Require a non-empty model string."""
+        self.model = self.model.strip()
+        if not self.model:
+            raise ValueError("model alias entries must include a non-empty model")
+        return self
+
+    def effective_reasoning_effort(self) -> Literal["none", "low", "medium", "high"] | None:
+        """Resolve the effective reasoning override for this alias."""
+        if self.reasoning_effort is not None:
+            return self.reasoning_effort
+        if self.thinking is False:
+            return "none"
+        return None
+
+
 class AgentsConfig(Base):
     """Agent configuration."""
 
     defaults: AgentDefaults = Field(default_factory=AgentDefaults)
-    model_aliases: dict[str, str] = Field(default_factory=dict)  # Friendly aliases: {"qwen": "ollama/qwen2.5:7b"}
+    model_aliases: dict[str, str | ModelAliasConfig] = Field(
+        default_factory=dict
+    )  # Friendly aliases: {"qwen": "ollama/qwen2.5:7b"} or {"fast": {"model": "...", "thinking": false}}
 
 
 class ProviderConfig(Base):
@@ -223,8 +274,12 @@ class ProvidersConfig(Base):
     moonshot: ProviderConfig = Field(default_factory=ProviderConfig)
     minimax: ProviderConfig = Field(default_factory=ProviderConfig)
     aihubmix: ProviderConfig = Field(default_factory=ProviderConfig)  # AiHubMix API gateway
-    siliconflow: ProviderConfig = Field(default_factory=ProviderConfig)  # SiliconFlow (硅基流动) API gateway
-    volcengine: ProviderConfig = Field(default_factory=ProviderConfig)  # VolcEngine (火山引擎) API gateway
+    siliconflow: ProviderConfig = Field(
+        default_factory=ProviderConfig
+    )  # SiliconFlow (硅基流动) API gateway
+    volcengine: ProviderConfig = Field(
+        default_factory=ProviderConfig
+    )  # VolcEngine (火山引擎) API gateway
     openai_codex: ProviderConfig = Field(default_factory=ProviderConfig)  # OpenAI Codex (OAuth)
     github_copilot: ProviderConfig = Field(default_factory=ProviderConfig)  # Github Copilot (OAuth)
     ollama: ProviderConfig = Field(default_factory=ProviderConfig)  # Ollama via LiteLLM routing
@@ -245,7 +300,9 @@ class ReflectionPromotionConfig(Base):
     AGENTS.md, SOUL.md, IDENTITY.md, and TOOLS.md files.
     """
 
-    auto_promote: bool = False  # Safer default: propose/log reflections, don't self-edit files automatically
+    auto_promote: bool = (
+        False  # Safer default: propose/log reflections, don't self-edit files automatically
+    )
     target_files: list[str] = Field(
         default_factory=lambda: ["AGENTS.md", "SOUL.md", "IDENTITY.md", "TOOLS.md"]
     )  # Which bootstrap files to update
@@ -306,10 +363,21 @@ class ToolsConfig(Base):
     mcp_servers: dict[str, MCPServerConfig] = Field(default_factory=dict)
 
 
+@dataclass(frozen=True)
+class ResolvedModelConfig:
+    """Resolved model reference with request-level metadata."""
+
+    model: str | None
+    reasoning_effort: Literal["none", "low", "medium", "high"] | None = None
+    provider_options: dict[str, Any] | None = None
+    name: str | None = None
+
+
 class Config(BaseSettings):
     """Root configuration for hermitcrab."""
 
     agents: AgentsConfig = Field(default_factory=AgentsConfig)
+    models: dict[str, NamedModelConfig] = Field(default_factory=dict)
     channels: ChannelsConfig = Field(default_factory=ChannelsConfig)
     providers: ProvidersConfig = Field(default_factory=ProvidersConfig)
     gateway: GatewayConfig = Field(default_factory=GatewayConfig)
@@ -321,9 +389,33 @@ class Config(BaseSettings):
         """Get expanded workspace path."""
         return Path(self.agents.defaults.workspace).expanduser()
 
-    def _match_provider(self, model: str | None = None) -> tuple["ProviderConfig | None", str | None]:
+    def resolve_model_config(self, model: str | None = None) -> ResolvedModelConfig:
+        """Resolve a model reference to an actual model string and metadata."""
+        ref = model or self.agents.defaults.model
+        if ref is None:
+            return ResolvedModelConfig(model=None)
+
+        ref = ref.strip()
+        if not ref:
+            return ResolvedModelConfig(model=ref)
+
+        named = self.models.get(ref)
+        if named:
+            return ResolvedModelConfig(
+                model=named.model,
+                reasoning_effort=named.reasoning_effort,
+                provider_options=dict(named.provider_options),
+                name=ref,
+            )
+
+        return ResolvedModelConfig(model=ref)
+
+    def _match_provider(
+        self, model: str | None = None
+    ) -> tuple["ProviderConfig | None", str | None]:
         """Match provider config and its registry name. Returns (config, spec_name)."""
-        model_lower = (model or self.agents.defaults.model).lower()
+        resolved_model = self.resolve_model_config(model).model or ""
+        model_lower = resolved_model.lower()
         model_normalized = model_lower.replace("-", "_")
         model_prefix = model_lower.split("/", 1)[0] if "/" in model_lower else ""
         normalized_prefix = model_prefix.replace("-", "_")
@@ -385,4 +477,4 @@ class Config(BaseSettings):
                 return spec.default_api_base
         return None
 
-    model_config = ConfigDict(env_prefix="NANOBOT_", env_nested_delimiter="__")
+    model_config = ConfigDict(env_prefix="HERMITCRAB_", env_nested_delimiter="__")

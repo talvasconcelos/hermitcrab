@@ -19,7 +19,7 @@ from rich.table import Table
 from rich.text import Text
 
 from hermitcrab import __logo__, __version__
-from hermitcrab.config.schema import Config
+from hermitcrab.config.schema import Config, ModelAliasConfig
 
 app = typer.Typer(
     name="hermitcrab",
@@ -68,16 +68,41 @@ def _build_job_models_from_config(config: Config) -> dict | None:
 
     primary_model = config.agents.defaults.model
 
+    def _resolve(model: str | None) -> str | None:
+        return config.resolve_model_config(model).model
+
     return {
-        JobClass.INTERACTIVE_RESPONSE: job_models_config.get_model(
-            "interactive_response", primary_model
+        JobClass.INTERACTIVE_RESPONSE: _resolve(
+            job_models_config.get_model("interactive_response", primary_model)
         ),
-        JobClass.JOURNAL_SYNTHESIS: job_models_config.get_model("journal_synthesis", primary_model),
-        JobClass.DISTILLATION: job_models_config.get_model("distillation", primary_model),
-        JobClass.REFLECTION: job_models_config.get_model("reflection", primary_model),
-        JobClass.SUMMARISATION: job_models_config.get_model("summarisation", primary_model),
-        JobClass.SUBAGENT: job_models_config.get_model("subagent", primary_model),
+        JobClass.JOURNAL_SYNTHESIS: _resolve(
+            job_models_config.get_model("journal_synthesis", primary_model)
+        ),
+        JobClass.DISTILLATION: _resolve(job_models_config.get_model("distillation", primary_model)),
+        JobClass.REFLECTION: _resolve(job_models_config.get_model("reflection", primary_model)),
+        JobClass.SUMMARISATION: _resolve(
+            job_models_config.get_model("summarisation", primary_model)
+        ),
+        JobClass.SUBAGENT: _resolve(job_models_config.get_model("subagent", primary_model)),
     }
+
+
+def _build_runtime_model_aliases(config: Config) -> dict[str, str | ModelAliasConfig]:
+    """Resolve any named-model references inside runtime aliases."""
+    resolved_aliases: dict[str, str | ModelAliasConfig] = {}
+    for alias, value in config.agents.model_aliases.items():
+        if isinstance(value, ModelAliasConfig):
+            resolved = config.resolve_model_config(value.model)
+            resolved_aliases[alias] = ModelAliasConfig(
+                model=resolved.model or value.model,
+                reasoning_effort=value.reasoning_effort or resolved.reasoning_effort,
+                thinking=value.thinking,
+            )
+            continue
+
+        resolved_aliases[alias] = config.resolve_model_config(value).model or value
+
+    return resolved_aliases
 
 
 def _flush_pending_tty_input() -> None:
@@ -288,27 +313,44 @@ def _make_provider(config: Config):
     from hermitcrab.providers.openai_codex_provider import OpenAICodexProvider
 
     model = config.agents.defaults.model
+    resolved_model = config.resolve_model_config(model)
     provider_name = config.get_provider_name(model)
     p = config.get_provider(model)
 
     # OpenAI Codex (OAuth)
     if provider_name == "openai_codex" or model.startswith("openai-codex/"):
-        return OpenAICodexProvider(default_model=model)
+        return OpenAICodexProvider(default_model=resolved_model.model or model)
 
     # Custom: direct OpenAI-compatible endpoint, bypasses LiteLLM
     if provider_name == "custom":
         return CustomProvider(
             api_key=p.api_key if p else "no-key",
             api_base=config.get_api_base(model) or "http://localhost:8000/v1",
-            default_model=model,
+            default_model=resolved_model.model or model,
         )
 
     from hermitcrab.providers.registry import find_by_name
 
+    def _request_config_resolver(request_model: str) -> dict[str, Any]:
+        resolved_request = config.resolve_model_config(request_model)
+        request_provider = config.get_provider(request_model)
+        request_provider_name = config.get_provider_name(request_model)
+        return {
+            "model": resolved_request.model or request_model,
+            "api_key": request_provider.api_key if request_provider else None,
+            "api_base": config.get_api_base(request_model),
+            "extra_headers": request_provider.extra_headers if request_provider else None,
+            "provider_name": request_provider_name,
+            "provider_options": resolved_request.provider_options or {},
+            "reasoning_effort": resolved_request.reasoning_effort,
+        }
+
     spec = find_by_name(provider_name)
 
     # Special handling for Ollama - show helpful message if misconfigured
-    if provider_name == "ollama" or "ollama" in model.lower():
+    resolved_model_name = resolved_model.model or model
+
+    if provider_name == "ollama" or "ollama" in resolved_model_name.lower():
         # Check if api_base is explicitly set to None/empty (not using default)
         ollama_config = config.providers.ollama if hasattr(config.providers, 'ollama') else None
         api_base = config.get_api_base(model)
@@ -336,7 +378,7 @@ def _make_provider(config: Config):
             console.print("  • api_base should NOT include /v1 suffix")
 
     if (
-        not model.startswith("bedrock/")
+        not resolved_model_name.startswith("bedrock/")
         and not (p and p.api_key)
         and not (spec and (spec.is_oauth or spec.is_local))
     ):
@@ -350,6 +392,7 @@ def _make_provider(config: Config):
         default_model=model,
         extra_headers=p.extra_headers if p else None,
         provider_name=provider_name,
+        request_config_resolver=_request_config_resolver,
     )
 
 
@@ -419,7 +462,7 @@ def gateway(
         channels_config=config.channels,
         job_models=job_models,  # Pass job models (or None for defaults)
         distillation_enabled=config.agents.defaults.enable_distillation,
-        model_aliases=config.agents.model_aliases,  # Pass model aliases
+        model_aliases=_build_runtime_model_aliases(config),
         reasoning_effort_config={
             "reasoning_effort": config.agents.defaults.job_models.reasoning_effort,
         },
@@ -750,7 +793,7 @@ def agent(
         channels_config=config.channels,
         job_models=job_models,  # Pass job models (or None for defaults)
         distillation_enabled=config.agents.defaults.enable_distillation,
-        model_aliases=config.agents.model_aliases,  # Pass model aliases
+        model_aliases=_build_runtime_model_aliases(config),
         reasoning_effort_config={
             "reasoning_effort": config.agents.defaults.job_models.reasoning_effort,
         },
@@ -960,134 +1003,26 @@ def channels_status():
     table.add_column("Enabled", style="green")
     table.add_column("Configuration", style="yellow")
 
-    # WhatsApp
-    wa = config.channels.whatsapp
-    table.add_row("WhatsApp", "✓" if wa.enabled else "✗", wa.bridge_url)
-
-    dc = config.channels.discord
-    table.add_row("Discord", "✓" if dc.enabled else "✗", dc.gateway_url)
-
-    # Feishu
-    fs = config.channels.feishu
-    fs_config = f"app_id: {fs.app_id[:10]}..." if fs.app_id else "[dim]not configured[/dim]"
-    table.add_row("Feishu", "✓" if fs.enabled else "✗", fs_config)
-
-    # Mochat
-    mc = config.channels.mochat
-    mc_base = mc.base_url or "[dim]not configured[/dim]"
-    table.add_row("Mochat", "✓" if mc.enabled else "✗", mc_base)
-
     # Telegram
     tg = config.channels.telegram
     tg_config = f"token: {tg.token[:10]}..." if tg.token else "[dim]not configured[/dim]"
     table.add_row("Telegram", "✓" if tg.enabled else "✗", tg_config)
-
-    # Slack
-    slack = config.channels.slack
-    slack_config = "socket" if slack.app_token and slack.bot_token else "[dim]not configured[/dim]"
-    table.add_row("Slack", "✓" if slack.enabled else "✗", slack_config)
-
-    # DingTalk
-    dt = config.channels.dingtalk
-    dt_config = (
-        f"client_id: {dt.client_id[:10]}..." if dt.client_id else "[dim]not configured[/dim]"
-    )
-    table.add_row("DingTalk", "✓" if dt.enabled else "✗", dt_config)
-
-    # QQ
-    qq = config.channels.qq
-    qq_config = f"app_id: {qq.app_id[:10]}..." if qq.app_id else "[dim]not configured[/dim]"
-    table.add_row("QQ", "✓" if qq.enabled else "✗", qq_config)
 
     # Email
     em = config.channels.email
     em_config = em.imap_host if em.imap_host else "[dim]not configured[/dim]"
     table.add_row("Email", "✓" if em.enabled else "✗", em_config)
 
+    # Nostr
+    nostr = config.channels.nostr
+    nostr_config = (
+        f"{nostr.protocol}, {len(nostr.relays)} relay(s)"
+        if nostr.private_key
+        else "[dim]not configured[/dim]"
+    )
+    table.add_row("Nostr", "✓" if nostr.enabled else "✗", nostr_config)
+
     console.print(table)
-
-
-def _get_bridge_dir() -> Path:
-    """Get the bridge directory, setting it up if needed."""
-    import shutil
-    import subprocess
-
-    # User's bridge location
-    user_bridge = Path.home() / ".hermitcrab" / "bridge"
-
-    # Check if already built
-    if (user_bridge / "dist" / "index.js").exists():
-        return user_bridge
-
-    # Check for npm
-    if not shutil.which("npm"):
-        console.print("[red]npm not found. Please install Node.js >= 18.[/red]")
-        raise typer.Exit(1)
-
-    # Find source bridge: first check package data, then source dir
-    pkg_bridge = Path(__file__).parent.parent / "bridge"  # hermitcrab/bridge (installed)
-    src_bridge = Path(__file__).parent.parent.parent / "bridge"  # repo root/bridge (dev)
-
-    source = None
-    if (pkg_bridge / "package.json").exists():
-        source = pkg_bridge
-    elif (src_bridge / "package.json").exists():
-        source = src_bridge
-
-    if not source:
-        console.print("[red]Bridge source not found.[/red]")
-        console.print("Try reinstalling: pip install --force-reinstall hermitcrab")
-        raise typer.Exit(1)
-
-    console.print(f"{__logo__} Setting up bridge...")
-
-    # Copy to user directory
-    user_bridge.parent.mkdir(parents=True, exist_ok=True)
-    if user_bridge.exists():
-        shutil.rmtree(user_bridge)
-    shutil.copytree(source, user_bridge, ignore=shutil.ignore_patterns("node_modules", "dist"))
-
-    # Install and build
-    try:
-        console.print("  Installing dependencies...")
-        subprocess.run(["npm", "install"], cwd=user_bridge, check=True, capture_output=True)
-
-        console.print("  Building...")
-        subprocess.run(["npm", "run", "build"], cwd=user_bridge, check=True, capture_output=True)
-
-        console.print("[green]✓[/green] Bridge ready\n")
-    except subprocess.CalledProcessError as e:
-        console.print(f"[red]Build failed: {e}[/red]")
-        if e.stderr:
-            console.print(f"[dim]{e.stderr.decode()[:500]}[/dim]")
-        raise typer.Exit(1)
-
-    return user_bridge
-
-
-@channels_app.command("login")
-def channels_login():
-    """Link device via QR code."""
-    import subprocess
-
-    from hermitcrab.config.loader import load_config
-
-    config = load_config()
-    bridge_dir = _get_bridge_dir()
-
-    console.print(f"{__logo__} Starting bridge...")
-    console.print("Scan the QR code to connect.\n")
-
-    env = {**os.environ}
-    if config.channels.whatsapp.bridge_token:
-        env["BRIDGE_TOKEN"] = config.channels.whatsapp.bridge_token
-
-    try:
-        subprocess.run(["npm", "start"], cwd=bridge_dir, check=True, env=env)
-    except subprocess.CalledProcessError as e:
-        console.print(f"[red]Bridge failed: {e}[/red]")
-    except FileNotFoundError:
-        console.print("[red]npm not found. Please install Node.js.[/red]")
 
 
 # ============================================================================
@@ -1169,7 +1104,7 @@ def cron_add(
     deliver: bool = typer.Option(False, "--deliver", "-d", help="Deliver response to channel"),
     to: str = typer.Option(None, "--to", help="Recipient for delivery"),
     channel: str = typer.Option(
-        None, "--channel", help="Channel for delivery (e.g. 'telegram', 'whatsapp')"
+        None, "--channel", help="Channel for delivery (e.g. 'telegram', 'email', 'nostr')"
     ),
 ):
     """Add a scheduled job."""
@@ -1290,7 +1225,7 @@ def cron_run(
         channels_config=config.channels,
         job_models=job_models,  # Pass job models (or None for defaults)
         distillation_enabled=config.agents.defaults.enable_distillation,
-        model_aliases=config.agents.model_aliases,  # Pass model aliases
+        model_aliases=_build_runtime_model_aliases(config),
         reasoning_effort_config={
             "reasoning_effort": config.agents.defaults.job_models.reasoning_effort,
         },

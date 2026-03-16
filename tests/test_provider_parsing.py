@@ -1,5 +1,5 @@
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, patch
 
 import pytest
 
@@ -52,6 +52,56 @@ def test_litellm_sanitize_messages_normalizes_tool_call_ids() -> None:
     assert tool_call_id == sanitized[1]["tool_call_id"]
     assert len(tool_call_id) == 9
     assert tool_call_id.isalnum()
+
+
+def test_litellm_sanitize_messages_serializes_tool_call_arguments() -> None:
+    messages = [
+        {
+            "role": "assistant",
+            "content": None,
+            "tool_calls": [
+                {
+                    "id": "call_1234567890",
+                    "type": "function",
+                    "function": {
+                        "name": "write_file",
+                        "arguments": {"path": "notes.md", "content": "hello"},
+                    },
+                }
+            ],
+        }
+    ]
+
+    sanitized = LiteLLMProvider._sanitize_messages(messages)
+
+    assert sanitized[0]["tool_calls"][0]["function"]["arguments"] == (
+        '{"path": "notes.md", "content": "hello"}'
+    )
+
+
+def test_litellm_sanitize_messages_repairs_malformed_tool_call_arguments() -> None:
+    messages = [
+        {
+            "role": "assistant",
+            "content": None,
+            "tool_calls": [
+                {
+                    "id": "call_1234567890",
+                    "type": "function",
+                    "function": {
+                        "name": "spawn",
+                        "arguments": '{"task":"do x","label":"fast","{\\"task":"broken"}',
+                    },
+                }
+            ],
+        }
+    ]
+
+    sanitized = LiteLLMProvider._sanitize_messages(messages)
+
+    repaired = sanitized[0]["tool_calls"][0]["function"]["arguments"]
+    assert repaired.startswith("{")
+    assert '"task"' in repaired
 
 
 def test_litellm_parse_response_merges_tool_calls_across_choices() -> None:
@@ -228,6 +278,95 @@ async def test_custom_provider_passes_reasoning_effort() -> None:
     )
 
     assert provider._client.chat.completions.create.await_args.kwargs["reasoning_effort"] == "high"
+
+
+@pytest.mark.asyncio
+async def test_litellm_provider_uses_request_specific_config_for_cross_provider_job_models() -> None:
+    provider = LiteLLMProvider(
+        api_key="ollama",
+        api_base="http://localhost:11434/v1",
+        default_model="openai/minimax-m2.5:cloud",
+        provider_name="openai",
+        request_config_resolver=lambda model: {
+            "api_key": "sk-or-test",
+            "api_base": "https://openrouter.ai/api/v1",
+            "extra_headers": None,
+            "provider_name": "openrouter",
+        }
+        if model == "openrouter/nvidia/nemotron-3-nano-30b-a3b:free"
+        else {
+            "api_key": "ollama",
+            "api_base": "http://localhost:11434/v1",
+            "extra_headers": None,
+            "provider_name": "openai",
+        },
+    )
+
+    response = SimpleNamespace(
+        choices=[
+            SimpleNamespace(
+                finish_reason="stop",
+                message=SimpleNamespace(content="ok", tool_calls=None, reasoning_content=None),
+            )
+        ],
+        usage=None,
+    )
+
+    with patch("hermitcrab.providers.litellm_provider.acompletion", AsyncMock(return_value=response)) as mock_completion:
+        await provider.chat(
+            messages=[{"role": "user", "content": "hello"}],
+            model="openrouter/nvidia/nemotron-3-nano-30b-a3b:free",
+        )
+
+    assert mock_completion.await_args.kwargs["model"] == "openrouter/nvidia/nemotron-3-nano-30b-a3b:free"
+    assert mock_completion.await_args.kwargs["api_key"] == "sk-or-test"
+    assert mock_completion.await_args.kwargs["api_base"] == "https://openrouter.ai/api/v1"
+
+
+@pytest.mark.asyncio
+async def test_litellm_provider_applies_named_model_provider_options() -> None:
+    provider = LiteLLMProvider(
+        api_key="ollama",
+        api_base="http://localhost:11434/v1",
+        default_model="local_coder",
+        provider_name="openai",
+        request_config_resolver=lambda model: {
+            "model": "ollama/qwen2.5-coder:7b",
+            "api_key": "ollama",
+            "api_base": "http://localhost:11434/v1",
+            "extra_headers": None,
+            "provider_name": "openai",
+            "provider_options": {"num_ctx": 16384},
+            "reasoning_effort": "low",
+        }
+        if model == "local_coder"
+        else {
+            "model": model,
+            "api_key": "ollama",
+            "api_base": "http://localhost:11434/v1",
+            "extra_headers": None,
+            "provider_name": "openai",
+            "provider_options": {},
+            "reasoning_effort": None,
+        },
+    )
+
+    response = SimpleNamespace(
+        choices=[
+            SimpleNamespace(
+                finish_reason="stop",
+                message=SimpleNamespace(content="ok", tool_calls=None, reasoning_content=None),
+            )
+        ],
+        usage=None,
+    )
+
+    with patch("hermitcrab.providers.litellm_provider.acompletion", AsyncMock(return_value=response)) as mock_completion:
+        await provider.chat(messages=[{"role": "user", "content": "hello"}], model="local_coder")
+
+    assert mock_completion.await_args.kwargs["model"] == "ollama/qwen2.5-coder:7b"
+    assert mock_completion.await_args.kwargs["num_ctx"] == 16384
+    assert mock_completion.await_args.kwargs["reasoning_effort"] == "low"
 
 
 def test_custom_provider_supports_legacy_function_call() -> None:

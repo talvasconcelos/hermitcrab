@@ -20,9 +20,9 @@ from hermitcrab.agent.tools.shell import ExecTool
 from hermitcrab.agent.tools.web import WebFetchTool, WebSearchTool
 from hermitcrab.bus.events import InboundMessage
 from hermitcrab.bus.queue import MessageBus
-from hermitcrab.config.schema import ExecToolConfig
+from hermitcrab.config.schema import ExecToolConfig, ModelAliasConfig
 from hermitcrab.providers.base import LLMProvider, ToolCallRequest
-from hermitcrab.utils.helpers import resolve_model_alias
+from hermitcrab.utils.helpers import resolve_model_alias_config
 
 
 class SubagentManager:
@@ -45,7 +45,7 @@ class SubagentManager:
         brave_api_key: str | None = None,
         exec_config: ExecToolConfig | None = None,
         restrict_to_workspace: bool = False,
-        model_aliases: dict[str, str] | None = None,
+        model_aliases: dict[str, str | ModelAliasConfig] | None = None,
     ):
         self.provider = provider
         self.workspace = workspace
@@ -83,8 +83,10 @@ class SubagentManager:
         task_id = str(uuid.uuid4())[:8]
         display_label = label or task[:30] + ("..." if len(task) > 30 else "")
 
-        # Resolve model alias if provided
-        resolved_model = resolve_model_alias(model, self.model_aliases) if model else self.model
+        # Resolve model alias if provided, including alias-specific reasoning overrides.
+        resolved = resolve_model_alias_config(model, self.model_aliases) if model else None
+        resolved_model = resolved.model if resolved and resolved.model else self.model
+        resolved_reasoning_effort = resolved.reasoning_effort if resolved else None
 
         origin = {
             "channel": origin_channel,
@@ -93,7 +95,14 @@ class SubagentManager:
 
         # Create background task
         bg_task = asyncio.create_task(
-            self._run_subagent(task_id, task, display_label, origin, resolved_model)
+            self._run_subagent(
+                task_id,
+                task,
+                display_label,
+                origin,
+                resolved_model,
+                resolved_reasoning_effort,
+            )
         )
         self._running_tasks[task_id] = bg_task
 
@@ -229,6 +238,7 @@ class SubagentManager:
         label: str,
         origin: dict[str, str],
         model: str | None = None,
+        reasoning_effort: str | None = None,
     ) -> None:
         """Execute the subagent task and announce the result."""
         logger.info("Subagent [{}] starting task: {}", task_id, label)
@@ -276,6 +286,7 @@ class SubagentManager:
                     model=subagent_model,
                     temperature=self.temperature,
                     max_tokens=self.max_tokens,
+                    reasoning_effort=reasoning_effort,
                 )
                 response.tool_calls = self._normalize_tool_calls(response.tool_calls)
 

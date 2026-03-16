@@ -379,7 +379,7 @@ PROVIDERS: tuple[ProviderSpec, ...] = (
     # Ollama: local LLM runner with OpenAI-compatible API.
     # Detected when config key is "ollama" or model starts with "ollama/".
     # Supports :cloud suffix for remote Ollama instances with API key auth.
-    # 
+    #
     # Model formats (LiteLLM):
     #   - ollama_chat/llama3.1  → /api/chat endpoint (recommended for chat)
     #   - ollama/llama3.1       → /api/generate endpoint (text completion)

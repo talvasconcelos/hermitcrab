@@ -5,7 +5,7 @@ import pytest
 
 from hermitcrab.agent.subagent import SubagentManager
 from hermitcrab.bus.queue import MessageBus
-from hermitcrab.config.schema import ExecToolConfig
+from hermitcrab.config.schema import ExecToolConfig, ModelAliasConfig
 from hermitcrab.providers.base import LLMResponse, ToolCallRequest
 
 
@@ -45,6 +45,85 @@ async def test_subagent_spawn_resolves_model_alias_and_reports_result(tmp_path):
     provider.chat_with_retry.assert_awaited()
     assert provider.chat_with_retry.await_args.kwargs["model"] == "ollama/qwen3.5:4b"
     bus.publish_inbound.assert_awaited()
+
+
+@pytest.mark.asyncio
+async def test_subagent_spawn_alias_can_disable_thinking(tmp_path):
+    provider = MagicMock()
+    provider.get_default_model = MagicMock(return_value="anthropic/claude-opus-4-5")
+    provider.chat_with_retry = AsyncMock(return_value=LLMResponse(content="done"))
+
+    bus = MessageBus()
+    bus.publish_inbound = AsyncMock()
+
+    manager = SubagentManager(
+        provider=provider,
+        workspace=tmp_path,
+        bus=bus,
+        model="anthropic/claude-opus-4-5",
+        exec_config=ExecToolConfig(),
+        model_aliases={
+            "fast": ModelAliasConfig(model="openai/lfm2.5-thinking:latest", thinking=False)
+        },
+    )
+
+    await manager.spawn(
+        task="Summarize the file",
+        label="summary",
+        origin_channel="cli",
+        origin_chat_id="direct",
+        model="fast",
+    )
+
+    for _ in range(20):
+        if manager.get_running_count() == 0:
+            break
+        await asyncio.sleep(0)
+
+    provider.chat_with_retry.assert_awaited()
+    assert provider.chat_with_retry.await_args.kwargs["model"] == "openai/lfm2.5-thinking:latest"
+    assert provider.chat_with_retry.await_args.kwargs["reasoning_effort"] == "none"
+
+
+@pytest.mark.asyncio
+async def test_subagent_spawn_named_model_alias_resolves_underlying_model(tmp_path):
+    provider = MagicMock()
+    provider.get_default_model = MagicMock(return_value="anthropic/claude-opus-4-5")
+    provider.chat_with_retry = AsyncMock(return_value=LLMResponse(content="done"))
+
+    bus = MessageBus()
+    bus.publish_inbound = AsyncMock()
+
+    manager = SubagentManager(
+        provider=provider,
+        workspace=tmp_path,
+        bus=bus,
+        model="anthropic/claude-opus-4-5",
+        exec_config=ExecToolConfig(),
+        model_aliases={
+            "coder": ModelAliasConfig(
+                model="ollama/qwen2.5-coder:7b",
+                reasoning_effort="low",
+            )
+        },
+    )
+
+    await manager.spawn(
+        task="Write tests",
+        label="tests",
+        origin_channel="cli",
+        origin_chat_id="direct",
+        model="coder",
+    )
+
+    for _ in range(20):
+        if manager.get_running_count() == 0:
+            break
+        await asyncio.sleep(0)
+
+    provider.chat_with_retry.assert_awaited()
+    assert provider.chat_with_retry.await_args.kwargs["model"] == "ollama/qwen2.5-coder:7b"
+    assert provider.chat_with_retry.await_args.kwargs["reasoning_effort"] == "low"
 
 
 @pytest.mark.asyncio

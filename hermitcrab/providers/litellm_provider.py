@@ -13,6 +13,7 @@ import os
 import re
 import secrets
 import string
+from collections.abc import Callable
 from typing import Any, Literal
 
 import json_repair
@@ -62,10 +63,12 @@ class LiteLLMProvider(LLMProvider):
         default_model: str = "anthropic/claude-opus-4-5",
         extra_headers: dict[str, str] | None = None,
         provider_name: str | None = None,
+        request_config_resolver: Callable[[str], dict[str, Any]] | None = None,
     ):
         super().__init__(api_key, api_base)
         self.default_model = default_model
         self.extra_headers = extra_headers or {}
+        self._request_config_resolver = request_config_resolver
 
         # Detect gateway / local deployment.
         # provider_name (from config key) is the primary signal;
@@ -87,6 +90,30 @@ class LiteLLMProvider(LLMProvider):
         # Ollama-specific configuration
         self._ollama_cloud_api_key = api_key  # For :cloud suffix routing
         self._ollama_reasoning_enabled = False  # For reasoning models (DeepSeek, etc.)
+
+    def _get_request_config(self, model: str) -> dict[str, Any]:
+        """Resolve per-request provider credentials/base from the target model."""
+        if not self._request_config_resolver:
+            return {
+                "model": model,
+                "api_key": self.api_key,
+                "api_base": self.api_base,
+                "extra_headers": self.extra_headers,
+                "provider_options": {},
+                "provider_name": None,
+                "reasoning_effort": None,
+            }
+
+        resolved = self._request_config_resolver(model) or {}
+        return {
+            "model": resolved.get("model", model),
+            "api_key": resolved.get("api_key", self.api_key),
+            "api_base": resolved.get("api_base", self.api_base),
+            "extra_headers": resolved.get("extra_headers", self.extra_headers),
+            "provider_options": resolved.get("provider_options", {}),
+            "provider_name": resolved.get("provider_name"),
+            "reasoning_effort": resolved.get("reasoning_effort"),
+        }
 
     def _is_ollama_model(self, model: str) -> bool:
         """Detect if model should use Ollama-specific handling.
@@ -415,6 +442,24 @@ class LiteLLMProvider(LLMProvider):
                         continue
                     tc_clean = dict(tc)
                     tc_clean["id"] = map_id(tc_clean.get("id"))
+                    function = tc_clean.get("function")
+                    if isinstance(function, dict):
+                        function_clean = dict(function)
+                        arguments = function_clean.get("arguments")
+                        if arguments is not None:
+                            if isinstance(arguments, str):
+                                try:
+                                    repaired = json_repair.loads(arguments)
+                                except Exception:
+                                    logger.warning(
+                                        "Dropping unrecoverable tool-call arguments from outbound history for tool {}",
+                                        function_clean.get("name", "<unknown>"),
+                                    )
+                                    repaired = {}
+                                function_clean["arguments"] = json.dumps(repaired, ensure_ascii=False)
+                            else:
+                                function_clean["arguments"] = json.dumps(arguments, ensure_ascii=False)
+                        tc_clean["function"] = function_clean
                     normalized_tool_calls.append(tc_clean)
                 clean["tool_calls"] = normalized_tool_calls
 
@@ -456,7 +501,21 @@ class LiteLLMProvider(LLMProvider):
             LLMResponse with content and/or tool calls.
         """
         original_model = model or self.default_model
-        model = self._resolve_model(original_model)
+        request_config = self._get_request_config(original_model)
+        resolved_model = request_config.get("model") or original_model
+        request_provider_name = request_config.get("provider_name")
+        request_gateway = find_gateway(
+            request_provider_name,
+            request_config.get("api_key"),
+            request_config.get("api_base"),
+        )
+
+        original_gateway = self._gateway
+        self._gateway = request_gateway
+        try:
+            model = self._resolve_model(resolved_model)
+        finally:
+            self._gateway = original_gateway
 
         # Check for Ollama :cloud routing
         use_ollama_cloud = False
@@ -464,7 +523,7 @@ class LiteLLMProvider(LLMProvider):
         if self._is_ollama_model(model):
             ollama_model, use_ollama_cloud = self._resolve_ollama_cloud_routing(ollama_model)
 
-        if self._supports_cache_control(original_model):
+        if self._supports_cache_control(resolved_model):
             messages, tools = self._apply_cache_control(messages, tools)
 
         # Apply Ollama multimodal support (image markers → images array)
@@ -486,25 +545,43 @@ class LiteLLMProvider(LLMProvider):
         # Apply model-specific overrides (e.g. kimi-k2.5 temperature)
         self._apply_model_overrides(ollama_model, kwargs)
 
+        provider_options = request_config.get("provider_options") or {}
+        reserved_option_keys = {
+            "model",
+            "messages",
+            "tools",
+            "tool_choice",
+            "api_key",
+            "api_base",
+            "extra_headers",
+        }
+        for key, value in provider_options.items():
+            if key not in reserved_option_keys:
+                kwargs[key] = value
+
         # Pass api_key directly — more reliable than env vars alone
-        if self.api_key:
-            kwargs["api_key"] = self.api_key
+        request_api_key = request_config.get("api_key")
+        if request_api_key:
+            kwargs["api_key"] = request_api_key
 
         # Pass api_base for custom endpoints
-        if self.api_base:
-            kwargs["api_base"] = self.api_base
+        request_api_base = request_config.get("api_base")
+        if request_api_base:
+            kwargs["api_base"] = request_api_base
 
         # Pass extra headers (e.g. APP-Code for AiHubMix)
-        if self.extra_headers:
-            kwargs["extra_headers"] = self.extra_headers
+        request_extra_headers = request_config.get("extra_headers")
+        if request_extra_headers:
+            kwargs["extra_headers"] = request_extra_headers
 
         if tools:
             kwargs["tools"] = tools
             kwargs["tool_choice"] = "auto"
 
         # Add reasoning effort if specified (LiteLLM silently ignores if unsupported)
-        if reasoning_effort:
-            kwargs["reasoning_effort"] = reasoning_effort
+        effective_reasoning_effort = reasoning_effort or request_config.get("reasoning_effort")
+        if effective_reasoning_effort:
+            kwargs["reasoning_effort"] = effective_reasoning_effort
 
         # Ollama reasoning model support (think parameter)
         # Some Ollama models (DeepSeek, etc.) support internal reasoning
