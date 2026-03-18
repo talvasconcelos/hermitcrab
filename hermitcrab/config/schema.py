@@ -283,6 +283,7 @@ class ProvidersConfig(Base):
     openai_codex: ProviderConfig = Field(default_factory=ProviderConfig)  # OpenAI Codex (OAuth)
     github_copilot: ProviderConfig = Field(default_factory=ProviderConfig)  # Github Copilot (OAuth)
     ollama: ProviderConfig = Field(default_factory=ProviderConfig)  # Ollama via LiteLLM routing
+    nvidia_nim: ProviderConfig = Field(default_factory=ProviderConfig)  # NVIDIA NIM API
 
 
 class HeartbeatConfig(Base):
