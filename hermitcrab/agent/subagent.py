@@ -20,7 +20,7 @@ from hermitcrab.agent.tools.shell import ExecTool
 from hermitcrab.agent.tools.web import WebFetchTool, WebSearchTool
 from hermitcrab.bus.events import InboundMessage
 from hermitcrab.bus.queue import MessageBus
-from hermitcrab.config.schema import ExecToolConfig, ModelAliasConfig
+from hermitcrab.config.schema import ExecToolConfig, ModelAliasConfig, NamedModelConfig
 from hermitcrab.providers.base import LLMProvider, ToolCallRequest
 from hermitcrab.utils.helpers import resolve_model_alias_config
 
@@ -46,6 +46,7 @@ class SubagentManager:
         exec_config: ExecToolConfig | None = None,
         restrict_to_workspace: bool = False,
         model_aliases: dict[str, str | ModelAliasConfig] | None = None,
+        named_models: dict[str, NamedModelConfig] | None = None,
     ):
         self.provider = provider
         self.workspace = workspace
@@ -57,6 +58,7 @@ class SubagentManager:
         self.exec_config = exec_config or ExecToolConfig()
         self.restrict_to_workspace = restrict_to_workspace
         self.model_aliases = model_aliases or {}
+        self.named_models = named_models or {}
         self._running_tasks: dict[str, asyncio.Task[None]] = {}
 
     async def spawn(
@@ -84,8 +86,16 @@ class SubagentManager:
         display_label = label or task[:30] + ("..." if len(task) > 30 else "")
 
         # Resolve model alias if provided, including alias-specific reasoning overrides.
-        resolved = resolve_model_alias_config(model, self.model_aliases) if model else None
-        resolved_model = resolved.model if resolved and resolved.model else self.model
+        resolved = (
+            resolve_model_alias_config(model, self.model_aliases, self.named_models)
+            if model
+            else None
+        )
+        resolved_model = (
+            resolved.request_model
+            if resolved and resolved.request_model
+            else (resolved.model if resolved and resolved.model else self.model)
+        )
         resolved_reasoning_effort = resolved.reasoning_effort if resolved else None
 
         origin = {

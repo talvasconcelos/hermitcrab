@@ -2,6 +2,7 @@
 
 import asyncio
 import os
+import re
 import select
 import signal
 import sys
@@ -13,6 +14,7 @@ from prompt_toolkit import PromptSession
 from prompt_toolkit.formatted_text import HTML
 from prompt_toolkit.history import FileHistory
 from prompt_toolkit.patch_stdout import patch_stdout
+from prompt_toolkit.shortcuts import print_formatted_text
 from rich.console import Console
 from rich.markdown import Markdown
 from rich.table import Table
@@ -36,6 +38,7 @@ EXIT_COMMANDS = {"exit", "quit", "/exit", "/quit", ":q"}
 
 _PROMPT_SESSION: PromptSession | None = None
 _SAVED_TERM_ATTRS = None  # original termios settings, restored on exit
+_ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
 
 
 def _build_job_models_from_config(config: Config) -> dict | None:
@@ -68,22 +71,13 @@ def _build_job_models_from_config(config: Config) -> dict | None:
 
     primary_model = config.agents.defaults.model
 
-    def _resolve(model: str | None) -> str | None:
-        return config.resolve_model_config(model).model
-
     return {
-        JobClass.INTERACTIVE_RESPONSE: _resolve(
-            job_models_config.get_model("interactive_response", primary_model)
-        ),
-        JobClass.JOURNAL_SYNTHESIS: _resolve(
-            job_models_config.get_model("journal_synthesis", primary_model)
-        ),
-        JobClass.DISTILLATION: _resolve(job_models_config.get_model("distillation", primary_model)),
-        JobClass.REFLECTION: _resolve(job_models_config.get_model("reflection", primary_model)),
-        JobClass.SUMMARISATION: _resolve(
-            job_models_config.get_model("summarisation", primary_model)
-        ),
-        JobClass.SUBAGENT: _resolve(job_models_config.get_model("subagent", primary_model)),
+        JobClass.INTERACTIVE_RESPONSE: job_models_config.get_model("interactive_response", primary_model),
+        JobClass.JOURNAL_SYNTHESIS: job_models_config.get_model("journal_synthesis", primary_model),
+        JobClass.DISTILLATION: job_models_config.get_model("distillation", primary_model),
+        JobClass.REFLECTION: job_models_config.get_model("reflection", primary_model),
+        JobClass.SUMMARISATION: job_models_config.get_model("summarisation", primary_model),
+        JobClass.SUBAGENT: job_models_config.get_model("subagent", primary_model),
     }
 
 
@@ -94,13 +88,13 @@ def _build_runtime_model_aliases(config: Config) -> dict[str, str | ModelAliasCo
         if isinstance(value, ModelAliasConfig):
             resolved = config.resolve_model_config(value.model)
             resolved_aliases[alias] = ModelAliasConfig(
-                model=resolved.model or value.model,
+                model=value.model,
                 reasoning_effort=value.reasoning_effort or resolved.reasoning_effort,
                 thinking=value.thinking,
             )
             continue
 
-        resolved_aliases[alias] = config.resolve_model_config(value).model or value
+        resolved_aliases[alias] = value if value in config.models else (config.resolve_model_config(value).model or value)
 
     return resolved_aliases
 
@@ -167,9 +161,22 @@ def _init_prompt_session() -> None:
     )
 
 
-def _print_agent_response(response: str, render_markdown: bool) -> None:
+def _strip_ansi(text: str) -> str:
+    """Remove terminal escape sequences from model output before plain rendering."""
+    return _ANSI_ESCAPE_RE.sub("", text)
+
+
+def _print_agent_response(response: str, render_markdown: bool, *, prompt_safe: bool = False) -> None:
     """Render assistant response with consistent terminal styling."""
     content = response or ""
+    if prompt_safe:
+        clean = _strip_ansi(content)
+        print_formatted_text("")
+        print_formatted_text(HTML("<ansicyan>🦀 hermitcrab</ansicyan>"))
+        print_formatted_text(clean)
+        print_formatted_text("")
+        return
+
     body = Markdown(content) if render_markdown else Text(content)
     console.print()
     console.print(f"[cyan]{__logo__} hermitcrab[/cyan]")
@@ -310,6 +317,7 @@ def _make_provider(config: Config):
     """Create the appropriate LLM provider from config."""
     from hermitcrab.providers.custom_provider import CustomProvider
     from hermitcrab.providers.litellm_provider import LiteLLMProvider
+    from hermitcrab.providers.ollama_provider import OllamaProvider
     from hermitcrab.providers.openai_codex_provider import OpenAICodexProvider
 
     model = config.agents.defaults.model
@@ -386,7 +394,7 @@ def _make_provider(config: Config):
         console.print("Set one in ~/.hermitcrab/config.json under providers section")
         raise typer.Exit(1)
 
-    return LiteLLMProvider(
+    fallback_provider = LiteLLMProvider(
         api_key=p.api_key if p else None,
         api_base=config.get_api_base(model),
         default_model=model,
@@ -394,6 +402,18 @@ def _make_provider(config: Config):
         provider_name=provider_name,
         request_config_resolver=_request_config_resolver,
     )
+
+    if provider_name == "ollama":
+        return OllamaProvider(
+            api_key=p.api_key if p else None,
+            api_base=config.get_api_base(model),
+            default_model=model,
+            extra_headers=p.extra_headers if p else None,
+            request_config_resolver=_request_config_resolver,
+            fallback_provider=fallback_provider,
+        )
+
+    return fallback_provider
 
 
 # ============================================================================
@@ -463,6 +483,7 @@ def gateway(
         job_models=job_models,  # Pass job models (or None for defaults)
         distillation_enabled=config.agents.defaults.enable_distillation,
         model_aliases=_build_runtime_model_aliases(config),
+        named_models=config.models,
         reasoning_effort_config={
             "reasoning_effort": config.agents.defaults.job_models.reasoning_effort,
         },
@@ -680,8 +701,11 @@ def _run_nostr_mode(
                             turn_response.append(msg.content)
                         turn_done.set()
                     elif msg.content:
-                        console.print()
-                        _print_agent_response(msg.content, render_markdown=markdown)
+                        _print_agent_response(
+                            msg.content,
+                            render_markdown=markdown,
+                            prompt_safe=True,
+                        )
                 except asyncio.TimeoutError:
                     continue
                 except asyncio.CancelledError:
@@ -794,6 +818,7 @@ def agent(
         job_models=job_models,  # Pass job models (or None for defaults)
         distillation_enabled=config.agents.defaults.enable_distillation,
         model_aliases=_build_runtime_model_aliases(config),
+        named_models=config.models,
         reasoning_effort_config={
             "reasoning_effort": config.agents.defaults.job_models.reasoning_effort,
         },
@@ -902,8 +927,11 @@ def agent(
                                 turn_response.append(msg.content)
                             turn_done.set()
                         elif msg.content:
-                            console.print()
-                            _print_agent_response(msg.content, render_markdown=markdown)
+                            _print_agent_response(
+                                msg.content,
+                                render_markdown=markdown,
+                                prompt_safe=True,
+                            )
                     except asyncio.TimeoutError:
                         continue
                     except asyncio.CancelledError:
@@ -1226,6 +1254,7 @@ def cron_run(
         job_models=job_models,  # Pass job models (or None for defaults)
         distillation_enabled=config.agents.defaults.enable_distillation,
         model_aliases=_build_runtime_model_aliases(config),
+        named_models=config.models,
         reasoning_effort_config={
             "reasoning_effort": config.agents.defaults.job_models.reasoning_effort,
         },

@@ -247,12 +247,15 @@ def test_removed_channels_login_command_is_not_exposed():
     assert "No such command 'login'" in result.output
 
 
-def test_build_job_models_resolves_named_models():
+def test_build_job_models_preserves_named_model_references():
     config = Config.model_validate(
         {
             "models": {
                 "main": {"model": "openai/gpt-4.1"},
-                "local_coder": {"model": "ollama/qwen2.5-coder:7b"},
+                "local_coder": {
+                    "model": "ollama/qwen2.5-coder:7b",
+                    "providerOptions": {"num_ctx": 16384},
+                },
             },
             "agents": {
                 "defaults": {
@@ -266,7 +269,7 @@ def test_build_job_models_resolves_named_models():
     job_models = _build_job_models_from_config(config)
 
     assert job_models is not None
-    assert job_models["subagent"] == "ollama/qwen2.5-coder:7b"
+    assert job_models["subagent"] == "local_coder"
 
 
 def test_runtime_model_aliases_resolve_named_model_targets():
@@ -290,6 +293,6 @@ def test_runtime_model_aliases_resolve_named_model_targets():
     aliases = _build_runtime_model_aliases(config)
 
     assert isinstance(aliases["fast"], ModelAliasConfig)
-    assert aliases["fast"].model == "ollama/llama3.2:3b"
+    assert aliases["fast"].model == "fast_local"
     assert aliases["fast"].effective_reasoning_effort() == "none"
-    assert aliases["direct"] == "ollama/llama3.2:3b"
+    assert aliases["direct"] == "fast_local"
