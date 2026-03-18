@@ -1,7 +1,11 @@
 """Utility functions for hermitcrab."""
 
+import json
+import math
+import re
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 from hermitcrab.config.schema import ModelAliasConfig, NamedModelConfig
 
@@ -47,6 +51,52 @@ def safe_filename(name: str) -> str:
     for char in unsafe:
         name = name.replace(char, "_")
     return name.strip()
+
+
+def estimate_text_tokens(text: str | None) -> int:
+    """Estimate token count without provider-specific tokenizers."""
+    if not text:
+        return 0
+
+    normalized = re.sub(r"\s+", " ", text.strip())
+    if not normalized:
+        return 0
+
+    chars_component = math.ceil(len(normalized) / 4)
+    word_component = math.ceil(len(normalized.split()) * 1.35)
+    return max(chars_component, word_component)
+
+
+def estimate_tokens(value: Any) -> int:
+    """Estimate tokens for nested prompt content."""
+    if value is None:
+        return 0
+    if isinstance(value, str):
+        return estimate_text_tokens(value)
+    if isinstance(value, list):
+        return sum(estimate_tokens(item) for item in value)
+    if isinstance(value, dict):
+        try:
+            return estimate_text_tokens(json.dumps(value, ensure_ascii=False, sort_keys=True))
+        except Exception:
+            return estimate_text_tokens(str(value))
+    return estimate_text_tokens(str(value))
+
+
+def estimate_message_tokens(messages: list[dict[str, Any]]) -> int:
+    """Estimate total tokens for a chat-style message list."""
+    total = 0
+    for msg in messages:
+        total += 4  # rough chat message overhead
+        total += estimate_text_tokens(msg.get("role"))
+        total += estimate_tokens(msg.get("content"))
+        if "tool_calls" in msg:
+            total += estimate_tokens(msg.get("tool_calls"))
+        if "tool_call_id" in msg:
+            total += estimate_text_tokens(str(msg.get("tool_call_id")))
+        if "name" in msg:
+            total += estimate_text_tokens(str(msg.get("name")))
+    return total + 2  # assistant priming / response envelope
 
 
 @dataclass(frozen=True)

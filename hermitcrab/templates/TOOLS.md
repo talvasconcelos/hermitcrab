@@ -14,7 +14,7 @@ Tool signatures provided via function calling. Non-obvious constraints below.
 | Operation | Use Case |
 |-----------|----------|
 | `write_fact` | User preferences, established truths |
-| `write_decision` | Architectural choices (immutable) |
+| `write_decision` | User-confirmed locked choices only (immutable) |
 | `write_goal` | Objectives to achieve |
 | `write_task` | Action items (requires `assignee`) |
 | `write_reflection` | Meta-observations (append-only) |
@@ -39,6 +39,16 @@ Tool signatures provided via function calling. Non-obvious constraints below.
 | `knowledge_list` | Browse with filters (returns metadata only) |
 
 **Categories:** `articles`, `books`, `docs`, `notes`
+
+Use `write_decision` only when the user made or clearly accepted the choice. Assistant-authored recommendations, reports, and option lists belong in `projects/` or `knowledge/`, not `memory/decisions/`.
+
+## File Placement Rules
+
+- Keep the workspace root clean. Do not save normal reports, drafts, or ad-hoc notes directly in the root.
+- Use `projects/<slug>/` for user-requested deliverables such as reports, plans, generated apps, and project artifacts.
+- Use `knowledge_ingest` or `knowledge_ingest_url` for reference material that should live under `knowledge/`.
+- Use `scratchpads/` only for transient working notes.
+- Use root-level files only for explicit bootstrap/control files such as `AGENTS.md`, `SOUL.md`, `USER.md`, `TOOLS.md`, and `IDENTITY.md`.
 
 ## Other Tools
 

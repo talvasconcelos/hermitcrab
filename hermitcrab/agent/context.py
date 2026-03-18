@@ -3,15 +3,18 @@
 import base64
 import mimetypes
 import platform
+import re
 import time as _time
 from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from loguru import logger
+
 from hermitcrab.agent.memory import MemoryStore
 from hermitcrab.agent.skills import SkillsLoader
 from hermitcrab.config.schema import ModelAliasConfig, NamedModelConfig
-from hermitcrab.utils.helpers import safe_filename
+from hermitcrab.utils.helpers import estimate_message_tokens, estimate_text_tokens, safe_filename
 
 
 class ContextBuilder:
@@ -32,6 +35,7 @@ class ContextBuilder:
         memory_max_item_chars: int = 600,
         model_aliases: dict[str, str | ModelAliasConfig] | None = None,
         named_models: dict[str, NamedModelConfig] | None = None,
+        prompt_token_budget: int = 4000,
     ):
         self.workspace = workspace
         self.memory = MemoryStore(workspace)
@@ -41,6 +45,7 @@ class ContextBuilder:
         self.memory_max_item_chars = memory_max_item_chars
         self.model_aliases = model_aliases or {}
         self.named_models = named_models or {}
+        self.prompt_token_budget = max(800, prompt_token_budget)
 
     def build_system_prompt(
         self,
@@ -48,6 +53,8 @@ class ContextBuilder:
         channel: str | None = None,
         chat_id: str | None = None,
         scratchpad_path: str | None = None,
+        current_message: str | None = None,
+        history: list[dict[str, Any]] | None = None,
     ) -> str:
         """
         Build the system prompt from bootstrap files, memory, and skills.
@@ -58,54 +65,121 @@ class ContextBuilder:
         Returns:
             Complete system prompt.
         """
-        parts = []
+        history_tokens = estimate_message_tokens(history or [])
+        current_message_tokens = estimate_text_tokens(current_message)
+        reserved_history_tokens = min(history_tokens, self.prompt_token_budget // 3)
+        memory_reserve_tokens = min(300, self.prompt_token_budget // 5)
+
+        fixed_parts = []
 
         # Core identity
-        parts.append(self._get_identity())
+        fixed_parts.append(self._get_identity())
 
-        parts.append("You are the assistant. Treat this workspace as your working area and memory store.")
+        fixed_parts.append(
+            "You are the assistant. Treat this workspace as your working area and follow the "
+            "bootstrap files below as the authoritative operating rules."
+        )
 
         # Bootstrap files
         bootstrap = self._load_bootstrap_files()
         if bootstrap:
-            parts.append(bootstrap)
-
-        # Memory context
-        memory = self.memory.get_memory_context(
-            max_chars=self.memory_max_chars,
-            max_items_per_category=self.memory_max_items_per_category,
-            max_item_chars=self.memory_max_item_chars,
-        )
-        if memory:
-            parts.append(f"# Memory\n\n{memory}")
+            fixed_parts.append(bootstrap)
 
         channel_prompt = self._load_channel_prompt(channel, chat_id)
         if channel_prompt:
-            parts.append(f"# Channel Prompt\n\n{channel_prompt}")
+            fixed_parts.append(f"# Channel Prompt\n\n{channel_prompt}")
         if scratchpad_path:
-            parts.append(
+            fixed_parts.append(
                 "# Scratchpad\n\n"
                 f"Session scratchpad: {scratchpad_path}\n"
                 "Use it as transient working memory only. It is archived and not long-term memory."
             )
 
-        # Skills - progressive loading
-        # 1. Always-loaded skills: include full content
         always_skills = self.skills.get_always_skills()
-        if always_skills:
-            always_content = self.skills.load_skills_for_context(always_skills)
-            if always_content:
-                parts.append(f"# Active Skills\n\n{always_content}")
+        fixed_prompt = "\n\n---\n\n".join(fixed_parts)
+        fixed_tokens = estimate_text_tokens(fixed_prompt)
 
-        # 2. Available skills: only show summary (agent uses read_file to load)
-        skills_summary = self.skills.build_skills_summary()
+        optional_parts: list[str] = []
+        active_skills_summary = self._build_active_skills_summary(always_skills)
+        if active_skills_summary:
+            optional_parts.append(f"# Active Skills\n\n{active_skills_summary}")
+
+        skills_summary = self.skills.build_skills_summary(exclude_names=set(always_skills))
         if skills_summary:
-            parts.append(f"""# Skills
+            optional_parts.append(
+                "# Skills\n\n"
+                "The following skills extend your capabilities. Read a skill's `SKILL.md` "
+                "with `read_file` before using it. Skills with `available=\"false\"` need "
+                "dependencies installed first.\n\n"
+                f"{skills_summary}"
+            )
 
-The following skills extend your capabilities. Read a skill's `SKILL.md` with `read_file` before using it.
-Skills with `available="false"` need dependencies installed first.
+        optional_budget_tokens = max(
+            0,
+            self.prompt_token_budget
+            - reserved_history_tokens
+            - current_message_tokens
+            - memory_reserve_tokens
+            - fixed_tokens,
+        )
+        for section in optional_parts:
+            section_tokens = estimate_text_tokens(section)
+            if section_tokens > optional_budget_tokens:
+                continue
+            fixed_parts.append(section)
+            optional_budget_tokens -= section_tokens
 
-{skills_summary}""")
+        fixed_prompt = "\n\n---\n\n".join(fixed_parts)
+        fixed_tokens = estimate_text_tokens(fixed_prompt)
+        available_memory_tokens = max(
+            0,
+            self.prompt_token_budget
+            - fixed_tokens
+            - reserved_history_tokens
+            - current_message_tokens,
+        )
+        available_memory_chars = min(self.memory_max_chars, available_memory_tokens * 4)
+
+        parts = list(fixed_parts)
+
+        relevant_memory = ""
+        relevant_memory_tokens = 0
+        if available_memory_tokens > 0:
+            memory_query = self._build_memory_query(current_message, history or [])
+            relevant_memory = self.memory.get_relevant_context(
+                memory_query,
+                limit=max(3, min(8, self.memory_max_items_per_category)),
+                max_chars=max(200, min(available_memory_chars // 2, self.memory_max_chars // 2)),
+                max_item_chars=self.memory_max_item_chars,
+            )
+            relevant_memory_tokens = estimate_text_tokens(relevant_memory)
+            if relevant_memory:
+                parts.append(f"# Relevant Memory\n\n{relevant_memory}")
+
+            remaining_memory_tokens = max(0, available_memory_tokens - relevant_memory_tokens)
+            remaining_memory_chars = min(self.memory_max_chars, remaining_memory_tokens * 4)
+            if remaining_memory_chars > 0:
+                general_memory = self.memory.get_memory_context(
+                    max_chars=remaining_memory_chars,
+                    max_items_per_category=(
+                        max(1, self.memory_max_items_per_category // 2)
+                        if relevant_memory
+                        else self.memory_max_items_per_category
+                    ),
+                    max_item_chars=self.memory_max_item_chars,
+                )
+                if general_memory:
+                    parts.append(f"# Memory\n\n{general_memory}")
+
+        logger.debug(
+            "Prompt budget estimate: fixed_tokens={}, history_tokens={}, reserved_history_tokens={}, current_tokens={}, available_memory_tokens={}, relevant_memory_tokens={}",
+            fixed_tokens,
+            history_tokens,
+            reserved_history_tokens,
+            current_message_tokens,
+            available_memory_tokens,
+            relevant_memory_tokens,
+        )
 
         return "\n\n---\n\n".join(parts)
 
@@ -179,13 +253,8 @@ Skills with `available="false"` need dependencies installed first.
 
 ## Workspace
 Your workspace is at: {workspace_path}
-- Long-term memory: {workspace_path}/memory/ (category-based atomic notes)
-  - facts/ — Long-term truths
-  - decisions/ — Locked choices (immutable)
-  - goals/ — Outcome-oriented objectives
-  - tasks/ — Actionable items with lifecycle
-  - reflections/ — Subjective observations
 - Custom skills: {workspace_path}/skills/{{skill-name}}/SKILL.md
+- Bootstrap files in the workspace define repo policy, file placement, and long-term memory rules.
 
 Reply directly for normal conversation. Only use `message` to send to a specific chat channel.
 
@@ -202,10 +271,8 @@ Reply directly for normal conversation. Only use `message` to send to a specific
 - If a tool call fails, analyze the error before retrying with a different approach.
 
 ## Memory
-- Use `write_fact`, `write_decision`, `write_goal`, and `write_task` for authoritative memory writes.
-- Use `search_memory(query)` or `read_memory(category, id)` before answering when memory may matter.
-- Memory is category-based, atomic, and file-backed.
-- If memory might matter, search it first. Do not guess or invent memory content.
+- Search memory before answering when durable past context may matter.
+- Use typed memory tools for authoritative writes; do not guess or invent memory content.
 
 ## Models For Subagents
 You can spawn subagents with configured named models, optional aliases, or full model names. Choose the right model for the job:
@@ -268,6 +335,8 @@ Use subagents for complex, time-consuming, or specialized tasks. For substantial
             channel=channel,
             chat_id=chat_id,
             scratchpad_path=scratchpad_path,
+            current_message=current_message,
+            history=history,
         )
         if channel and chat_id:
             system_prompt += f"\n\n## Current Session\nChannel: {channel}\nChat ID: {chat_id}"
@@ -284,6 +353,39 @@ Use subagents for complex, time-consuming, or specialized tasks. For substantial
         messages.append({"role": "user", "content": user_content})
 
         return messages
+
+    def _build_memory_query(self, current_message: str | None, history: list[dict[str, Any]]) -> str:
+        """Build a lightweight retrieval query from the active user request and recent user turns."""
+        parts: list[str] = []
+        if current_message and current_message.strip():
+            parts.append(current_message.strip())
+
+        recent_user_turns: list[str] = []
+        for msg in reversed(history):
+            if msg.get("role") != "user":
+                continue
+            content = msg.get("content")
+            if not isinstance(content, str):
+                continue
+            text = content.strip()
+            if text:
+                recent_user_turns.append(text)
+            if len(recent_user_turns) >= 2:
+                break
+
+        parts.extend(reversed(recent_user_turns))
+        query = " ".join(parts)
+        query = re.sub(r"\s+", " ", query).strip()
+        return query[:400]
+
+    def _build_active_skills_summary(self, skill_names: list[str]) -> str:
+        """Build a compact summary for always-active skills without inlining full skill text."""
+        lines: list[str] = []
+        for name in skill_names:
+            metadata = self.skills.get_skill_metadata(name) or {}
+            description = metadata.get("description") or name
+            lines.append(f"- `{name}`: {description}")
+        return "\n".join(lines)
 
     def _build_user_content(self, text: str, media: list[str] | None) -> str | list[dict[str, Any]]:
         """Build user message content with optional base64-encoded images."""

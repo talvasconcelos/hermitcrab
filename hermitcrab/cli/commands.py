@@ -13,6 +13,7 @@ import typer
 from prompt_toolkit import PromptSession
 from prompt_toolkit.formatted_text import HTML
 from prompt_toolkit.history import FileHistory
+from prompt_toolkit.key_binding import KeyBindings
 from prompt_toolkit.patch_stdout import patch_stdout
 from prompt_toolkit.shortcuts import print_formatted_text
 from rich.console import Console
@@ -154,11 +155,29 @@ def _init_prompt_session() -> None:
     history_file = Path.home() / ".hermitcrab" / "history" / "cli_history"
     history_file.parent.mkdir(parents=True, exist_ok=True)
 
+    key_bindings = _build_prompt_key_bindings()
+
     _PROMPT_SESSION = PromptSession(
         history=FileHistory(str(history_file)),
         enable_open_in_editor=False,
-        multiline=False,  # Enter submits (single line mode)
+        multiline=True,
+        key_bindings=key_bindings,
     )
+
+
+def _build_prompt_key_bindings() -> KeyBindings:
+    """Build prompt-toolkit bindings for submit-vs-newline behavior."""
+    bindings = KeyBindings()
+
+    @bindings.add("c-m")
+    def _submit(event) -> None:
+        event.current_buffer.validate_and_handle()
+
+    @bindings.add("c-j")
+    def _newline(event) -> None:
+        event.current_buffer.insert_text("\n")
+
+    return bindings
 
 
 def _strip_ansi(text: str) -> str:
@@ -196,6 +215,7 @@ async def _read_interactive_input_async() -> str:
     - Multiline paste (bracketed paste mode)
     - History navigation (up/down arrows)
     - Clean display (no ghost characters or artifacts)
+    - Ctrl+J inserts a newline; Enter submits
     """
     if _PROMPT_SESSION is None:
         raise RuntimeError("Call _init_prompt_session() first")
@@ -688,6 +708,8 @@ def _run_nostr_mode(
                 try:
                     msg = await asyncio.wait_for(bus.consume_outbound(), timeout=1.0)
                     if msg.metadata.get("_progress"):
+                        if not msg.content or not msg.content.strip():
+                            continue
                         is_tool_hint = msg.metadata.get("_tool_hint", False)
                         ch = agent_loop.channels_config
                         if ch and is_tool_hint and not ch.send_tool_hints:
@@ -853,6 +875,8 @@ def agent(
         return console.status("[dim]hermitcrab is thinking...[/dim]", spinner="dots")
 
     async def _cli_progress(content: str, *, tool_hint: bool = False) -> None:
+        if not content or not content.strip():
+            return
         ch = agent_loop.channels_config
         if ch and tool_hint and not ch.send_tool_hints:
             return
@@ -914,6 +938,8 @@ def agent(
                     try:
                         msg = await asyncio.wait_for(bus.consume_outbound(), timeout=1.0)
                         if msg.metadata.get("_progress"):
+                            if not msg.content or not msg.content.strip():
+                                continue
                             is_tool_hint = msg.metadata.get("_tool_hint", False)
                             ch = agent_loop.channels_config
                             if ch and is_tool_hint and not ch.send_tool_hints:

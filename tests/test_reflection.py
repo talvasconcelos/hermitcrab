@@ -398,6 +398,44 @@ class TestReflectionService:
         assert reflections == []
 
     @pytest.mark.asyncio
+    async def test_reflect_on_session_rejects_generic_placeholder_title(self, memory_store, mock_provider):
+        service = ReflectionService(
+            memory=memory_store,
+            chat_callable=mock_provider.chat,
+            model="test-model",
+            auto_promote=False,
+            allowed_targets=["AGENTS.md", "TOOLS.md", "SOUL.md", "IDENTITY.md"],
+            max_file_lines=500,
+        )
+
+        async def generic_title_chat(**kwargs):
+            response = MagicMock()
+            response.content = """
+            {
+                "title": "Short, descriptive title",
+                "content": "I learned that the user prefers concise answers.",
+                "type": "preference",
+                "evidence": "The user asked me to keep the answer brief.",
+                "should_promote": false
+            }
+            """
+            return response
+
+        mock_provider.chat.side_effect = generic_title_chat
+
+        await service.reflect_on_session(
+            messages=[{"role": "user", "content": "Keep it concise"}],
+            session_key="test-session",
+            digest=make_digest(
+                user_requests=["Keep it concise"],
+                user_corrections=["Keep it concise"],
+            ),
+        )
+
+        reflections = memory_store.list_memories("reflections")
+        assert reflections == []
+
+    @pytest.mark.asyncio
     async def test_reflect_on_session_accepts_missing_evidence_when_digest_supports_it(self, memory_store, mock_provider):
         service = ReflectionService(
             memory=memory_store,
@@ -434,6 +472,41 @@ class TestReflectionService:
         reflections = memory_store.list_memories("reflections")
         assert len(reflections) == 1
         assert "Please keep it concise" in reflections[0].metadata.get("context", "")
+
+    @pytest.mark.asyncio
+    async def test_reflect_on_session_prioritizes_explicit_workflow_correction(
+        self, memory_store, mock_provider
+    ):
+        service = ReflectionService(
+            memory=memory_store,
+            chat_callable=mock_provider.chat,
+            model="test-model",
+            auto_promote=False,
+            allowed_targets=["AGENTS.md", "TOOLS.md", "SOUL.md", "IDENTITY.md"],
+            max_file_lines=500,
+        )
+
+        await service.reflect_on_session(
+            messages=[{"role": "user", "content": "Do the whole project report."}],
+            session_key="test-session",
+            digest=make_digest(
+                user_requests=["Create a full report and implementation plan."],
+                user_corrections=[
+                    (
+                        "Instead of planning and delegating small tasks, you delegated the entire "
+                        "thing to a weak subagent. Make a plan, break it into smaller tasks, and "
+                        "do it yourself if needed."
+                    )
+                ],
+                outcomes=["Compiled the final report after taking over failed subtask work."],
+            ),
+        )
+
+        mock_provider.chat.assert_not_called()
+        reflections = memory_store.list_memories("reflections")
+        assert len(reflections) == 1
+        assert reflections[0].title == "Maintain ownership of delegated tasks"
+        assert "delegate only bounded subtasks" in reflections[0].content
 
     @pytest.mark.asyncio
     async def test_format_digest_includes_core_sections(self, memory_store, mock_provider):

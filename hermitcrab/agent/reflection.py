@@ -119,6 +119,21 @@ Rules:
                 logger.debug("Reflection skipped: empty session {}", session_key)
                 return
 
+            # 0. Deterministic high-priority corrections win over weak-model synthesis.
+            priority_result = self._build_priority_reflection(digest)
+            if priority_result:
+                recent = self.memory.list_memories("reflections")[:10]
+                if not self._is_duplicate_or_contradictory(priority_result, recent):
+                    self._write_reflection(priority_result, session_key)
+                    if (
+                        self.auto_promote
+                        and priority_result.get("should_promote")
+                        and priority_result.get("promote_content")
+                    ):
+                        await self._promote(priority_result)
+                    logger.info("Reflection complete (priority rule): {}", priority_result["title"])
+                return
+
             # 1. Load recent reflections for dedup context
             recent = self.memory.list_memories("reflections")[:10]
 
@@ -226,6 +241,51 @@ Rules:
             lines.append(f"{i}. {ref.title}: {content_preview}...")
         return "\n".join(lines)
 
+    def _build_priority_reflection(self, digest: SessionDigest) -> dict[str, Any] | None:
+        """Extract a deterministic high-priority workflow lesson from explicit user corrections."""
+        correction_markers = (
+            "you delegated the entire thing",
+            "you did it again",
+            "make a plan",
+            "break the task",
+            "break it into smaller",
+            "delegate those small tasks",
+            "do it yourself",
+            "you as the coordinator",
+            "don't leave me waiting",
+            "pick up where it failed",
+            "retry it",
+            "figure it out",
+        )
+
+        evidence = ""
+        for item in reversed(digest.user_corrections):
+            normalized = self._normalize_text(item)
+            if any(marker in normalized for marker in correction_markers):
+                evidence = item.strip()
+                break
+
+        if not evidence:
+            return None
+
+        return {
+            "title": "Maintain ownership of delegated tasks",
+            "content": (
+                "I learned that for broad multi-step work I must keep ownership: make a plan, "
+                "delegate only bounded subtasks to subagents, monitor failures, and either retry "
+                "with tighter scope or take over myself instead of pushing the problem back to the user."
+            ),
+            "type": "workflow",
+            "evidence": evidence,
+            "should_promote": True,
+            "promote_to": "AGENTS.md",
+            "promote_content": (
+                "For broad or strategic tasks, keep main-agent ownership. Plan first, delegate only "
+                "bounded subtasks, track progress, retry/refine failed subagent work internally, and "
+                "never surface raw subagent failure or refinement requests as the final user-facing answer."
+            ),
+        }
+
     def _parse_response(self, content: str | None) -> dict:
         """Parse LLM JSON response."""
         if not content:
@@ -259,6 +319,7 @@ Rules:
         content = str(result.get("content", "")).strip()
         evidence = str(result.get("evidence", "")).strip()
         normalized = self._normalize_text(" ".join([title, content, evidence]))
+        normalized_title = self._normalize_text(title)
 
         banned_markers = (
             "short descriptive title",
@@ -270,6 +331,18 @@ Rules:
             "generic summary",
         )
         if any(marker in normalized for marker in banned_markers):
+            return False
+
+        generic_titles = {
+            "short descriptive title",
+            "descriptive title",
+            "user preference",
+            "user preferences",
+            "insight",
+            "workflow insight",
+            "learning",
+        }
+        if normalized_title in generic_titles:
             return False
 
         if any(marker in normalized for marker in ("tool error", "missing file", "read_file", "list_dir")):

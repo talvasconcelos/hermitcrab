@@ -271,3 +271,133 @@ class TestJournalFormatting:
 
         assert digest.user_requests == ["Please summarize yesterday's work."]
         assert digest.user_corrections == []
+
+    def test_digest_ignores_synthetic_subagent_completion_prompt(self, temp_workspace: Path):
+        bus = MagicMock()
+        bus.consume_inbound = AsyncMock()
+        bus.publish_outbound = AsyncMock()
+        provider = MagicMock()
+        provider.chat = AsyncMock()
+        provider.get_default_model = MagicMock(return_value="test-model")
+
+        agent = AgentLoop(bus=bus, provider=provider, workspace=temp_workspace)
+        digest = agent._build_session_digest(
+            [
+                {
+                    "role": "user",
+                    "content": "Pull the open tasks with a subagent.",
+                    "timestamp": "2026-03-18T11:58:09+00:00",
+                },
+                {
+                    "role": "user",
+                    "content": (
+                        "[Subagent 'Get open tasks' completed successfully]\n\n"
+                        'Task: Use read_memory(category="tasks") to get all tasks.\n\n'
+                        "Result:\nTask completed but no final response was generated.\n\n"
+                        "Write a user-facing completion update."
+                    ),
+                    "timestamp": "2026-03-18T11:58:20+00:00",
+                },
+            ],
+            "cli:direct",
+        )
+
+        assert digest.user_requests == ["Pull the open tasks with a subagent."]
+        assert any("Subagent reported back for task" in line for line in digest.event_lines)
+
+    def test_fallback_journal_uses_real_user_request_not_subagent_prompt(self, temp_workspace: Path):
+        bus = MagicMock()
+        bus.consume_inbound = AsyncMock()
+        bus.publish_outbound = AsyncMock()
+        provider = MagicMock()
+        provider.chat = AsyncMock()
+        provider.get_default_model = MagicMock(return_value="test-model")
+
+        agent = AgentLoop(bus=bus, provider=provider, workspace=temp_workspace)
+        digest = agent._build_session_digest(
+            [
+                {
+                    "role": "user",
+                    "content": "Pull the open tasks with a subagent.",
+                    "timestamp": "2026-03-18T11:58:09+00:00",
+                },
+                {
+                    "role": "assistant",
+                    "content": "The subagent completed but didn't return useful output. Let me just check directly:",
+                    "tool_calls": [{"function": {"name": "read_memory", "arguments": "{\"category\": \"tasks\"}"}}],
+                    "timestamp": "2026-03-18T11:58:20+00:00",
+                },
+            ],
+            "cli:direct",
+        )
+
+        body = agent._build_fallback_journal_body(digest)
+
+        assert "Pull the open tasks with a subagent." in body
+        assert "didn't return useful output" not in body
+
+    def test_journal_event_trace_filters_raw_tool_mechanics(self, temp_workspace: Path):
+        bus = MagicMock()
+        bus.consume_inbound = AsyncMock()
+        bus.publish_outbound = AsyncMock()
+        provider = MagicMock()
+        provider.chat = AsyncMock()
+        provider.get_default_model = MagicMock(return_value="test-model")
+
+        agent = AgentLoop(bus=bus, provider=provider, workspace=temp_workspace)
+        digest = SimpleNamespace(
+            session_key="cli:direct",
+            channel="cli",
+            chat_id="direct",
+            first_timestamp="2026-03-18T11:58:09+00:00",
+            last_timestamp="2026-03-18T11:58:20+00:00",
+            event_lines=[
+                "- User: Pull the open tasks with a subagent.",
+                "- Assistant used spawn: Get open tasks",
+                "- Assistant used read_memory: tasks",
+                "- Assistant saved fact [[Fast local model]].",
+            ],
+            user_requests=["Pull the open tasks with a subagent."],
+            user_corrections=[],
+            outcomes=[],
+            failures=[],
+            wikilinks=["[[Fast local model]]"],
+        )
+
+        trace = agent._build_journal_event_trace(digest)
+
+        assert "- User: Pull the open tasks with a subagent." in trace
+        assert "- Assistant saved fact [[Fast local model]]." in trace
+        assert not any("Assistant used spawn" in line for line in trace)
+        assert not any("Assistant used read_memory" in line for line in trace)
+
+    def test_digest_ignores_generic_assistant_self_description(self, temp_workspace: Path):
+        bus = MagicMock()
+        bus.consume_inbound = AsyncMock()
+        bus.publish_outbound = AsyncMock()
+        provider = MagicMock()
+        provider.chat = AsyncMock()
+        provider.get_default_model = MagicMock(return_value="test-model")
+
+        agent = AgentLoop(bus=bus, provider=provider, workspace=temp_workspace)
+        digest = agent._build_session_digest(
+            [
+                {
+                    "role": "user",
+                    "content": "Help me organize this product idea.",
+                    "timestamp": "2026-03-18T16:30:00+00:00",
+                },
+                {
+                    "role": "assistant",
+                    "content": (
+                        "I am a helpful assistant, and I am here to assist you. "
+                        "I am a knowledgeable assistant that can provide information and guidance."
+                    ),
+                    "timestamp": "2026-03-18T16:31:00+00:00",
+                },
+            ],
+            "cli:direct",
+        )
+
+        assert digest.user_requests == ["Help me organize this product idea."]
+        assert not any("helpful assistant" in line.lower() for line in digest.event_lines)

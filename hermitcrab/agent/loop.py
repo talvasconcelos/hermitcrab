@@ -508,6 +508,20 @@ class AgentLoop:
 
         return f"{label} finished in the background."
 
+    @staticmethod
+    def _is_low_value_system_reply(content: str | None) -> bool:
+        """Detect inner-loop failure text that should not be surfaced as a background-task answer."""
+        normalized = (content or "").strip().lower()
+        if not normalized:
+            return True
+        low_value_markers = (
+            "i detected repeated tool calls without progress",
+            "please refine the request or provide more constraints",
+            "i've completed processing but have no response to give",
+            "i reached the maximum number of tool call iterations",
+        )
+        return any(marker in normalized for marker in low_value_markers)
+
     async def _chat_with_retry(
         self,
         *,
@@ -911,6 +925,7 @@ class AgentLoop:
                 return  # Empty session, no journal needed
             digest = self._build_session_digest(messages, session.key)
             candidate_links = ", ".join(digest.wikilinks) if digest.wikilinks else "none"
+            journal_event_trace = self._build_journal_event_trace(digest)
             prompt = (
                 "Write a short first-person journal entry about what happened in this session.\n"
                 "Sound like a useful human journal, not telemetry.\n"
@@ -923,7 +938,7 @@ class AgentLoop:
                 f"Time range: {digest.first_timestamp} -> {digest.last_timestamp}\n"
                 f"Candidate wikilinks: {candidate_links}\n\n"
                 "Event trace:\n"
-                f"{chr(10).join(digest.event_lines[:18])}\n\n"
+                f"{chr(10).join(journal_event_trace[:18])}\n\n"
                 "Write 3-6 sentences only."
             )
 
@@ -940,7 +955,7 @@ class AgentLoop:
                         reasoning_effort=self._reasoning_effort,
                     )
                     content = self._strip_think(response.content)
-                    if content:
+                    if content and not self._is_low_signal_journal_body(content):
                         self.journal.write_entry(
                             content=self._format_journal_entry(digest, content),
                             session_keys=[session.key],
@@ -1326,6 +1341,8 @@ class AgentLoop:
             has_rationale = bool((candidate.decision_rationale or "").strip())
             if candidate.confidence < 0.9 or not has_rationale:
                 return False
+            if self._looks_like_non_decision_artifact(candidate):
+                return False
         elif candidate.type not in allowed_types:
             return False
 
@@ -1337,6 +1354,50 @@ class AgentLoop:
             return False
 
         return True
+
+    @staticmethod
+    def _looks_like_non_decision_artifact(candidate: AtomicCandidate) -> bool:
+        """Reject distilled decisions that read like reports, placeholders, or suggestions."""
+        normalized = " ".join(
+            re.sub(
+                r"[^a-z0-9\s]+",
+                " ",
+                " ".join(
+                    filter(
+                        None,
+                        [
+                            candidate.title,
+                            candidate.content,
+                            candidate.decision_rationale,
+                        ],
+                    )
+                ).lower(),
+            ).split()
+        )
+        if not normalized:
+            return True
+
+        report_markers = (
+            "recommendation",
+            "recommended",
+            "report",
+            "analysis",
+            "placeholder",
+            "not explicitly stated",
+            "not prioritized yet",
+            "possible decision",
+            "tentative",
+            "option list",
+        )
+        proposal_markers = (
+            "we should ",
+            "should use",
+            "could use",
+            "might use",
+            "proposal",
+            "proposed",
+        )
+        return any(marker in normalized for marker in report_markers + proposal_markers)
 
     async def _reflect_on_session(self, session: Session) -> None:
         """
@@ -1736,10 +1797,15 @@ class AgentLoop:
                     # Phase C: Deterministic save
                     self._save_turn(session, all_msgs, 1 + len(history))
                     self.sessions.save(session)
+                    safe_content = (
+                        self._fallback_system_task_summary(msg.content)
+                        if self._is_low_value_system_reply(final_content)
+                        else final_content
+                    )
                     return OutboundMessage(
                         channel=channel,
                         chat_id=chat_id,
-                        content=final_content or self._fallback_system_task_summary(msg.content),
+                        content=safe_content or self._fallback_system_task_summary(msg.content),
                     )
                 finally:
                     self._session_active_turns[key] -= 1
@@ -1810,6 +1876,8 @@ class AgentLoop:
                     )
 
                 async def _bus_progress(content: str, *, tool_hint: bool = False) -> None:
+                    if not content or not content.strip():
+                        return
                     meta = dict(msg.metadata or {})
                     meta["_progress"] = True
                     meta["_tool_hint"] = tool_hint
@@ -1907,6 +1975,84 @@ class AgentLoop:
             return parsed if isinstance(parsed, dict) else {}
         return {}
 
+    @staticmethod
+    def _is_subagent_completion_prompt(content: str) -> bool:
+        """Return True when a stored user message is a synthetic subagent completion prompt."""
+        normalized = AgentLoop._clean_snippet(content, max_chars=4000)
+        return normalized.startswith("[Subagent '") and "Write a user-facing completion update." in normalized
+
+    @staticmethod
+    def _extract_subagent_task(content: str) -> str:
+        """Extract delegated task text from a synthetic subagent completion prompt."""
+        match = re.search(r"\nTask:\s*(.*?)\n\nResult:\n", content, flags=re.DOTALL)
+        if not match:
+            return ""
+        return AgentLoop._clean_snippet(match.group(1), max_chars=180)
+
+    @staticmethod
+    def _is_transition_assistant_message(content: str, tool_calls: list[dict[str, Any]]) -> bool:
+        """Detect low-signal assistant scaffolding around tool usage."""
+        if not content:
+            return False
+        normalized = AgentLoop._clean_snippet(content, max_chars=240).lower()
+        transition_markers = (
+            "let me just",
+            "let me try",
+            "let me check",
+            "let me use",
+            "let me spawn",
+            "my apologies",
+            "right you are",
+            "i am a helpful assistant",
+            "i am here to assist you",
+            "i am a knowledgeable assistant",
+            "make your tasks easier and more efficient",
+            "there appears to be an issue with the subagent system",
+            "the subagent keeps completing without",
+            "the subagent completed but didn't return useful output",
+            "i don't have a",
+        )
+        if any(marker in normalized for marker in transition_markers):
+            return True
+        return bool(tool_calls and normalized.startswith(("right", "ok", "okay", "sure", "let me", "my apologies")))
+
+    @staticmethod
+    def _is_low_signal_journal_body(body: str) -> bool:
+        """Reject journal synthesis that parrots scaffolding or synthetic prompt text."""
+        normalized = AgentLoop._clean_snippet(body, max_chars=600).lower()
+        banned_markers = (
+            "[subagent '",
+            "write a user-facing completion update",
+            "task completed but no final response was generated",
+            "the subagent completed but didn't return useful output",
+            "the subagent keeps completing without",
+            "i am a helpful assistant",
+            "i am a knowledgeable assistant",
+            "i am here to assist you",
+        )
+        return any(marker in normalized for marker in banned_markers)
+
+    @staticmethod
+    def _build_journal_event_trace(digest: SessionDigest) -> list[str]:
+        """Build a journal-safe event trace with raw tool mechanics filtered out."""
+        filtered: list[str] = []
+        for line in digest.event_lines:
+            normalized = line.lower()
+            if "assistant used " in normalized and any(
+                marker in normalized
+                for marker in (
+                    "read_memory",
+                    "search_memory",
+                    "read_file",
+                    "list_dir",
+                    "spawn",
+                    "search_knowledge",
+                )
+            ):
+                continue
+            filtered.append(line)
+        return filtered or digest.event_lines
+
     def _build_session_digest(
         self, messages: list[dict[str, Any]], session_key: str
     ) -> SessionDigest:
@@ -1933,6 +2079,12 @@ class AgentLoop:
             if role == "user":
                 if not content:
                     continue
+                raw_content = str(msg.get("content") or "")
+                if self._is_subagent_completion_prompt(raw_content):
+                    task = self._extract_subagent_task(raw_content)
+                    if task:
+                        event_lines.append(f"- Subagent reported back for task: {task}")
+                    continue
                 event_lines.append(f"- User: {content}")
                 user_requests.append(content)
                 lowered = content.lower()
@@ -1942,16 +2094,12 @@ class AgentLoop:
                 ):
                     user_corrections.append(content)
             elif role == "assistant":
-                if content:
-                    event_lines.append(f"- Assistant: {content}")
-                    if any(
-                        word in content.lower()
-                        for word in ("done", "completed", "saved", "updated")
-                    ):
-                        outcomes.append(content)
                 tool_calls = (
                     msg.get("tool_calls") if isinstance(msg.get("tool_calls"), list) else []
                 )
+                if content:
+                    if not self._is_transition_assistant_message(content, tool_calls):
+                        event_lines.append(f"- Assistant: {content}")
                 for call in tool_calls:
                     if not isinstance(call, dict):
                         continue

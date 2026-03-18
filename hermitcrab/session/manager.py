@@ -41,15 +41,61 @@ class Session:
         self.messages.append(msg)
         self.updated_at = datetime.now()
 
+    @staticmethod
+    def _leading_segment_end(messages: list[dict[str, Any]]) -> int:
+        """Return the end index of the leading conversation segment."""
+        if not messages:
+            return 0
+        for idx in range(1, len(messages)):
+            if messages[idx].get("role") == "user":
+                return idx
+        return len(messages)
+
+    @staticmethod
+    def _leading_segment_is_broken(messages: list[dict[str, Any]]) -> bool:
+        """Detect whether the leading truncated segment starts mid-turn."""
+        if not messages:
+            return False
+
+        first = messages[0]
+        first_role = first.get("role")
+        if first_role == "tool":
+            return True
+        if first_role == "assistant" and isinstance(first.get("tool_calls"), list) and first["tool_calls"]:
+            return True
+        if first_role != "user":
+            return False
+
+        segment = messages[: Session._leading_segment_end(messages)]
+        visible_tool_call_ids: set[str] = set()
+
+        for msg in segment:
+            if msg.get("role") == "assistant" and isinstance(msg.get("tool_calls"), list):
+                for tc in msg["tool_calls"]:
+                    if isinstance(tc, dict) and tc.get("id"):
+                        visible_tool_call_ids.add(str(tc["id"]))
+            elif msg.get("role") == "tool":
+                tool_call_id = msg.get("tool_call_id")
+                if tool_call_id and str(tool_call_id) not in visible_tool_call_ids:
+                    return True
+
+        return False
+
+    @classmethod
+    def _repair_truncated_history(cls, messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """Drop broken leading segments until history starts at a safe boundary."""
+        repaired = list(messages)
+        while repaired and cls._leading_segment_is_broken(repaired):
+            segment_end = cls._leading_segment_end(repaired)
+            if segment_end <= 0:
+                break
+            repaired = repaired[segment_end:]
+        return repaired
+
     def get_history(self, max_messages: int = 500) -> list[dict[str, Any]]:
         """Return recent messages for LLM context."""
         sliced = self.messages[-max_messages:]
-
-        # Drop leading non-user messages to avoid orphaned tool_result blocks
-        for i, m in enumerate(sliced):
-            if m.get("role") == "user":
-                sliced = sliced[i:]
-                break
+        sliced = self._repair_truncated_history(sliced)
 
         out: list[dict[str, Any]] = []
         for m in sliced:

@@ -192,6 +192,40 @@ async def test_system_message_uses_background_task_fallback_when_model_returns_n
 
 
 @pytest.mark.asyncio
+async def test_system_message_uses_background_task_fallback_for_low_value_model_reply(
+    agent_loop, mock_provider
+):
+    """Inner-loop failure text should not leak through as the user-facing background update."""
+    mock_provider.chat.return_value = LLMResponse(
+        content=(
+            "I detected repeated tool calls without progress and stopped to avoid a loop. "
+            "Please refine the request or provide more constraints."
+        )
+    )
+
+    response = await agent_loop._process_message(
+        InboundMessage(
+            channel="system",
+            sender_id="subagent",
+            chat_id="cli:direct",
+            content=(
+                "[Subagent 'nostr' completed successfully]\n\n"
+                "Task: Research Nostr integration\n\n"
+                "Result:\n"
+                "Drafted a relay strategy and zap-flow summary in "
+                "projects/bitcoin-radio-station/subtask_outputs/nostr_integration_summary.md."
+            ),
+        )
+    )
+
+    assert response is not None
+    assert "repeated tool calls" not in response.content.lower()
+    assert "please refine the request" not in response.content.lower()
+    assert "finished in the background" in response.content
+    assert "nostr integration" in response.content.lower()
+
+
+@pytest.mark.asyncio
 async def test_run_agent_loop_reprompts_intent_only_post_tool_response(agent_loop, mock_provider):
     """Intent-only text after tool use should not be accepted as final."""
     mock_provider.chat.side_effect = [
@@ -327,6 +361,22 @@ def test_commit_candidate_to_memory_rejects_low_scrutiny_decision(agent_loop):
         content="We should use framework X.",
         confidence=0.8,
         decision_rationale=None,
+    )
+
+    agent_loop._commit_candidate_to_memory(candidate)
+
+    decisions = agent_loop.memory.list_memories("decisions")
+    assert decisions == []
+
+
+def test_commit_candidate_to_memory_rejects_recommendation_report_decision(agent_loop):
+    """Distilled decisions should not store assistant-authored reports or recommendations."""
+    candidate = AtomicCandidate(
+        type=CandidateType.DECISION,
+        title="Local-First Note Assistant Architecture Recommendation",
+        content="This report recommends a local-first architecture we should use.",
+        confidence=0.97,
+        decision_rationale="Recommendation based on the trade-off analysis in the report.",
     )
 
     agent_loop._commit_candidate_to_memory(candidate)

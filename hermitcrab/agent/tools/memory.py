@@ -252,7 +252,8 @@ class WriteDecisionTool(Tool):
     @property
     def description(self) -> str:
         return (
-            "Save a decision to memory (architectural choices, trade-offs, locked decisions). "
+            "Save a decision to memory (explicit user-confirmed locked choices only). "
+            "Do not use this for assistant recommendations, analysis, reports, or tentative options. "
             "Use wikilinks [[Like This]] to connect to related [[Goals]], [[Facts]], or other [[Decisions]]."
         )
 
@@ -267,7 +268,11 @@ class WriteDecisionTool(Tool):
                 },
                 "content": {
                     "type": "string",
-                    "description": "Decision content. Use wikilinks [[Like This]] to connect related memories."
+                    "description": (
+                        "Decision content describing the committed choice. "
+                        "Do not store recommendations or reports here. "
+                        "Use wikilinks [[Like This]] to connect related memories."
+                    )
                 },
                 "tags": {
                     "type": "array",
@@ -281,7 +286,7 @@ class WriteDecisionTool(Tool):
                 },
                 "rationale": {
                     "type": "string",
-                    "description": "Reasoning behind the decision"
+                    "description": "Reasoning behind the committed decision"
                 },
                 "supersedes": {
                     "type": "string",
