@@ -10,7 +10,7 @@ from typing import Any
 
 from hermitcrab.agent.memory import MemoryStore
 from hermitcrab.agent.skills import SkillsLoader
-from hermitcrab.config.schema import ModelAliasConfig
+from hermitcrab.config.schema import ModelAliasConfig, NamedModelConfig
 from hermitcrab.utils.helpers import safe_filename
 
 
@@ -31,6 +31,7 @@ class ContextBuilder:
         memory_max_items_per_category: int = 25,
         memory_max_item_chars: int = 600,
         model_aliases: dict[str, str | ModelAliasConfig] | None = None,
+        named_models: dict[str, NamedModelConfig] | None = None,
     ):
         self.workspace = workspace
         self.memory = MemoryStore(workspace)
@@ -39,6 +40,7 @@ class ContextBuilder:
         self.memory_max_items_per_category = memory_max_items_per_category
         self.memory_max_item_chars = memory_max_item_chars
         self.model_aliases = model_aliases or {}
+        self.named_models = named_models or {}
 
     def build_system_prompt(
         self,
@@ -134,21 +136,38 @@ Skills with `available="false"` need dependencies installed first.
         system = platform.system()
         runtime = f"{'macOS' if system == 'Darwin' else system} {platform.machine()}, Python {platform.python_version()}"
 
-        # Format model aliases if configured
+        # Format named models and aliases for subagent selection hints.
+        named_section = ""
+        if self.named_models:
+            named_lines = []
+            for name, model in self.named_models.items():
+                details = model.model
+                if model.reasoning_effort is not None:
+                    details += f" (reasoning: {model.reasoning_effort})"
+                named_lines.append(f"- **{name}**: {details}")
+            named_section = "\n".join(named_lines)
+        else:
+            named_section = "- No named models configured"
+
         aliases_section = ""
         if self.model_aliases:
             alias_lines = []
             for alias, model in self.model_aliases.items():
                 if isinstance(model, ModelAliasConfig):
                     details = model.model
+                    if model.model in self.named_models:
+                        details = f"{model.model} -> {self.named_models[model.model].model}"
                     if model.effective_reasoning_effort() == "none":
                         details += " (thinking disabled)"
                     alias_lines.append(f"- **{alias}**: {details}")
                 else:
-                    alias_lines.append(f"- **{alias}**: {model}")
+                    details = model
+                    if model in self.named_models:
+                        details = f"{model} -> {self.named_models[model].model}"
+                    alias_lines.append(f"- **{alias}**: {details}")
             aliases_section = "\n".join(alias_lines)
         else:
-            aliases_section = "- No custom aliases configured (use named models or full model names)"
+            aliases_section = "- No custom aliases configured"
 
         return f"""# hermitcrab
 
@@ -189,12 +208,17 @@ Reply directly for normal conversation. Only use `message` to send to a specific
 - If memory might matter, search it first. Do not guess or invent memory content.
 
 ## Models For Subagents
-You can spawn subagents with configured named models or optional aliases. Choose the right model for the job:
+You can spawn subagents with configured named models, optional aliases, or full model names. Choose the right model for the job:
+
+Named models:
+{named_section}
+
+Aliases:
 {aliases_section}
 
 To spawn a subagent with a specific model:
+- spawn(task="...", label="...", model="fast_model")
 - spawn(task="...", label="...", model="qwen")
-- spawn(task="...", label="...", model="local")
 
 Use subagents for complex, time-consuming, or specialized tasks. For substantial coding or multi-file implementation work, prefer `spawn()` and stay responsive as the coordinator. When delegating, be explicit about the desired outcome, files to inspect or edit, constraints, and what the subagent should report back."""
 

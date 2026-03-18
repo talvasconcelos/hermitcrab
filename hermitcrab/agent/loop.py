@@ -74,7 +74,7 @@ from hermitcrab.agent.tools.spawn import SpawnTool
 from hermitcrab.agent.tools.web import WebFetchTool, WebSearchTool
 from hermitcrab.bus.events import InboundMessage, OutboundMessage
 from hermitcrab.bus.queue import MessageBus
-from hermitcrab.config.schema import ExecToolConfig, ModelAliasConfig
+from hermitcrab.config.schema import ExecToolConfig, ModelAliasConfig, NamedModelConfig
 from hermitcrab.providers.base import LLMProvider, ToolCallRequest
 from hermitcrab.session.manager import Session, SessionManager
 from hermitcrab.utils.helpers import ensure_dir, safe_filename
@@ -168,6 +168,7 @@ class AgentLoop:
         distillation_enabled: bool = False,
         # Optional: model aliases (friendly names like "qwen", "local")
         model_aliases: dict[str, str | ModelAliasConfig] | None = None,
+        named_models: dict[str, NamedModelConfig] | None = None,
         # Optional: reasoning effort config (loaded from config)
         reasoning_effort_config: dict[str, Any] | None = None,
         inactivity_timeout_s: int = INACTIVITY_TIMEOUT_S,
@@ -214,6 +215,7 @@ class AgentLoop:
                 JobClass.SUBAGENT: self.model,
             }
         self.model_aliases = model_aliases or {}
+        self.named_models = named_models or {}
 
         # Reasoning effort configuration (default: "medium")
         self._reasoning_effort = (
@@ -228,6 +230,7 @@ class AgentLoop:
             memory_max_items_per_category=memory_context_max_items_per_category,
             memory_max_item_chars=memory_context_max_item_chars,
             model_aliases=self.model_aliases,
+            named_models=self.named_models,
         )
         self.sessions = session_manager or SessionManager(workspace)
         self.journal = JournalStore(workspace)
@@ -245,6 +248,7 @@ class AgentLoop:
             exec_config=self.exec_config,
             restrict_to_workspace=restrict_to_workspace,
             model_aliases=self.model_aliases,
+            named_models=self.named_models,
         )
 
         # Initialize reflection service

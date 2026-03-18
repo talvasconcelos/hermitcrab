@@ -1,11 +1,13 @@
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
+import httpx
 import pytest
 
 from hermitcrab.providers.base import LLMProvider, LLMResponse
 from hermitcrab.providers.custom_provider import CustomProvider
 from hermitcrab.providers.litellm_provider import LiteLLMProvider
+from hermitcrab.providers.ollama_provider import OllamaProvider
 
 
 class StubProvider(LLMProvider):
@@ -367,6 +369,111 @@ async def test_litellm_provider_applies_named_model_provider_options() -> None:
     assert mock_completion.await_args.kwargs["model"] == "ollama/qwen2.5-coder:7b"
     assert mock_completion.await_args.kwargs["num_ctx"] == 16384
     assert mock_completion.await_args.kwargs["reasoning_effort"] == "low"
+
+
+def test_ollama_provider_normalizes_native_api_base() -> None:
+    assert OllamaProvider.normalize_api_base("http://localhost:11434/v1/") == "http://localhost:11434"
+    assert OllamaProvider.normalize_api_base("http://localhost:11434///") == "http://localhost:11434"
+
+
+def test_ollama_provider_preserves_large_integer_tool_arguments() -> None:
+    content, tool_calls, finish_reason, usage, reasoning = OllamaProvider.parse_ndjson_events(
+        [
+            b'{"message":{"tool_calls":[{"function":{"name":"read_memory","arguments":{"chat_id":9223372036854775808}}}]},"done":false}',
+            b'{"message":{"content":"ok"},"done":true,"done_reason":"stop","prompt_eval_count":10,"eval_count":2}',
+        ]
+    )
+
+    assert content == "ok"
+    assert finish_reason == "stop"
+    assert usage == {"prompt_tokens": 10, "completion_tokens": 2, "total_tokens": 12}
+    assert reasoning is None
+    assert tool_calls[0].arguments["chat_id"] == 9223372036854775808
+    assert isinstance(tool_calls[0].arguments["chat_id"], int)
+
+
+@pytest.mark.asyncio
+async def test_ollama_provider_formats_timeout_errors() -> None:
+    provider = OllamaProvider(api_base="http://localhost:11434", default_model="ollama/qwen0.8:latest")
+
+    class _TimeoutStream:
+        async def __aenter__(self):
+            raise httpx.ReadTimeout("timed out")
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+    class _StreamClient:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        def stream(self, *args, **kwargs):
+            return _TimeoutStream()
+
+    with patch("hermitcrab.providers.ollama_provider.httpx.AsyncClient", return_value=_StreamClient()):
+        response = await provider.chat(messages=[{"role": "user", "content": "hello"}])
+
+    assert response.finish_reason == "error"
+    assert response.content == (
+        "Error calling Ollama: request timed out while waiting for Ollama; "
+        "local model loads can take a while"
+    )
+
+
+@pytest.mark.asyncio
+async def test_ollama_provider_forwards_provider_options_into_ollama_options() -> None:
+    captured_json = {}
+
+    class _Response:
+        status_code = 200
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def aiter_lines(self):
+            yield (
+                '{"message":{"content":"ok"},"done":true,"done_reason":"stop",'
+                '"prompt_eval_count":1,"eval_count":1}'
+            )
+
+    class _Client:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        def stream(self, method, url, headers=None, json=None):
+            captured_json["body"] = json
+            return _Response()
+
+    provider = OllamaProvider(
+        api_base="http://localhost:11434",
+        default_model="fast_local",
+        request_config_resolver=lambda model: {
+            "model": "ollama/qwen0.8:latest",
+            "api_base": "http://localhost:11434",
+            "provider_name": "ollama",
+            "provider_options": {"num_ctx": 8192, "num_thread": 4},
+            "reasoning_effort": None,
+        },
+    )
+
+    with patch("hermitcrab.providers.ollama_provider.httpx.AsyncClient", _Client):
+        response = await provider.chat(messages=[{"role": "user", "content": "hello"}], model="fast_local")
+
+    assert response.content == "ok"
+    assert captured_json["body"]["options"]["num_ctx"] == 8192
+    assert captured_json["body"]["options"]["num_thread"] == 4
 
 
 def test_custom_provider_supports_legacy_function_call() -> None:

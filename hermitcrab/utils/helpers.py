@@ -56,6 +56,7 @@ class ResolvedModelAlias:
     model: str | None
     reasoning_effort: str | None = None
     alias: str | None = None
+    request_model: str | None = None
 
 
 def resolve_named_model(
@@ -64,23 +65,24 @@ def resolve_named_model(
 ) -> ResolvedModelAlias:
     """Resolve a named model reference to its configured model and metadata."""
     if model is None:
-        return ResolvedModelAlias(model=None)
+        return ResolvedModelAlias(model=None, request_model=None)
 
     if not models:
-        return ResolvedModelAlias(model=model)
+        return ResolvedModelAlias(model=model, request_model=model)
 
     model_ref = model.strip()
     if not model_ref:
-        return ResolvedModelAlias(model=model_ref)
+        return ResolvedModelAlias(model=model_ref, request_model=model_ref)
 
     named = models.get(model_ref)
     if not named:
-        return ResolvedModelAlias(model=model)
+        return ResolvedModelAlias(model=model, request_model=model_ref)
 
     return ResolvedModelAlias(
         model=named.model,
         reasoning_effort=named.reasoning_effort,
         alias=model_ref,
+        request_model=model_ref,
     )
 
 
@@ -111,12 +113,14 @@ def resolve_model_alias_config(
                 model=named.model,
                 reasoning_effort=resolved.effective_reasoning_effort() or named.reasoning_effort,
                 alias=alias_lower,
+                request_model=named.request_model or named.model,
             )
         named = resolve_named_model(resolved, named_models)
         return ResolvedModelAlias(
             model=named.model,
             reasoning_effort=named.reasoning_effort,
             alias=alias_lower,
+            request_model=named.request_model or named.model,
         )
 
     return resolve_named_model(alias_or_model, named_models)

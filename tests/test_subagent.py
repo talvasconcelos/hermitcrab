@@ -5,7 +5,7 @@ import pytest
 
 from hermitcrab.agent.subagent import SubagentManager
 from hermitcrab.bus.queue import MessageBus
-from hermitcrab.config.schema import ExecToolConfig, ModelAliasConfig
+from hermitcrab.config.schema import ExecToolConfig, ModelAliasConfig, NamedModelConfig
 from hermitcrab.providers.base import LLMResponse, ToolCallRequest
 
 
@@ -124,6 +124,47 @@ async def test_subagent_spawn_named_model_alias_resolves_underlying_model(tmp_pa
     provider.chat_with_retry.assert_awaited()
     assert provider.chat_with_retry.await_args.kwargs["model"] == "ollama/qwen2.5-coder:7b"
     assert provider.chat_with_retry.await_args.kwargs["reasoning_effort"] == "low"
+
+
+@pytest.mark.asyncio
+async def test_subagent_spawn_named_model_resolves_without_alias(tmp_path):
+    provider = MagicMock()
+    provider.get_default_model = MagicMock(return_value="anthropic/claude-opus-4-5")
+    provider.chat_with_retry = AsyncMock(return_value=LLMResponse(content="done"))
+
+    bus = MessageBus()
+    bus.publish_inbound = AsyncMock()
+
+    manager = SubagentManager(
+        provider=provider,
+        workspace=tmp_path,
+        bus=bus,
+        model="anthropic/claude-opus-4-5",
+        exec_config=ExecToolConfig(),
+        named_models={
+            "fast_model": NamedModelConfig(
+                model="ollama/granite3.2:2b",
+                reasoning_effort="none",
+            )
+        },
+    )
+
+    await manager.spawn(
+        task="List open tasks",
+        label="tasks",
+        origin_channel="cli",
+        origin_chat_id="direct",
+        model="fast_model",
+    )
+
+    for _ in range(20):
+        if manager.get_running_count() == 0:
+            break
+        await asyncio.sleep(0)
+
+    provider.chat_with_retry.assert_awaited()
+    assert provider.chat_with_retry.await_args.kwargs["model"] == "fast_model"
+    assert provider.chat_with_retry.await_args.kwargs["reasoning_effort"] == "none"
 
 
 @pytest.mark.asyncio

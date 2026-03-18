@@ -2,6 +2,7 @@
 
 from hermitcrab.providers.base import LLMProvider, LLMResponse
 from hermitcrab.providers.litellm_provider import LiteLLMProvider
+from hermitcrab.providers.ollama_provider import OllamaProvider
 from hermitcrab.providers.openai_codex_provider import OpenAICodexProvider
 
-__all__ = ["LLMProvider", "LLMResponse", "LiteLLMProvider", "OpenAICodexProvider"]
+__all__ = ["LLMProvider", "LLMResponse", "LiteLLMProvider", "OllamaProvider", "OpenAICodexProvider"]
