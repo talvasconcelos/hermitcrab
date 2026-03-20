@@ -85,9 +85,9 @@ These points reflect the current state of the codebase and should override older
 - Interactive CLI input supports multiline entry with `Ctrl+J`.
 
 ## Current Branch Focus
-Active branch: `feat/memory-retrieval-quality`
+Active branch: `feat/learning-quality`
 
-This branch is focused on memory quality and coordinator reliability, not new product surface area.
+This branch is focused on journal durability, reflection quality, and promotion of durable learnings into persistent context files without adding a heavy subsystem.
 
 Implemented on this branch so far:
 
@@ -99,6 +99,14 @@ Implemented on this branch so far:
 - reflection validation hardening and duplicate/contradiction guards
 - suppression of blank progress updates and low-value background-task replies
 - deterministic reflection override for high-priority delegation/ownership corrections
+
+Planned on this branch:
+
+- strengthen the session digest so journal synthesis has durable structure instead of vague event narration
+- redesign reflection output around observation, impact, lesson, recommended behavior, scope, confidence, and promotion target
+- promote only high-confidence durable learnings into `AGENTS.md`, `SOUL.md`, `TOOLS.md`, or `IDENTITY.md` when they belong there
+- reduce brittle English-specific marker logic where structural grounding or LLM judgment is more appropriate
+- trim low-signal tests when they are clearly implementation bloat rather than behavior protection
 
 Current branch test status:
 
@@ -120,10 +128,12 @@ Do not use this file as a raw journal or a dumping ground. Prefer concise, durab
 Current continuity points to preserve:
 
 - The user expects new sessions to recover branch direction and recent progress from `AGENTS.md` rather than requiring the same re-explanation in chat.
+- Reflections are not just summaries; they should become real learning material, and high-confidence durable lessons should be promoted into the correct persistent context file when viable.
 - Coordinator failures should be treated as product issues to fix at the root cause, not by stacking narrow prompt band-aids.
 - Broad tasks should stay owned by the main agent; subagents are for bounded execution work, not for handing off the whole deliverable.
 - Prompt/context changes should preserve strong recent-conversation awareness; avoid bloated or duplicated bootstrap prompt sections that drown out the live exchange.
 - The user wants the main agent to behave as a visible coordinator for substantial work: plan first, delegate bounded research/execution where appropriate, stay responsive, and avoid filler or repeated apology loops.
+- The user wants hardcoded English-specific marker heuristics reduced where structural evidence or model judgment can do the job more cleanly.
 
 ## Coordinator And Subagent Policy
 Broad or strategic tasks must remain owned by the main agent.
@@ -145,7 +155,7 @@ Expected behavior:
 Do not offload an entire strategic deliverable to a weaker subagent just because delegation is available.
 
 ## Memory, Journal, And Reflection Direction
-The current milestone is memory retrieval quality and better learning extraction.
+The current milestone is learning quality: better journals, better reflections, and cleaner promotion of durable learnings.
 
 What has already improved:
 
@@ -156,16 +166,18 @@ What has already improved:
 
 What still needs improvement:
 
-- journal synthesis should rely less on brittle phrase markers
-- reflection priority should become more structural and less English-specific
-- coordinator progress and recovery behavior should become more deterministic
-- memory retrieval should keep improving without turning into a heavy subsystem
+- journal entries should preserve the user goal, artifacts changed, decisions made, outcomes, and open loops so they remain useful days later
+- reflection output should become reusable learning material rather than lightweight session paraphrase
+- reflection promotion should route durable learnings into the correct persistent file instead of leaving everything in volatile context
+- English-specific marker logic should keep shrinking when structural grounding can replace it
 
 Near-term direction:
 
-1. Replace narrow hardcoded marker logic with broader structural scoring where feasible.
-2. Make correction severity and recovery impact matter more than exact wording.
-3. Keep user-specific preferences in memory, but keep general coordinator policy in product logic.
+1. Strengthen the deterministic session digest that feeds journal and reflection work.
+2. Make journal synthesis and fallback produce useful audit records, not vague narration.
+3. Redesign reflection schema around observation, impact, lesson, recommended behavior, scope, confidence, and promotion target.
+4. Promote only high-confidence durable learnings into `AGENTS.md`, `SOUL.md`, `TOOLS.md`, or `IDENTITY.md`.
+5. Keep user-specific preferences in memory unless they are truly durable assistant-wide context.
 
 ## Provider And Tooling Takeaways
 Recent implementation and debugging takeaways:
@@ -196,14 +208,14 @@ This is especially useful for:
 - lightweight memory and orchestration safeguards
 
 ## Next Targets
-After stabilizing the current memory-quality branch, the next likely targets are:
+After stabilizing this learning-quality branch, the next likely targets are:
 
-1. Better coordinator/task handoff clarity between main agent and subagents
-2. Smarter journal and reflection prioritization based on session structure
-3. NIP-17 and thread-aware messaging improvements for Nostr workflows
-4. Test-suite rationalization: keep high-value regressions, merge overlapping cases, and remove low-signal implementation-specific tests
-5. Further memory retrieval gains only if they stay lightweight and testable
-6. Add deterministic coordinator execution-state handling for plan/delegate/wait/fallback/complete so progress updates and recovery stay consistent
+1. Better coordinator/task handoff clarity between main agent and subagents, especially around delegated progress and recovery
+2. Smarter journal and reflection prioritization based on session structure instead of brittle markers
+3. Test-suite rationalization: keep high-value regressions, merge overlaps, and remove low-signal implementation-specific tests
+4. Further memory retrieval gains only if they stay lightweight and easy to validate
+5. Deterministic coordinator execution-state handling for plan/delegate/wait/fallback/complete across more surfaces
+6. NIP-17 and thread-aware messaging improvements for Nostr workflows once learning-quality work settles
 
 ## Working Style
 When deciding what to do next:
