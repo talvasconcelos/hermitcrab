@@ -56,11 +56,6 @@ from hermitcrab.agent.message_preparation import (
 from hermitcrab.agent.reflection import ReflectionService
 from hermitcrab.agent.session_lifecycle import SessionLifecycleManager
 from hermitcrab.agent.subagent import SubagentManager
-from hermitcrab.agent.tool_call_recovery import (
-    coerce_inline_tool_calls,
-    normalize_tool_calls,
-    parse_xml_tool_calls,
-)
 from hermitcrab.agent.tools.cron import CronTool
 from hermitcrab.agent.tools.filesystem import EditFileTool, ListDirTool, ReadFileTool, WriteFileTool
 from hermitcrab.agent.tools.knowledge import (
@@ -89,7 +84,7 @@ from hermitcrab.agent.turn_runner import TurnRunner, TurnRunnerConfig
 from hermitcrab.bus.events import InboundMessage, OutboundMessage
 from hermitcrab.bus.queue import MessageBus
 from hermitcrab.config.schema import ExecToolConfig, ModelAliasConfig, NamedModelConfig
-from hermitcrab.providers.base import LLMProvider, ToolCallRequest
+from hermitcrab.providers.base import LLMProvider
 from hermitcrab.session.manager import Session, SessionManager
 
 if TYPE_CHECKING:
@@ -442,27 +437,6 @@ class AgentLoop:
             reasoning_effort=reasoning_effort,
         )
 
-    def _coerce_inline_tool_calls(
-        self, content: str | None
-    ) -> tuple[str | None, list[ToolCallRequest]]:
-        """Recover a raw JSON tool call appended to assistant text.
-
-        Some weaker models emit a plain-text JSON object such as
-        `{"name":"read_memory","arguments":{...}}` instead of using structured
-        tool-calling. Others emit XML-like wrappers such as
-        `<minimax:tool_call><invoke name="list_dir">...</invoke></minimax:tool_call>`.
-        Recover only narrow cases that cleanly parse and match registered tools.
-        """
-        return coerce_inline_tool_calls(content, self.tools.has)
-
-    def _normalize_tool_calls(self, tool_calls: list[ToolCallRequest]) -> list[ToolCallRequest]:
-        """Repair provider quirks where tool arguments arrive as JSON strings."""
-        return normalize_tool_calls(tool_calls)
-
-    def _parse_xml_tool_calls(self, body: str) -> list[ToolCallRequest]:
-        """Recover XML-like inline tool calls from assistant text."""
-        return parse_xml_tool_calls(body, self.tools.has)
-
     def _schedule_background(
         self,
         coro: Awaitable,
@@ -630,15 +604,6 @@ class AgentLoop:
         """
         await self._background_jobs.distill_session(session, JobClass.DISTILLATION)
 
-    @staticmethod
-    def _iter_strings(obj: Any) -> list[str]:
-        """Collect string values recursively from nested objects."""
-        return BackgroundJobManager.iter_strings(obj)
-
-    def _tool_call_targets_scratchpad(self, tc: dict[str, Any], session_key: str) -> bool:
-        """Return True if tool call arguments reference current session scratchpad."""
-        return self._background_jobs.tool_call_targets_scratchpad(tc, session_key)
-
     def _filter_messages_for_distillation(
         self,
         messages: list[dict[str, Any]],
@@ -684,28 +649,6 @@ class AgentLoop:
             - This is Tier 0 logic - deterministic, Python-authoritative
         """
         self._background_jobs.commit_candidate_to_memory(candidate)
-
-    @staticmethod
-    def _normalize_memory_text(text: str) -> str:
-        """Normalize text for conservative duplicate checks."""
-        return BackgroundJobManager.normalize_memory_text(text)
-
-    def _is_near_duplicate_memory_item(self, candidate: AtomicCandidate, existing: Any) -> bool:
-        """Return True when the candidate is effectively already stored."""
-        return self._background_jobs.is_near_duplicate_memory_item(candidate, existing)
-
-    def _find_existing_memory_duplicates(self, candidate: AtomicCandidate) -> list[Any]:
-        """Search the target category for likely duplicates."""
-        return self._background_jobs.find_existing_memory_duplicates(candidate)
-
-    def _should_commit_distilled_candidate(self, candidate: AtomicCandidate) -> bool:
-        """Apply conservative distillation acceptance rules before writing memory."""
-        return self._background_jobs.should_commit_distilled_candidate(candidate)
-
-    @staticmethod
-    def _looks_like_non_decision_artifact(candidate: AtomicCandidate) -> bool:
-        """Reject distilled decisions that read like reports, placeholders, or suggestions."""
-        return BackgroundJobManager.looks_like_non_decision_artifact(candidate)
 
     async def _reflect_on_session(self, session: Session) -> None:
         """
