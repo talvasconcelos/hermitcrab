@@ -28,26 +28,43 @@ import asyncio
 import inspect
 import json
 import re
-import time
-from collections import defaultdict
 from contextlib import AsyncExitStack
-from dataclasses import dataclass
-from datetime import datetime, timezone
-from difflib import SequenceMatcher
 from enum import Enum
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Awaitable, Callable
 
-import json_repair
 from loguru import logger
 
+from hermitcrab.agent.background_jobs import BackgroundJobManager, SessionDigest
+from hermitcrab.agent.background_messages import (
+    fallback_system_task_summary,
+    is_low_value_system_reply,
+)
 from hermitcrab.agent.context import ContextBuilder
-from hermitcrab.agent.distillation import AtomicCandidate, CandidateType
+from hermitcrab.agent.distillation import AtomicCandidate
+from hermitcrab.agent.execution_state import ExecutionPhase, ExecutionStateTracker
 from hermitcrab.agent.journal import JournalStore
 from hermitcrab.agent.knowledge import KnowledgeStore
 from hermitcrab.agent.memory import MemoryStore
+from hermitcrab.agent.message_preparation import (
+    build_delegation_hint,
+    clean_snippet,
+    extract_subagent_task,
+    is_empty_response,
+    is_intent_only_response,
+    is_low_signal_journal_body,
+    is_subagent_completion_prompt,
+    is_transition_assistant_message,
+    should_hint_subagent_delegation,
+)
 from hermitcrab.agent.reflection import ReflectionService
+from hermitcrab.agent.session_lifecycle import SessionLifecycleManager
 from hermitcrab.agent.subagent import SubagentManager
+from hermitcrab.agent.tool_call_recovery import (
+    coerce_inline_tool_calls,
+    normalize_tool_calls,
+    parse_xml_tool_calls,
+)
 from hermitcrab.agent.tools.cron import CronTool
 from hermitcrab.agent.tools.filesystem import EditFileTool, ListDirTool, ReadFileTool, WriteFileTool
 from hermitcrab.agent.tools.knowledge import (
@@ -72,12 +89,12 @@ from hermitcrab.agent.tools.registry import ToolRegistry
 from hermitcrab.agent.tools.shell import ExecTool
 from hermitcrab.agent.tools.spawn import SpawnTool
 from hermitcrab.agent.tools.web import WebFetchTool, WebSearchTool
+from hermitcrab.agent.turn_runner import TurnRunner, TurnRunnerConfig
 from hermitcrab.bus.events import InboundMessage, OutboundMessage
 from hermitcrab.bus.queue import MessageBus
 from hermitcrab.config.schema import ExecToolConfig, ModelAliasConfig, NamedModelConfig
 from hermitcrab.providers.base import LLMProvider, ToolCallRequest
 from hermitcrab.session.manager import Session, SessionManager
-from hermitcrab.utils.helpers import ensure_dir, safe_filename
 
 if TYPE_CHECKING:
     from hermitcrab.config.schema import ChannelsConfig
@@ -105,23 +122,6 @@ class JobClass(str, Enum):
 
 # Session inactivity timeout (30 minutes)
 INACTIVITY_TIMEOUT_S = 30 * 60
-
-
-@dataclass
-class SessionDigest:
-    """Deterministic summary of a session for background cognition."""
-
-    session_key: str
-    channel: str
-    chat_id: str
-    first_timestamp: str
-    last_timestamp: str
-    event_lines: list[str]
-    user_requests: list[str]
-    user_corrections: list[str]
-    outcomes: list[str]
-    failures: list[str]
-    wikilinks: list[str]
 
 
 class AgentLoop:
@@ -237,6 +237,7 @@ class AgentLoop:
         self.memory = MemoryStore(workspace)
         self.knowledge = KnowledgeStore(workspace)
         self.tools = ToolRegistry()
+        self.execution_state = ExecutionStateTracker()
         self.subagents = SubagentManager(
             provider=provider,
             workspace=workspace,
@@ -268,15 +269,26 @@ class AgentLoop:
         self._mcp_stack: AsyncExitStack | None = None
         self._mcp_connected = False
         self._mcp_connecting = False
-        self._scratchpad_dir = ensure_dir(workspace / "scratchpads")
-        # Track background tasks for cleanup (fire-and-forget, but track for shutdown)
-        self._background_tasks: set[asyncio.Task] = set()
-        # Session timeout tracking (checked on each message)
-        self._session_timers: dict[str, datetime] = {}
-        self._session_active_turns: defaultdict[str, int] = defaultdict(int)
-        self._session_end_in_progress: set[str] = set()
-        # Per-session lock to prevent concurrent turn processing races
-        self._session_locks: defaultdict[str, asyncio.Lock] = defaultdict(asyncio.Lock)
+        self._background_jobs = BackgroundJobManager(
+            workspace=workspace,
+            journal=self.journal,
+            memory=self.memory,
+            reflection_service=self._reflection_service,
+            chat_callable=self._chat_with_retry,
+            get_model_for_job=self._get_model_for_job,
+            strip_think=self._strip_think,
+            reasoning_effort=self._reasoning_effort,
+        )
+        self._background_tasks = self._background_jobs._background_tasks
+        self._session_lifecycle = SessionLifecycleManager(
+            workspace=workspace,
+            sessions=self.sessions,
+            inactivity_timeout_s=self.inactivity_timeout_s,
+        )
+        self._session_timers = self._session_lifecycle.session_timers
+        self._session_active_turns = self._session_lifecycle.session_active_turns
+        self._session_end_in_progress = self._session_lifecycle.session_end_in_progress
+        self._session_locks = self._session_lifecycle.session_locks
         self._register_default_tools()
 
     def _register_default_tools(self) -> None:
@@ -381,22 +393,12 @@ class AgentLoop:
     @staticmethod
     def _is_intent_only_response(text: str | None) -> bool:
         """Detect non-final assistant replies that only narrate the next step."""
-        if not text:
-            return False
-        normalized = " ".join(text.strip().lower().split())
-        if not normalized:
-            return False
-        return bool(
-            re.match(
-                r"^(let me|i(?:'ll| will)|first[, ]+let me|now[, ]+let me|next[, ]+i(?:'ll| will)|i am going to)\b",
-                normalized,
-            )
-        )
+        return is_intent_only_response(text)
 
     @staticmethod
     def _is_empty_response(text: str | None) -> bool:
         """Treat blank or whitespace-only replies as missing output."""
-        return text is None or not text.strip()
+        return is_empty_response(text)
 
     def _get_model_for_job(self, job_class: JobClass) -> str | None:
         """
@@ -422,105 +424,25 @@ class AgentLoop:
 
     def _should_hint_subagent_delegation(self, user_message: str) -> bool:
         """Return True when the request looks like substantial implementation grunt work."""
-        if not self.tools.has("spawn"):
-            return False
-
-        subagent_model = self._job_models.get(JobClass.SUBAGENT)
-        if not subagent_model:
-            return False
-
-        normalized = " ".join(user_message.lower().split())
-        if not normalized:
-            return False
-
-        action_markers = (
-            "build",
-            "create",
-            "implement",
-            "refactor",
-            "update",
-            "rewrite",
-            "start with",
-            "work on",
-        )
-        scope_markers = (
-            "project",
-            "folder",
-            "html",
-            "css",
-            "javascript",
-            "app.js",
-            "index.html",
-            "web-chat",
-            "page",
-            "ui",
-            "frontend",
-            "files",
-        )
-
-        return any(marker in normalized for marker in action_markers) and any(
-            marker in normalized for marker in scope_markers
+        return should_hint_subagent_delegation(
+            user_message,
+            has_spawn_tool=self.tools.has("spawn"),
+            subagent_model=self._job_models.get(JobClass.SUBAGENT),
         )
 
     def _build_delegation_hint(self) -> str:
         """Build a deterministic reminder to delegate substantial implementation work."""
-        subagent_model = self._job_models.get(JobClass.SUBAGENT) or self.model
-        return (
-            "This request looks like substantial implementation grunt work. "
-            "Prefer using spawn() to delegate the execution to a subagent and keep the main "
-            f"agent responsive. Use the configured subagent model `{subagent_model}` or an "
-            "appropriate alias when delegating, unless there is a clear reason to stay in the "
-            "main agent."
-        )
+        return build_delegation_hint(self._job_models.get(JobClass.SUBAGENT) or self.model)
 
     @staticmethod
     def _fallback_system_task_summary(content: str) -> str:
         """Create a deterministic fallback summary for background task results."""
-        lines = [line.strip() for line in content.splitlines() if line.strip()]
-        if not lines:
-            return "Background task finished."
-
-        label = "Background task"
-        task = ""
-        result = ""
-
-        for idx, line in enumerate(lines):
-            if line.startswith("[Subagent '") and "' " in line:
-                label = line.strip("[]")
-            elif line.startswith("Task:"):
-                task = line[5:].strip()
-            elif line == "Result:":
-                result = "\n".join(lines[idx + 1 :]).strip()
-                break
-
-        if result:
-            summary = result.splitlines()[0].strip()
-            summary = summary[:280]
-            if task:
-                return (
-                    f"{label} finished in the background. I reviewed the result for '{task}'. "
-                    f"{summary}"
-                )
-            return f"{label} finished in the background. {summary}"
-
-        if task:
-            return f"{label} finished in the background. The task '{task}' has completed."
-
-        return f"{label} finished in the background."
+        return fallback_system_task_summary(content)
 
     @staticmethod
     def _is_low_value_system_reply(content: str | None) -> bool:
         """Detect inner-loop failure text that should not be surfaced as a background-task answer."""
-        normalized = (content or "").strip().lower()
-        if not normalized:
-            return True
-        low_value_markers = (
-            "i detected repeated tool calls without progress",
-            "please refine the request or provide more constraints",
-            "i've completed processing but have no response to give",
-            "i reached the maximum number of tool call iterations",
-        )
-        return any(marker in normalized for marker in low_value_markers)
+        return is_low_value_system_reply(content)
 
     async def _chat_with_retry(
         self,
@@ -556,12 +478,6 @@ class AgentLoop:
             reasoning_effort=reasoning_effort,
         )
 
-    @staticmethod
-    def _tool_cycle_signature(tool_calls: list) -> str:
-        """Create deterministic signature for a batch of tool calls."""
-        payload = [{"name": tc.name, "arguments": tc.arguments} for tc in tool_calls]
-        return json.dumps(payload, sort_keys=True, ensure_ascii=False, default=str)
-
     def _coerce_inline_tool_calls(
         self, content: str | None
     ) -> tuple[str | None, list[ToolCallRequest]]:
@@ -573,106 +489,15 @@ class AgentLoop:
         `<minimax:tool_call><invoke name="list_dir">...</invoke></minimax:tool_call>`.
         Recover only narrow cases that cleanly parse and match registered tools.
         """
-        if not content or not isinstance(content, str):
-            return content, []
-
-        text = content.strip()
-        starts = [idx for idx, ch in enumerate(text) if ch in "{["]
-
-        for start in reversed(starts):
-            prefix = text[:start].rstrip()
-            candidate = text[start:].strip()
-            try:
-                payload = json_repair.loads(candidate)
-            except Exception:
-                continue
-
-            entries = payload if isinstance(payload, list) else [payload]
-            recovered: list[ToolCallRequest] = []
-            for idx, entry in enumerate(entries, start=1):
-                if not isinstance(entry, dict):
-                    recovered = []
-                    break
-                name = entry.get("name")
-                arguments = entry.get("arguments")
-                if isinstance(arguments, str):
-                    try:
-                        arguments = json_repair.loads(arguments)
-                    except Exception:
-                        recovered = []
-                        break
-                if not isinstance(name, str) or not isinstance(arguments, dict):
-                    recovered = []
-                    break
-                if not self.tools.has(name):
-                    recovered = []
-                    break
-                recovered.append(
-                    ToolCallRequest(
-                        id=f"inline_call_{idx}",
-                        name=name,
-                        arguments=arguments,
-                    )
-                )
-
-            if recovered:
-                return prefix or None, recovered
-
-        xml_match = re.search(
-            r"<(?:[\w.-]+:)?tool_call>\s*(.*?)\s*</(?:[\w.-]+:)?tool_call>", text, re.DOTALL
-        )
-        if xml_match:
-            prefix = text[: xml_match.start()].rstrip()
-            body = xml_match.group(1)
-            recovered = self._parse_xml_tool_calls(body)
-            if recovered:
-                return prefix or None, recovered
-
-        return content, []
+        return coerce_inline_tool_calls(content, self.tools.has)
 
     def _normalize_tool_calls(self, tool_calls: list[ToolCallRequest]) -> list[ToolCallRequest]:
         """Repair provider quirks where tool arguments arrive as JSON strings."""
-        normalized: list[ToolCallRequest] = []
-        for tc in tool_calls:
-            arguments = tc.arguments
-            if isinstance(arguments, str):
-                try:
-                    arguments = json_repair.loads(arguments)
-                except Exception:
-                    pass
-            normalized.append(ToolCallRequest(id=tc.id, name=tc.name, arguments=arguments))
-        return normalized
+        return normalize_tool_calls(tool_calls)
 
     def _parse_xml_tool_calls(self, body: str) -> list[ToolCallRequest]:
         """Recover XML-like inline tool calls from assistant text."""
-        recovered: list[ToolCallRequest] = []
-        invoke_pattern = re.compile(
-            r"<invoke\s+name=\"([^\"]+)\">\s*(.*?)\s*</invoke>",
-            re.DOTALL,
-        )
-        param_pattern = re.compile(
-            r"<parameter\s+name=\"([^\"]+)\">(.*?)</parameter>",
-            re.DOTALL,
-        )
-
-        for idx, match in enumerate(invoke_pattern.finditer(body), start=1):
-            name = match.group(1).strip()
-            if not self.tools.has(name):
-                return []
-
-            arguments: dict[str, str] = {}
-            for param_name, raw_value in param_pattern.findall(match.group(2)):
-                arguments[param_name.strip()] = raw_value.strip()
-
-            recovered.append(
-                ToolCallRequest(
-                    id=f"inline_xml_call_{idx}",
-                    name=name,
-                    arguments=arguments,
-                )
-            )
-
-        return recovered
+        return parse_xml_tool_calls(body, self.tools.has)
 
     def _schedule_background(
         self,
@@ -692,19 +517,7 @@ class AgentLoop:
             task_name: Human-readable name for logging.
         """
 
-        async def _wrapped():
-            try:
-                await coro
-            except asyncio.CancelledError:
-                logger.debug("Background task cancelled: {}", task_name)
-            except Exception as e:
-                # Background cognition failures never affect correctness
-                logger.warning("Background task failed (non-fatal): {}: {}", task_name, e)
-            finally:
-                self._background_tasks.discard(asyncio.current_task())
-
-        task = asyncio.create_task(_wrapped(), name=task_name)
-        self._background_tasks.add(task)
+        self._background_jobs.schedule_background(coro, task_name)
 
     def _check_session_timeout(self, session_key: str) -> bool:
         """
@@ -718,17 +531,7 @@ class AgentLoop:
         Returns:
             True if session timed out, False otherwise.
         """
-        last_activity = self._session_timers.get(session_key)
-        if last_activity is None:
-            return False
-
-        elapsed = (datetime.now(timezone.utc) - last_activity).total_seconds()
-        timed_out = elapsed > self.inactivity_timeout_s
-
-        if timed_out:
-            logger.info("Session timed out ({}s inactivity): {}", elapsed, session_key)
-
-        return timed_out
+        return self._session_lifecycle.check_session_timeout(session_key)
 
     def _update_session_timer(self, session_key: str) -> None:
         """
@@ -739,76 +542,41 @@ class AgentLoop:
         Args:
             session_key: Session identifier.
         """
-        self._session_timers[session_key] = datetime.now(timezone.utc)
+        self._session_lifecycle.update_session_timer(session_key)
 
     async def process_expired_sessions(self) -> int:
         """Finalize sessions that exceeded the inactivity timeout."""
-        expired_keys = [
-            key
-            for key in list(self._session_timers.keys())
-            if (
-                key not in self._session_end_in_progress
-                and self._session_active_turns.get(key, 0) == 0
-                and self._check_session_timeout(key)
-            )
-        ]
-
-        for session_key in expired_keys:
-            self._session_end_in_progress.add(session_key)
-            session = self.sessions.get_or_create(session_key)
-            self._schedule_background(
-                self._run_session_end(session, reason="timeout"),
-                f"session_end:{session_key}",
-            )
-
-        return len(expired_keys)
+        return await self._session_lifecycle.process_expired_sessions(
+            schedule_background=self._schedule_background,
+            run_session_end=self._run_session_end,
+        )
 
     async def _run_session_end(self, session: Session, reason: str) -> None:
         """Run the session-end pipeline and clear in-progress tracking."""
-        try:
-            async with self._get_session_lock(session.key):
-                if self._session_active_turns.get(session.key, 0) > 0:
-                    logger.debug("Skipping session end while session is active: {}", session.key)
-                    return
-                await self._on_session_end(session, reason=reason)
-        finally:
-            self._session_end_in_progress.discard(session.key)
+        await self._session_lifecycle.run_session_end(
+            session,
+            reason,
+            on_session_end=lambda current_session, current_reason: self._on_session_end(
+                current_session,
+                reason=current_reason,
+            ),
+        )
 
     def _get_session_lock(self, session_key: str) -> asyncio.Lock:
         """Get/create lock for a session key."""
-        return self._session_locks[session_key]
+        return self._session_lifecycle.get_session_lock(session_key)
 
     def _scratchpad_path(self, session_key: str) -> Path:
         """Get filesystem path for a session's scratchpad."""
-        return self._scratchpad_dir / f"{safe_filename(session_key.replace(':', '_'))}.md"
+        return self._session_lifecycle.scratchpad_path(session_key)
 
     def _ensure_scratchpad(self, session_key: str) -> Path:
         """Ensure scratchpad file exists for the current session."""
-        path = self._scratchpad_path(session_key)
-        if not path.exists():
-            path.write_text(
-                f"# Scratchpad: {session_key}\n\n"
-                "Transient notes for this session. Archived on session end.\n",
-                encoding="utf-8",
-            )
-        return path
+        return self._session_lifecycle.ensure_scratchpad(session_key)
 
     def _finalize_scratchpad(self, session_key: str, reason: str) -> None:
         """Archive or clear session scratchpad when a session ends."""
-        path = self._scratchpad_path(session_key)
-        if not path.exists():
-            return
-        content = path.read_text(encoding="utf-8").strip()
-        if not content:
-            path.unlink(missing_ok=True)
-            return
-
-        archive_dir = ensure_dir(self._scratchpad_dir / "archive")
-        ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H-%M-%S")
-        archive_name = f"{safe_filename(session_key.replace(':', '_'))}-{reason}-{ts}.md"
-        archive_path = archive_dir / archive_name
-        path.replace(archive_path)
-        logger.info("Archived scratchpad for {} -> {}", session_key, archive_path.name)
+        self._session_lifecycle.finalize_scratchpad(session_key, reason)
 
     async def _on_session_end(
         self,
@@ -832,76 +600,18 @@ class AgentLoop:
             reason: "explicit" (user reset) or "timeout" (inactivity).
             messages_snapshot: Optional immutable copy of session messages for background tasks.
         """
-        logger.info("Session ended ({}): {}", reason, session.key)
-        self._finalize_scratchpad(session.key, reason)
-
-        # Clean up timer
-        self._session_timers.pop(session.key, None)
-
-        # Use snapshot if provided (for explicit reset before clear), otherwise use session
-        all_messages = (
-            messages_snapshot if messages_snapshot is not None else list(session.messages)
+        await self._session_lifecycle.on_session_end(
+            session,
+            reason=reason,
+            messages_snapshot=messages_snapshot,
+            schedule_background=self._schedule_background,
+            synthesize_journal_from_messages=self._synthesize_journal_from_messages,
+            distillation_enabled=self.distillation_enabled,
+            distillation_model_available=bool(self._get_model_for_job(JobClass.DISTILLATION)),
+            distill_session_from_messages=self._distill_session_from_messages,
+            reflection_model_available=bool(self._get_model_for_job(JobClass.REFLECTION)),
+            reflect_on_session_from_messages=self._reflect_on_session_from_messages,
         )
-        last_cognition_index = int(session.metadata.get("last_cognition_index", 0) or 0)
-        if last_cognition_index < 0:
-            last_cognition_index = 0
-        if last_cognition_index > len(all_messages):
-            last_cognition_index = len(all_messages)
-        messages_for_background = all_messages[last_cognition_index:]
-        session.metadata["last_cognition_index"] = len(all_messages)
-        self.sessions.save(session)
-
-        if not messages_for_background:
-            logger.debug(
-                "Session end pipeline has no new messages: key={} reason={} last_index={}",
-                session.key,
-                reason,
-                last_cognition_index,
-            )
-        logger.debug(
-            "Session end pipeline start: key={} reason={} messages={}",
-            session.key,
-            reason,
-            len(messages_for_background),
-        )
-        if not messages_for_background:
-            return
-
-        # Phase E: Deferred journal synthesis (non-blocking)
-        # Journal is narrative, lossy, non-authoritative
-        self._schedule_background(
-            self._synthesize_journal_from_messages(messages_for_background, session.key),
-            f"journal:{session.key}",
-        )
-        logger.debug("Scheduled journal synthesis for {}", session.key)
-
-        # Optional: distillation (atomic extraction, local only)
-        # Skip if no local model available
-        distillation_model = self._get_model_for_job(JobClass.DISTILLATION)
-        if self.distillation_enabled and distillation_model:
-            self._schedule_background(
-                self._distill_session_from_messages(messages_for_background, session.key),
-                f"distill:{session.key}",
-            )
-            logger.debug("Scheduled distillation for {}", session.key)
-        else:
-            logger.debug(
-                "Distillation skipped (enabled={}, model={}): {}",
-                self.distillation_enabled,
-                bool(distillation_model),
-                session.key,
-            )
-
-        # Optional: reflection (meta-analysis)
-        reflection_model = self._get_model_for_job(JobClass.REFLECTION)
-        if reflection_model:
-            self._schedule_background(
-                self._reflect_on_session_from_messages(messages_for_background, session.key),
-                f"reflect:{session.key}",
-            )
-            logger.debug("Scheduled reflection for {}", session.key)
-        else:
-            logger.debug("Reflection skipped (no model): {}", session.key)
 
     async def _synthesize_journal(self, session: Session) -> None:
         """
@@ -919,68 +629,7 @@ class AgentLoop:
         Args:
             session: Session to synthesize.
         """
-        try:
-            messages = session.messages
-            if not messages:
-                return  # Empty session, no journal needed
-            digest = self._build_session_digest(messages, session.key)
-            candidate_links = ", ".join(digest.wikilinks) if digest.wikilinks else "none"
-            journal_event_trace = self._build_journal_event_trace(digest)
-            prompt = (
-                "Write a short first-person journal entry about what happened in this session.\n"
-                "Sound like a useful human journal, not telemetry.\n"
-                "Focus on what the user wanted, what I tried, what changed, and the outcome.\n"
-                "Use Obsidian-style wikilinks when referencing tasks, goals, decisions, reflections, or named work items.\n"
-                "Do not mention counts of messages, requests, or tool calls.\n\n"
-                f"Session: {digest.session_key}\n"
-                f"Channel: {digest.channel}\n"
-                f"Chat: {digest.chat_id}\n"
-                f"Time range: {digest.first_timestamp} -> {digest.last_timestamp}\n"
-                f"Candidate wikilinks: {candidate_links}\n\n"
-                "Event trace:\n"
-                f"{chr(10).join(journal_event_trace[:18])}\n\n"
-                "Write 3-6 sentences only."
-            )
-
-            # Try LLM synthesis if model available
-            model = self._get_model_for_job(JobClass.JOURNAL_SYNTHESIS)
-            if model:
-                try:
-                    response = await self._chat_with_retry(
-                        messages=[{"role": "user", "content": prompt}],
-                        model=model,
-                        temperature=0.05,
-                        max_tokens=256,
-                        job_class=JobClass.JOURNAL_SYNTHESIS,
-                        reasoning_effort=self._reasoning_effort,
-                    )
-                    content = self._strip_think(response.content)
-                    if content and not self._is_low_signal_journal_body(content):
-                        self.journal.write_entry(
-                            content=self._format_journal_entry(digest, content),
-                            session_keys=[session.key],
-                            tags=["session", "synthesis"],
-                        )
-                        logger.info("Journal synthesized (LLM): {}", session.key)
-                        return
-                except Exception as e:
-                    logger.warning("Journal LLM failed, using fallback: {}", e)
-
-            # Fallback: deterministic summary
-            fallback = self._format_journal_entry(
-                digest,
-                self._build_fallback_journal_body(digest),
-            )
-            self.journal.write_entry(
-                content=fallback,
-                session_keys=[session.key],
-                tags=["session", "fallback"],
-            )
-            logger.info("Journal written (fallback): {}", session.key)
-
-        except Exception as e:
-            # Journal failures never block agent operation
-            logger.warning("Journal synthesis failed (non-fatal): {}: {}", session.key, e)
+        await self._background_jobs.synthesize_journal(session, JobClass.JOURNAL_SYNTHESIS)
 
     async def _synthesize_journal_from_messages(
         self,
@@ -996,15 +645,11 @@ class AgentLoop:
             messages: List of session messages.
             session_key: Session identifier.
         """
-
-        # Create minimal session-like object
-        class _SessionSnapshot:
-            def __init__(self, messages: list[dict], key: str):
-                self.messages = messages
-                self.key = key
-
-        snapshot = _SessionSnapshot(messages, session_key)
-        await self._synthesize_journal(snapshot)
+        await self._background_jobs.synthesize_journal_from_messages(
+            messages,
+            session_key,
+            JobClass.JOURNAL_SYNTHESIS,
+        )
 
     async def _distill_session(self, session: Session) -> None:
         """
@@ -1019,176 +664,16 @@ class AgentLoop:
         Args:
             session: Session to distill.
         """
-        try:
-            logger.debug("Distillation started: {}", session.key)
-            messages = self._filter_messages_for_distillation(session.messages, session.key)
-            if not messages:
-                logger.debug("Distillation skipped (no messages after filtering): {}", session.key)
-                return  # Empty session, nothing to distill
-
-            # Build distillation prompt
-            prompt = (
-                "Extract conservative atomic knowledge candidates from this session.\n\n"
-                "Look for:\n"
-                "- FACTS: User preferences, project context, established truths\n"
-                "- DECISIONS: Architectural choices, trade-offs, locked decisions\n"
-                "- GOALS: Objectives, outcomes the user wants to achieve\n"
-                "- TASKS: Action items, todos, things to do (must include task_assignee)\n\n"
-                "Do not produce reflections here.\n"
-                "For TASK candidates, include task_assignee. Use 'user' for user tasks.\n\n"
-                "Session content:\n"
-            )
-
-            for msg in messages[:50]:  # Limit to first 50 messages
-                role = msg.get("role", "unknown")
-                content = msg.get("content", "")[:500]  # Truncate each message
-                if role == "user":
-                    prompt += f"User: {content}\n"
-                elif role == "assistant":
-                    prompt += f"Assistant: {content}\n"
-
-            prompt += (
-                "\n\nReturn candidates as a JSON object with 'candidates' array.\n"
-                "Each candidate must have: type, title, content.\n"
-                "Optional: confidence (0-1), tags, and type-specific fields.\n"
-                "Allowed types by default: fact, goal, task. Use decision only for clear locked choices with rationale.\n"
-                "For TASK type: task_assignee (required), task_status, task_deadline, task_priority\n"
-                "For GOAL type: goal_status, goal_priority, goal_horizon\n"
-                "For DECISION type: decision_status, decision_rationale, decision_supersedes\n"
-                "Be conservative. Skip weak, duplicate, or speculative items."
-            )
-
-            # Try LLM distillation
-            model = self._get_model_for_job(JobClass.DISTILLATION)
-            if not model:
-                logger.debug("Distillation skipped (no model): {}", session.key)
-                return
-
-            try:
-                response = await self._chat_with_retry(
-                    messages=[{"role": "user", "content": prompt}],
-                    model=model,
-                    temperature=0.1,
-                    max_tokens=2048,
-                    job_class=JobClass.DISTILLATION,
-                    reasoning_effort=self._reasoning_effort,
-                )
-
-                content = self._strip_think(response.content)
-                if not content:
-                    return
-
-                # Try to extract JSON from response
-                json_start = content.find("{")
-                json_end = content.rfind("}") + 1
-                if json_start >= 0 and json_end > json_start:
-                    json_str = content[json_start:json_end]
-                    data = json.loads(json_str)
-                    if not isinstance(data, dict):
-                        logger.warning(
-                            "Distillation response root is not an object: {} ({})",
-                            session.key,
-                            type(data).__name__,
-                        )
-                        return
-
-                    candidates = data.get("candidates", [])
-                    validated_count = 0
-
-                    for candidate_data in candidates:
-                        try:
-                            if not isinstance(candidate_data, dict):
-                                logger.debug(
-                                    "Skipping non-dict distillation candidate for {}: {}",
-                                    session.key,
-                                    type(candidate_data).__name__,
-                                )
-                                continue
-                            candidate = AtomicCandidate.from_dict(candidate_data)
-                            candidate.source_session = session.key
-
-                            # Validate candidate
-                            errors = candidate.validate()
-                            if errors:
-                                logger.warning(
-                                    "Candidate validation failed: {}: {}",
-                                    candidate.title,
-                                    errors,
-                                )
-                                continue
-
-                            # Commit to memory via Tier 0 path
-                            # This is the authoritative write - distillation proposes, memory decides
-                            self._commit_candidate_to_memory(candidate)
-                            validated_count += 1
-
-                        except Exception as e:
-                            logger.warning(
-                                "Failed to parse candidate: {}: {}",
-                                candidate_data.get("title", "unknown")
-                                if isinstance(candidate_data, dict)
-                                else "unknown",
-                                e,
-                            )
-
-                    if validated_count > 0:
-                        logger.info(
-                            "Distillation complete: {} candidates from {}",
-                            validated_count,
-                            session.key,
-                        )
-                    else:
-                        logger.debug("No valid candidates distilled: {}", session.key)
-
-            except json.JSONDecodeError as e:
-                logger.warning("Distillation response not valid JSON: {}: {}", session.key, e)
-            except Exception as e:
-                logger.warning("Distillation LLM failed: {}: {}", session.key, e)
-
-        except Exception as e:
-            # Distillation failures never block agent operation
-            logger.warning("Distillation failed (non-fatal): {}: {}", session.key, e)
+        await self._background_jobs.distill_session(session, JobClass.DISTILLATION)
 
     @staticmethod
     def _iter_strings(obj: Any) -> list[str]:
         """Collect string values recursively from nested objects."""
-        values: list[str] = []
-        if isinstance(obj, str):
-            return [obj]
-        if isinstance(obj, dict):
-            for v in obj.values():
-                values.extend(AgentLoop._iter_strings(v))
-        elif isinstance(obj, list):
-            for item in obj:
-                values.extend(AgentLoop._iter_strings(item))
-        return values
+        return BackgroundJobManager.iter_strings(obj)
 
     def _tool_call_targets_scratchpad(self, tc: dict[str, Any], session_key: str) -> bool:
         """Return True if tool call arguments reference current session scratchpad."""
-        fn = tc.get("function", {}) if isinstance(tc, dict) else {}
-        args_raw = fn.get("arguments", {})
-        if isinstance(args_raw, str):
-            try:
-                args = json.loads(args_raw)
-            except Exception:
-                args = args_raw
-        else:
-            args = args_raw
-
-        strings = self._iter_strings(args)
-        scratchpad = self._scratchpad_path(session_key).resolve()
-        for value in strings:
-            try:
-                p = Path(value)
-                if not p.is_absolute():
-                    p = (self.workspace / p).resolve()
-                else:
-                    p = p.resolve()
-            except Exception:
-                continue
-            if p == scratchpad:
-                return True
-        return False
+        return self._background_jobs.tool_call_targets_scratchpad(tc, session_key)
 
     def _filter_messages_for_distillation(
         self,
@@ -1196,34 +681,7 @@ class AgentLoop:
         session_key: str,
     ) -> list[dict[str, Any]]:
         """Drop scratchpad-specific tool traces so they aren't distilled."""
-        excluded_tool_call_ids: set[str] = set()
-        filtered: list[dict[str, Any]] = []
-
-        for msg in messages:
-            if msg.get("role") == "assistant" and isinstance(msg.get("tool_calls"), list):
-                kept_calls = []
-                for tc in msg["tool_calls"]:
-                    if self._tool_call_targets_scratchpad(tc, session_key):
-                        if tc_id := tc.get("id"):
-                            excluded_tool_call_ids.add(tc_id)
-                        continue
-                    kept_calls.append(tc)
-
-                if kept_calls != msg["tool_calls"]:
-                    msg_copy = dict(msg)
-                    if kept_calls:
-                        msg_copy["tool_calls"] = kept_calls
-                    else:
-                        msg_copy.pop("tool_calls", None)
-                    filtered.append(msg_copy)
-                    continue
-
-            if msg.get("role") == "tool" and msg.get("tool_call_id") in excluded_tool_call_ids:
-                continue
-
-            filtered.append(msg)
-
-        return filtered
+        return self._background_jobs.filter_messages_for_distillation(messages, session_key)
 
     async def _distill_session_from_messages(
         self,
@@ -1240,13 +698,11 @@ class AgentLoop:
             session_key: Session identifier.
         """
 
-        class _SessionSnapshot:
-            def __init__(self, messages: list[dict], key: str):
-                self.messages = messages
-                self.key = key
-
-        snapshot = _SessionSnapshot(messages, session_key)
-        await self._distill_session(snapshot)
+        await self._background_jobs.distill_session_from_messages(
+            messages,
+            session_key,
+            JobClass.DISTILLATION,
+        )
 
     def _commit_candidate_to_memory(self, candidate: AtomicCandidate) -> None:
         """
@@ -1263,141 +719,29 @@ class AgentLoop:
             - Each candidate type maps to specific memory.write_*() method
             - This is Tier 0 logic - deterministic, Python-authoritative
         """
-        try:
-            if not self._should_commit_distilled_candidate(candidate):
-                logger.info("Distillation filtered candidate '{}'", candidate.title)
-                return
-
-            params = candidate.to_memory_params()
-
-            if candidate.type == CandidateType.FACT:
-                self.memory.write_fact(**params)
-                logger.info("Memory commit: fact '{}'", candidate.title)
-
-            elif candidate.type == CandidateType.DECISION:
-                self.memory.write_decision(**params)
-                logger.info("Memory commit: decision '{}'", candidate.title)
-
-            elif candidate.type == CandidateType.GOAL:
-                self.memory.write_goal(**params)
-                logger.info("Memory commit: goal '{}'", candidate.title)
-
-            elif candidate.type == CandidateType.TASK:
-                # Ensure assignee is set (required field)
-                if not params.get("assignee"):
-                    params["assignee"] = "distilled"  # Default for distilled tasks
-                self.memory.write_task(**params)
-                logger.info("Memory commit: task '{}'", candidate.title)
-
-            elif candidate.type == CandidateType.REFLECTION:
-                self.memory.write_reflection(**params)
-                logger.info("Memory commit: reflection '{}'", candidate.title)
-
-        except Exception as e:
-            # Memory commit failures logged but don't propagate
-            # (called from background task, must not affect main loop)
-            logger.error(
-                "Failed to commit candidate to memory: {}: {}",
-                candidate.title,
-                e,
-            )
+        self._background_jobs.commit_candidate_to_memory(candidate)
 
     @staticmethod
     def _normalize_memory_text(text: str) -> str:
         """Normalize text for conservative duplicate checks."""
-        return " ".join(re.sub(r"[^a-z0-9\s]+", " ", text.lower()).split())
+        return BackgroundJobManager.normalize_memory_text(text)
 
     def _is_near_duplicate_memory_item(self, candidate: AtomicCandidate, existing: Any) -> bool:
         """Return True when the candidate is effectively already stored."""
-        title_ratio = SequenceMatcher(
-            None,
-            self._normalize_memory_text(candidate.title),
-            self._normalize_memory_text(existing.title),
-        ).ratio()
-        content_ratio = SequenceMatcher(
-            None,
-            self._normalize_memory_text(candidate.content),
-            self._normalize_memory_text(existing.content),
-        ).ratio()
-        return title_ratio >= 0.9 or (title_ratio >= 0.8 and content_ratio >= 0.85)
+        return self._background_jobs.is_near_duplicate_memory_item(candidate, existing)
 
     def _find_existing_memory_duplicates(self, candidate: AtomicCandidate) -> list[Any]:
         """Search the target category for likely duplicates."""
-        category_map = {
-            CandidateType.FACT: "facts",
-            CandidateType.DECISION: "decisions",
-            CandidateType.GOAL: "goals",
-            CandidateType.TASK: "tasks",
-            CandidateType.REFLECTION: "reflections",
-        }
-        category = category_map[candidate.type]
-        existing = self.memory.read_memory(category)
-        return [item for item in existing if self._is_near_duplicate_memory_item(candidate, item)]
+        return self._background_jobs.find_existing_memory_duplicates(candidate)
 
     def _should_commit_distilled_candidate(self, candidate: AtomicCandidate) -> bool:
         """Apply conservative distillation acceptance rules before writing memory."""
-        allowed_types = {CandidateType.FACT, CandidateType.GOAL, CandidateType.TASK}
-        if candidate.type == CandidateType.DECISION:
-            has_rationale = bool((candidate.decision_rationale or "").strip())
-            if candidate.confidence < 0.9 or not has_rationale:
-                return False
-            if self._looks_like_non_decision_artifact(candidate):
-                return False
-        elif candidate.type not in allowed_types:
-            return False
-
-        if candidate.confidence < 0.65:
-            return False
-
-        duplicates = self._find_existing_memory_duplicates(candidate)
-        if duplicates:
-            return False
-
-        return True
+        return self._background_jobs.should_commit_distilled_candidate(candidate)
 
     @staticmethod
     def _looks_like_non_decision_artifact(candidate: AtomicCandidate) -> bool:
         """Reject distilled decisions that read like reports, placeholders, or suggestions."""
-        normalized = " ".join(
-            re.sub(
-                r"[^a-z0-9\s]+",
-                " ",
-                " ".join(
-                    filter(
-                        None,
-                        [
-                            candidate.title,
-                            candidate.content,
-                            candidate.decision_rationale,
-                        ],
-                    )
-                ).lower(),
-            ).split()
-        )
-        if not normalized:
-            return True
-
-        report_markers = (
-            "recommendation",
-            "recommended",
-            "report",
-            "analysis",
-            "placeholder",
-            "not explicitly stated",
-            "not prioritized yet",
-            "possible decision",
-            "tentative",
-            "option list",
-        )
-        proposal_markers = (
-            "we should ",
-            "should use",
-            "could use",
-            "might use",
-            "proposal",
-            "proposed",
-        )
-        return any(marker in normalized for marker in report_markers + proposal_markers)
+        return BackgroundJobManager.looks_like_non_decision_artifact(candidate)
 
     async def _reflect_on_session(self, session: Session) -> None:
         """
@@ -1408,11 +752,7 @@ class AgentLoop:
         Args:
             session: Session to reflect on.
         """
-        await self._reflection_service.reflect_on_session(
-            messages=session.messages,
-            session_key=session.key,
-            digest=self._build_session_digest(session.messages, session.key),
-        )
+        await self._background_jobs.reflect_on_session(session)
 
     async def _reflect_on_session_from_messages(
         self,
@@ -1426,11 +766,7 @@ class AgentLoop:
             messages: List of session messages.
             session_key: Session identifier.
         """
-        await self._reflection_service.reflect_on_session(
-            messages=messages,
-            session_key=session_key,
-            digest=self._build_session_digest(messages, session_key),
-        )
+        await self._background_jobs.reflect_on_session_from_messages(messages, session_key)
 
     async def _run_agent_loop(
         self,
@@ -1451,201 +787,25 @@ class AgentLoop:
         Returns:
             Tuple of (final_content, tools_used, all_messages).
         """
-        messages = initial_messages
-        iteration = 0
-        final_content = None
-        tools_used: list[str] = []
-        started_at = time.monotonic()
-        last_tool_signature: str | None = None
-        repeated_tool_cycles = 0
-        intent_reprompt_count = 0
-
-        # Get model for this job class
-        model = self._get_model_for_job(job_class)
-        if model is None:
-            # No model available (distillation case) - skip gracefully
-            return None, [], []
-
-        while iteration < self.max_iterations:
-            if time.monotonic() - started_at > self.max_loop_seconds:
-                logger.warning("Max loop time reached ({}s)", self.max_loop_seconds)
-                final_content = (
-                    f"I hit the time limit for this response ({self.max_loop_seconds}s) "
-                    "before completing all tool calls. Try a smaller step."
-                )
-                break
-
-            iteration += 1
-            logger.info(
-                "Agent loop iteration {}/{} started (job={}, model={})",
-                iteration,
-                self.max_iterations,
-                job_class.value,
-                model,
-            )
-
-            response = await self._chat_with_retry(
-                messages=messages,
-                tools=self.tools.get_definitions(),
-                model=model,
+        runner = TurnRunner(
+            context=self.context,
+            tools=self.tools,
+            config=TurnRunnerConfig(
+                max_iterations=self.max_iterations,
+                max_loop_seconds=self.max_loop_seconds,
+                max_identical_tool_cycles=self.max_identical_tool_cycles,
                 temperature=self.temperature,
                 max_tokens=self.max_tokens,
-                job_class=job_class,
                 reasoning_effort=self._reasoning_effort,
-            )
-            response.tool_calls = self._normalize_tool_calls(response.tool_calls)
-            logger.info(
-                "LLM response received (job={}, finish_reason={}, content_chars={}, tool_calls={})",
-                job_class.value,
-                response.finish_reason,
-                len(response.content or ""),
-                len(response.tool_calls),
-            )
-
-            if not response.has_tool_calls:
-                content, inline_tool_calls = self._coerce_inline_tool_calls(response.content)
-                if inline_tool_calls:
-                    logger.warning(
-                        "Recovered {} inline tool call(s) from assistant text in iteration {}",
-                        len(inline_tool_calls),
-                        iteration,
-                    )
-                    response.content = content
-                    response.tool_calls = inline_tool_calls
-
-            if response.has_tool_calls:
-                tool_signature = self._tool_cycle_signature(response.tool_calls)
-                if tool_signature == last_tool_signature:
-                    repeated_tool_cycles += 1
-                else:
-                    repeated_tool_cycles = 1
-                    last_tool_signature = tool_signature
-
-                if repeated_tool_cycles >= self.max_identical_tool_cycles:
-                    logger.warning(
-                        "Breaking repeated tool cycle after {} identical iterations",
-                        repeated_tool_cycles,
-                    )
-                    final_content = (
-                        "I detected repeated tool calls without progress and stopped to avoid a loop. "
-                        "Please refine the request or provide more constraints."
-                    )
-                    break
-
-                if on_progress:
-                    clean = self._strip_think(response.content)
-                    if clean:
-                        await on_progress(clean)
-                    await on_progress(self._tool_hint(response.tool_calls), tool_hint=True)
-
-                tool_call_dicts = [
-                    {
-                        "id": tc.id,
-                        "type": "function",
-                        "function": {
-                            "name": tc.name,
-                            "arguments": json.dumps(tc.arguments, ensure_ascii=False),
-                        },
-                    }
-                    for tc in response.tool_calls
-                ]
-                messages = self.context.add_assistant_message(
-                    messages,
-                    response.content,
-                    tool_call_dicts,
-                    reasoning_content=response.reasoning_content,
-                )
-                logger.info(
-                    "Assistant tool-call turn appended (iteration={}, tool_names={})",
-                    iteration,
-                    [tc.name for tc in response.tool_calls],
-                )
-
-                spawned_result: str | None = None
-                for tool_call in response.tool_calls:
-                    tools_used.append(tool_call.name)
-                    args_str = json.dumps(tool_call.arguments, ensure_ascii=False)
-                    logger.info("Tool call: {}({})", tool_call.name, args_str[:200])
-                    try:
-                        result = await self.tools.execute(tool_call.name, tool_call.arguments)
-                        logger.info(
-                            "Tool completed: {} -> {} chars",
-                            tool_call.name,
-                            len(result) if isinstance(result, str) else 0,
-                        )
-                    except Exception as e:
-                        logger.error("Tool execution failed: {}: {}", tool_call.name, e)
-                        result = f"Tool error: {type(e).__name__}: {e}"
-                    messages = self.context.add_tool_result(
-                        messages, tool_call.id, tool_call.name, result
-                    )
-                    if tool_call.name == "spawn" and spawned_result is None:
-                        spawned_result = result
-
-                if spawned_result is not None:
-                    final_content = spawned_result
-                    logger.info("Returning immediately after spawn to keep main agent responsive")
-                    break
-            else:
-                repeated_tool_cycles = 0
-                last_tool_signature = None
-                final_content = self._strip_think(response.content)
-                needs_reprompt = tools_used and (
-                    self._is_empty_response(final_content)
-                    or self._is_intent_only_response(final_content)
-                )
-                if needs_reprompt:
-                    intent_reprompt_count += 1
-                    logger.warning(
-                        "Non-final response after tool usage; reprompting model (attempt {}, empty={}, intent_only={})",
-                        intent_reprompt_count,
-                        self._is_empty_response(final_content),
-                        self._is_intent_only_response(final_content),
-                    )
-                    if intent_reprompt_count >= 2:
-                        logger.warning(
-                            "Stopping after repeated non-final responses post-tool usage"
-                        )
-                        final_content = (
-                            "I checked the available context, but the model kept stopping without a "
-                            "usable answer after tool calls. Please retry this request or switch to "
-                            "a stronger tool-calling model."
-                        )
-                    else:
-                        messages.append(
-                            {
-                                "role": "system",
-                                "content": (
-                                    "Do not stop with an empty reply or an intention statement. "
-                                    "You already used tools. Either call the next tool now, or reply "
-                                    "with the actual result for the user."
-                                ),
-                            }
-                        )
-                        final_content = None
-                        continue
-                logger.info(
-                    "Agent loop completed without tool calls at iteration {} (final_chars={})",
-                    iteration,
-                    len(final_content or ""),
-                )
-                break
-
-        if final_content is None and iteration >= self.max_iterations:
-            logger.warning("Max iterations ({}) reached", self.max_iterations)
-            final_content = (
-                f"I reached the maximum number of tool call iterations ({self.max_iterations}) "
-                "without completing the task. You can try breaking the task into smaller steps."
-            )
-
-        logger.info(
-            "Agent loop finished (job={}, iterations={}, tools_used={}, final_chars={})",
-            job_class.value,
-            iteration,
-            tools_used,
-            len(final_content or ""),
+            ),
+            chat_callable=self._chat_with_retry,
+            get_model_for_job=self._get_model_for_job,
+            strip_think=self._strip_think,
+            tool_hint=self._tool_hint,
+            is_empty_response=self._is_empty_response,
+            is_intent_only_response=self._is_intent_only_response,
         )
-        return final_content, tools_used, messages
+        return await runner.run(initial_messages, on_progress=on_progress, job_class=job_class)
 
     async def run(self) -> None:
         """Run the agent loop, processing messages from the bus."""
@@ -1671,6 +831,7 @@ class AgentLoop:
                             )
                     except Exception as e:
                         logger.error("Error processing message: {}", e)
+                        self.execution_state.set(msg.session_key, ExecutionPhase.FAILED, str(e))
                         await self.bus.publish_outbound(
                             OutboundMessage(
                                 channel=msg.channel,
@@ -1687,13 +848,7 @@ class AgentLoop:
 
     async def _shutdown_background_tasks(self) -> None:
         """Cancel and await all tracked background tasks."""
-        if not self._background_tasks:
-            return
-        pending = list(self._background_tasks)
-        for task in pending:
-            task.cancel()
-        await asyncio.gather(*pending, return_exceptions=True)
-        self._background_tasks.clear()
+        await self._background_jobs.shutdown_background_tasks()
 
     async def wait_for_background_tasks(self, timeout_s: float = 5.0) -> tuple[int, int]:
         """
@@ -1709,21 +864,7 @@ class AgentLoop:
         Returns:
             Tuple of (completed_count, pending_count).
         """
-        if not self._background_tasks:
-            return 0, 0
-
-        tasks = [t for t in self._background_tasks if not t.done()]
-        if not tasks:
-            return 0, 0
-
-        done, pending = await asyncio.wait(tasks, timeout=max(0.0, timeout_s))
-        if pending:
-            logger.warning(
-                "Background tasks still running after {:.1f}s: {} pending",
-                timeout_s,
-                len(pending),
-            )
-        return len(done), len(pending)
+        return await self._background_jobs.wait_for_background_tasks(timeout_s)
 
     async def close_mcp(self) -> None:
         """Close MCP connections."""
@@ -1779,6 +920,9 @@ class AgentLoop:
             )
             logger.info("Processing system message from {}", msg.sender_id)
             key = f"{channel}:{chat_id}"
+            self.execution_state.set(
+                key, ExecutionPhase.WAITING_BACKGROUND, "processing system update"
+            )
             async with self._get_session_lock(key):
                 self._session_active_turns[key] += 1
                 self._update_session_timer(key)
@@ -1807,6 +951,7 @@ class AgentLoop:
                         if self._is_low_value_system_reply(final_content)
                         else final_content
                     )
+                    self.execution_state.set(key, ExecutionPhase.COMPLETED, "system update ready")
                     return OutboundMessage(
                         channel=channel,
                         chat_id=chat_id,
@@ -1822,6 +967,7 @@ class AgentLoop:
         logger.info("Processing message from {}:{}: {}", msg.channel, msg.sender_id, preview)
 
         key = session_key or msg.session_key
+        self.execution_state.set(key, ExecutionPhase.PLANNING, "preparing turn")
         async with self._get_session_lock(key):
             self._session_active_turns[key] += 1
             self._update_session_timer(key)
@@ -1839,6 +985,9 @@ class AgentLoop:
                     messages_snapshot = list(session.messages)
                     await self._on_session_end(
                         session, reason="explicit", messages_snapshot=messages_snapshot
+                    )
+                    self.execution_state.set(
+                        key, ExecutionPhase.WAITING_BACKGROUND, "starting new session"
                     )
 
                     session.clear()
@@ -1883,6 +1032,11 @@ class AgentLoop:
                 async def _bus_progress(content: str, *, tool_hint: bool = False) -> None:
                     if not content or not content.strip():
                         return
+                    phase = ExecutionPhase.RUNNING_TOOLS if tool_hint else ExecutionPhase.PLANNING
+                    detail = (
+                        "executing tools" if tool_hint else clean_snippet(content, max_chars=80)
+                    )
+                    self.execution_state.set(key, phase, detail)
                     meta = dict(msg.metadata or {})
                     meta["_progress"] = True
                     meta["_tool_hint"] = tool_hint
@@ -1906,6 +1060,12 @@ class AgentLoop:
 
                 preview = final_content[:120] + "..." if len(final_content) > 120 else final_content
                 logger.info("Response to {}:{}: {}", msg.channel, msg.sender_id, preview)
+                if "Subagent [" in final_content and "started" in final_content:
+                    self.execution_state.set(key, ExecutionPhase.DELEGATED, "subagent spawned")
+                else:
+                    self.execution_state.set(
+                        key, ExecutionPhase.COMPLETED, clean_snippet(final_content, max_chars=80)
+                    )
 
                 self._save_turn(session, all_msgs, 1 + len(history))
                 self.sessions.save(session)
@@ -1928,273 +1088,71 @@ class AgentLoop:
     @staticmethod
     def _derive_channel_chat(session_key: str) -> tuple[str, str]:
         """Split a session key into channel/chat identifiers."""
-        if ":" not in session_key:
-            return session_key, "direct"
-        return session_key.split(":", 1)
+        return BackgroundJobManager.derive_channel_chat(session_key)
 
     @staticmethod
     def _safe_iso_timestamp(value: str | None) -> str:
         """Return a best-effort ISO timestamp string."""
-        if isinstance(value, str) and value.strip():
-            return value.strip()
-        return datetime.now(timezone.utc).isoformat()
+        return BackgroundJobManager.safe_iso_timestamp(value)
 
     @staticmethod
     def _clean_snippet(value: Any, *, max_chars: int = 160) -> str:
         """Normalize text snippets for prompts and logs."""
-        if value is None:
-            return ""
-        text = str(value).strip().replace("\n", " ")
-        text = re.sub(r"\s+", " ", text)
-        if len(text) > max_chars:
-            return text[: max_chars - 3].rstrip() + "..."
-        return text
+        return clean_snippet(value, max_chars=max_chars)
 
     @staticmethod
     def _extract_tool_name(call: dict[str, Any]) -> str:
         """Read a tool name from a stored tool-call payload."""
-        function = call.get("function")
-        if isinstance(function, dict) and isinstance(function.get("name"), str):
-            return function["name"]
-        if isinstance(call.get("name"), str):
-            return call["name"]
-        return "unknown"
+        return BackgroundJobManager.extract_tool_name(call)
 
     @staticmethod
     def _extract_tool_arguments(call: dict[str, Any]) -> dict[str, Any]:
         """Read normalized tool-call arguments from a stored payload."""
-        function = call.get("function")
-        raw_arguments = (
-            function.get("arguments") if isinstance(function, dict) else call.get("arguments")
-        )
-        if isinstance(raw_arguments, dict):
-            return raw_arguments
-        if isinstance(raw_arguments, str):
-            try:
-                parsed = json.loads(raw_arguments)
-            except json.JSONDecodeError:
-                try:
-                    parsed = json_repair.loads(raw_arguments)
-                except Exception:
-                    return {}
-            return parsed if isinstance(parsed, dict) else {}
-        return {}
+        return BackgroundJobManager.extract_tool_arguments(call)
 
     @staticmethod
     def _is_subagent_completion_prompt(content: str) -> bool:
         """Return True when a stored user message is a synthetic subagent completion prompt."""
-        normalized = AgentLoop._clean_snippet(content, max_chars=4000)
-        return normalized.startswith("[Subagent '") and "Write a user-facing completion update." in normalized
+        return is_subagent_completion_prompt(content)
 
     @staticmethod
     def _extract_subagent_task(content: str) -> str:
         """Extract delegated task text from a synthetic subagent completion prompt."""
-        match = re.search(r"\nTask:\s*(.*?)\n\nResult:\n", content, flags=re.DOTALL)
-        if not match:
-            return ""
-        return AgentLoop._clean_snippet(match.group(1), max_chars=180)
+        return extract_subagent_task(content)
 
     @staticmethod
     def _is_transition_assistant_message(content: str, tool_calls: list[dict[str, Any]]) -> bool:
         """Detect low-signal assistant scaffolding around tool usage."""
-        if not content:
-            return False
-        normalized = AgentLoop._clean_snippet(content, max_chars=240).lower()
-        transition_markers = (
-            "let me just",
-            "let me try",
-            "let me check",
-            "let me use",
-            "let me spawn",
-            "my apologies",
-            "right you are",
-            "i am a helpful assistant",
-            "i am here to assist you",
-            "i am a knowledgeable assistant",
-            "make your tasks easier and more efficient",
-            "there appears to be an issue with the subagent system",
-            "the subagent keeps completing without",
-            "the subagent completed but didn't return useful output",
-            "i don't have a",
-        )
-        if any(marker in normalized for marker in transition_markers):
-            return True
-        return bool(tool_calls and normalized.startswith(("right", "ok", "okay", "sure", "let me", "my apologies")))
+        return is_transition_assistant_message(content, tool_calls)
 
     @staticmethod
     def _is_low_signal_journal_body(body: str) -> bool:
         """Reject journal synthesis that parrots scaffolding or synthetic prompt text."""
-        normalized = AgentLoop._clean_snippet(body, max_chars=600).lower()
-        banned_markers = (
-            "[subagent '",
-            "write a user-facing completion update",
-            "task completed but no final response was generated",
-            "the subagent completed but didn't return useful output",
-            "the subagent keeps completing without",
-            "i am a helpful assistant",
-            "i am a knowledgeable assistant",
-            "i am here to assist you",
-        )
-        return any(marker in normalized for marker in banned_markers)
+        return is_low_signal_journal_body(body)
 
     @staticmethod
     def _build_journal_event_trace(digest: SessionDigest) -> list[str]:
         """Build a journal-safe event trace with raw tool mechanics filtered out."""
-        filtered: list[str] = []
-        for line in digest.event_lines:
-            normalized = line.lower()
-            if "assistant used " in normalized and any(
-                marker in normalized
-                for marker in (
-                    "read_memory",
-                    "search_memory",
-                    "read_file",
-                    "list_dir",
-                    "spawn",
-                    "search_knowledge",
-                )
-            ):
-                continue
-            filtered.append(line)
-        return filtered or digest.event_lines
+        return BackgroundJobManager.build_journal_event_trace(digest)
 
     def _build_session_digest(
         self, messages: list[dict[str, Any]], session_key: str
     ) -> SessionDigest:
         """Build a deterministic digest of a session for weak-model jobs."""
-        channel, chat_id = self._derive_channel_chat(session_key)
-        timestamps = [
-            self._safe_iso_timestamp(msg.get("timestamp"))
-            for msg in messages
-            if msg.get("role") in {"user", "assistant", "tool"}
-        ]
-        first_timestamp = timestamps[0] if timestamps else self._safe_iso_timestamp(None)
-        last_timestamp = timestamps[-1] if timestamps else first_timestamp
-
-        event_lines: list[str] = []
-        user_requests: list[str] = []
-        user_corrections: list[str] = []
-        outcomes: list[str] = []
-        failures: list[str] = []
-        wikilinks: list[str] = []
-
-        for msg in messages[-40:]:
-            role = msg.get("role")
-            content = self._clean_snippet(msg.get("content"))
-            if role == "user":
-                if not content:
-                    continue
-                raw_content = str(msg.get("content") or "")
-                if self._is_subagent_completion_prompt(raw_content):
-                    task = self._extract_subagent_task(raw_content)
-                    if task:
-                        event_lines.append(f"- Subagent reported back for task: {task}")
-                    continue
-                event_lines.append(f"- User: {content}")
-                user_requests.append(content)
-                lowered = content.lower()
-                if any(
-                    marker in lowered
-                    for marker in ("don't", "do not", "stop", "instead", "should", "not ")
-                ):
-                    user_corrections.append(content)
-            elif role == "assistant":
-                tool_calls = (
-                    msg.get("tool_calls") if isinstance(msg.get("tool_calls"), list) else []
-                )
-                if content:
-                    if not self._is_transition_assistant_message(content, tool_calls):
-                        event_lines.append(f"- Assistant: {content}")
-                for call in tool_calls:
-                    if not isinstance(call, dict):
-                        continue
-                    tool_name = self._extract_tool_name(call)
-                    arguments = self._extract_tool_arguments(call)
-                    title = self._clean_snippet(arguments.get("title"), max_chars=80)
-                    if title and tool_name.startswith("write_"):
-                        wikilinks.append(f"[[{title}]]")
-                    if title and tool_name in {
-                        "write_task",
-                        "write_goal",
-                        "write_decision",
-                        "write_fact",
-                    }:
-                        event_lines.append(f"- Assistant saved {tool_name[6:]} [[{title}]].")
-                    else:
-                        focus = title or self._clean_snippet(
-                            arguments.get("query") or arguments.get("path")
-                        )
-                        if focus:
-                            event_lines.append(f"- Assistant used {tool_name}: {focus}")
-            elif role == "tool":
-                tool_name = self._clean_snippet(msg.get("name"), max_chars=60) or "tool"
-                if not content:
-                    continue
-                lowered = content.lower()
-                if lowered.startswith("error") or "tool error" in lowered or "failed" in lowered:
-                    failure = f"{tool_name}: {content}"
-                    failures.append(failure)
-                    event_lines.append(f"- Tool failure ({tool_name}): {content}")
-                elif lowered.startswith(
-                    ("task saved:", "goal saved:", "decision saved:", "fact saved:")
-                ):
-                    outcomes.append(content)
-
-        unique_links: list[str] = []
-        seen_links: set[str] = set()
-        for link in wikilinks:
-            if link not in seen_links:
-                unique_links.append(link)
-                seen_links.add(link)
-
-        return SessionDigest(
-            session_key=session_key,
-            channel=channel,
-            chat_id=chat_id,
-            first_timestamp=first_timestamp,
-            last_timestamp=last_timestamp,
-            event_lines=event_lines[-20:] or ["- No significant events captured."],
-            user_requests=user_requests[-8:],
-            user_corrections=user_corrections[-6:],
-            outcomes=outcomes[-8:],
-            failures=failures[-6:],
-            wikilinks=unique_links[:10],
-        )
+        return self._background_jobs.build_session_digest(messages, session_key)
 
     @staticmethod
     def _format_digest_timestamp(value: str) -> str:
         """Render digest timestamp for journal headings."""
-        try:
-            dt = datetime.fromisoformat(value)
-        except ValueError:
-            return value
-        return dt.astimezone(timezone.utc).strftime("%H:%M UTC")
+        return BackgroundJobManager.format_digest_timestamp(value)
 
     def _format_journal_entry(self, digest: SessionDigest, body: str) -> str:
         """Wrap a journal body with deterministic per-entry metadata."""
-        heading = f"## {self._format_digest_timestamp(digest.last_timestamp)} · {digest.channel} · `{digest.session_key}`"
-        meta = f"_Session:_ `{digest.session_key}`  \n_Channel:_ `{digest.channel}`"
-        if digest.wikilinks:
-            meta += f"  \n_Links:_ {' '.join(digest.wikilinks[:4])}"
-        return f"{heading}\n\n{meta}\n\n{body.strip()}"
+        return self._background_jobs.format_journal_entry(digest, body)
 
     def _build_fallback_journal_body(self, digest: SessionDigest) -> str:
         """Build a deterministic journal narrative when LLM synthesis fails."""
-        request = (
-            digest.user_requests[-1]
-            if digest.user_requests
-            else "The user continued the conversation."
-        )
-        parts = [f"I worked on {request}"]
-        if digest.outcomes:
-            parts.append(f"The clearest outcome was {digest.outcomes[-1]}")
-        if digest.failures:
-            parts.append(f"A notable snag was {digest.failures[-1]}")
-        if digest.wikilinks:
-            parts.append(f"Related notes: {' '.join(digest.wikilinks[:4])}")
-        return " ".join(parts)
-
-    _TOOL_RESULT_MAX_CHARS = 500
+        return self._background_jobs.build_fallback_journal_body(digest)
 
     def _save_turn(self, session: Session, messages: list[dict], skip: int) -> None:
         """
@@ -2207,18 +1165,7 @@ class AgentLoop:
             messages: New messages to append.
             skip: Number of messages to skip from the start.
         """
-        for m in messages[skip:]:
-            entry = {k: v for k, v in m.items() if k != "reasoning_content"}
-            if entry.get("role") == "tool" and isinstance(entry.get("content"), str):
-                content = entry["content"]
-                if len(content) > self._TOOL_RESULT_MAX_CHARS:
-                    entry["content"] = content[: self._TOOL_RESULT_MAX_CHARS] + "\n... (truncated)"
-            entry.setdefault("timestamp", datetime.now(timezone.utc).isoformat())
-            session.messages.append(entry)
-        session.updated_at = datetime.now(timezone.utc)
-
-        # Update session timer for inactivity tracking
-        self._update_session_timer(session.key)
+        self._background_jobs.save_turn(session, messages, skip, self._update_session_timer)
 
     async def process_direct(
         self,

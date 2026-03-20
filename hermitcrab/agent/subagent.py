@@ -11,9 +11,9 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-import json_repair
 from loguru import logger
 
+from hermitcrab.agent.tool_call_recovery import coerce_inline_tool_calls, normalize_tool_calls
 from hermitcrab.agent.tools.filesystem import EditFileTool, ListDirTool, ReadFileTool, WriteFileTool
 from hermitcrab.agent.tools.registry import ToolRegistry
 from hermitcrab.agent.tools.shell import ExecTool
@@ -123,75 +123,16 @@ class SubagentManager:
         return f"Subagent [{display_label}] started (id: {task_id}). I'll notify you when it completes."
 
     @staticmethod
-    def _coerce_inline_tool_calls(content: str | None, tools: ToolRegistry) -> tuple[str | None, list[ToolCallRequest]]:
+    def _coerce_inline_tool_calls(
+        content: str | None, tools: ToolRegistry
+    ) -> tuple[str | None, list[ToolCallRequest]]:
         """Recover inline tool calls emitted as JSON or XML-like text."""
-        if not content or not isinstance(content, str):
-            return content, []
-
-        text = content.strip()
-        starts = [idx for idx, ch in enumerate(text) if ch in "{["]
-
-        for start in reversed(starts):
-            prefix = text[:start].rstrip()
-            candidate = text[start:].strip()
-            try:
-                payload = json_repair.loads(candidate)
-            except Exception:
-                continue
-
-            entries = payload if isinstance(payload, list) else [payload]
-            recovered: list[ToolCallRequest] = []
-            for idx, entry in enumerate(entries, start=1):
-                if not isinstance(entry, dict):
-                    recovered = []
-                    break
-                name = entry.get("name")
-                arguments = entry.get("arguments")
-                if isinstance(arguments, str):
-                    try:
-                        arguments = json_repair.loads(arguments)
-                    except Exception:
-                        recovered = []
-                        break
-                if not isinstance(name, str) or not isinstance(arguments, dict):
-                    recovered = []
-                    break
-                if not tools.has(name):
-                    recovered = []
-                    break
-                recovered.append(
-                    ToolCallRequest(id=f"inline_call_{idx}", name=name, arguments=arguments)
-                )
-
-            if recovered:
-                return prefix or None, recovered
-
-        xml_match = re.search(
-            r"<(?:[\w.-]+:)?tool_call>\s*(.*?)\s*</(?:[\w.-]+:)?tool_call>",
-            text,
-            re.DOTALL,
-        )
-        if xml_match:
-            prefix = text[:xml_match.start()].rstrip()
-            recovered = SubagentManager._parse_xml_tool_calls(xml_match.group(1), tools)
-            if recovered:
-                return prefix or None, recovered
-
-        return content, []
+        return coerce_inline_tool_calls(content, tools.has)
 
     @staticmethod
     def _normalize_tool_calls(tool_calls: list[ToolCallRequest]) -> list[ToolCallRequest]:
         """Repair provider quirks where tool arguments arrive as JSON strings."""
-        normalized: list[ToolCallRequest] = []
-        for tc in tool_calls:
-            arguments = tc.arguments
-            if isinstance(arguments, str):
-                try:
-                    arguments = json_repair.loads(arguments)
-                except Exception:
-                    pass
-            normalized.append(ToolCallRequest(id=tc.id, name=tc.name, arguments=arguments))
-        return normalized
+        return normalize_tool_calls(tool_calls)
 
     @staticmethod
     def _is_intent_only_response(text: str | None) -> bool:
@@ -212,34 +153,6 @@ class SubagentManager:
     def _is_empty_response(text: str | None) -> bool:
         """Treat blank or whitespace-only replies as missing output."""
         return text is None or not text.strip()
-
-    @staticmethod
-    def _parse_xml_tool_calls(body: str, tools: ToolRegistry) -> list[ToolCallRequest]:
-        """Recover XML-like inline tool calls from assistant text."""
-        recovered: list[ToolCallRequest] = []
-        invoke_pattern = re.compile(
-            r"<invoke\s+name=\"([^\"]+)\">\s*(.*?)\s*</invoke>",
-            re.DOTALL,
-        )
-        param_pattern = re.compile(
-            r"<parameter\s+name=\"([^\"]+)\">(.*?)</parameter>",
-            re.DOTALL,
-        )
-
-        for idx, match in enumerate(invoke_pattern.finditer(body), start=1):
-            name = match.group(1).strip()
-            if not tools.has(name):
-                return []
-
-            arguments: dict[str, str] = {}
-            for param_name, raw_value in param_pattern.findall(match.group(2)):
-                arguments[param_name.strip()] = raw_value.strip()
-
-            recovered.append(
-                ToolCallRequest(id=f"inline_xml_call_{idx}", name=name, arguments=arguments)
-            )
-
-        return recovered
 
     async def _run_subagent(
         self,
@@ -264,11 +177,13 @@ class SubagentManager:
             tools.register(WriteFileTool(workspace=self.workspace, allowed_dir=allowed_dir))
             tools.register(EditFileTool(workspace=self.workspace, allowed_dir=allowed_dir))
             tools.register(ListDirTool(workspace=self.workspace, allowed_dir=allowed_dir))
-            tools.register(ExecTool(
-                working_dir=str(self.workspace),
-                timeout=self.exec_config.timeout,
-                restrict_to_workspace=self.restrict_to_workspace,
-            ))
+            tools.register(
+                ExecTool(
+                    working_dir=str(self.workspace),
+                    timeout=self.exec_config.timeout,
+                    restrict_to_workspace=self.restrict_to_workspace,
+                )
+            )
             tools.register(WebSearchTool(api_key=self.brave_api_key))
             tools.register(WebFetchTool())
 
@@ -301,7 +216,9 @@ class SubagentManager:
                 response.tool_calls = self._normalize_tool_calls(response.tool_calls)
 
                 if not response.has_tool_calls:
-                    content, inline_tool_calls = self._coerce_inline_tool_calls(response.content, tools)
+                    content, inline_tool_calls = self._coerce_inline_tool_calls(
+                        response.content, tools
+                    )
                     if inline_tool_calls:
                         response.content = content
                         response.tool_calls = inline_tool_calls
@@ -322,24 +239,33 @@ class SubagentManager:
                         }
                         for tc in response.tool_calls
                     ]
-                    messages.append({
-                        "role": "assistant",
-                        "content": response.content or "",
-                        "tool_calls": tool_call_dicts,
-                    })
+                    messages.append(
+                        {
+                            "role": "assistant",
+                            "content": response.content or "",
+                            "tool_calls": tool_call_dicts,
+                        }
+                    )
 
                     # Execute tools
                     for tool_call in response.tool_calls:
                         tools_used.append(tool_call.name)
                         args_str = json.dumps(tool_call.arguments, ensure_ascii=False)
-                        logger.debug("Subagent [{}] executing: {} with arguments: {}", task_id, tool_call.name, args_str)
+                        logger.debug(
+                            "Subagent [{}] executing: {} with arguments: {}",
+                            task_id,
+                            tool_call.name,
+                            args_str,
+                        )
                         result = await tools.execute(tool_call.name, tool_call.arguments)
-                        messages.append({
-                            "role": "tool",
-                            "tool_call_id": tool_call.id,
-                            "name": tool_call.name,
-                            "content": result,
-                        })
+                        messages.append(
+                            {
+                                "role": "tool",
+                                "tool_call_id": tool_call.id,
+                                "name": tool_call.name,
+                                "content": result,
+                            }
+                        )
                 else:
                     final_result = response.content
                     if not tools_used and self._is_empty_response(final_result):
@@ -434,7 +360,9 @@ Requirements:
         )
 
         await self.bus.publish_inbound(msg)
-        logger.debug("Subagent [{}] announced result to {}:{}", task_id, origin['channel'], origin['chat_id'])
+        logger.debug(
+            "Subagent [{}] announced result to {}:{}", task_id, origin["channel"], origin["chat_id"]
+        )
 
     def _build_subagent_prompt(self, task: str) -> str:
         """Build a focused system prompt for the subagent."""
