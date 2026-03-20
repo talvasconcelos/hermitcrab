@@ -280,16 +280,33 @@ class SessionDigestBuilder:
 
     @staticmethod
     def build_fallback_journal_body(digest: SessionDigest) -> str:
-        request = digest.user_goal or "the user's latest request"
+        request = SessionDigestBuilder._sentence_fragment(
+            digest.user_goal or "the user's latest request"
+        )
         lines = [f"I worked on {request}."]
         if digest.outcomes:
-            lines.append(f"Main outcome: {digest.outcomes[-1]}.")
+            lines.append(
+                f"Main outcome: {SessionDigestBuilder._sentence_fragment(digest.outcomes[-1])}."
+            )
         elif digest.assistant_responses:
-            lines.append(f"Main response: {digest.assistant_responses[-1]}.")
+            lines.append(
+                f"Main response: {SessionDigestBuilder._sentence_fragment(digest.assistant_responses[-1])}."
+            )
         if digest.artifacts_changed:
-            lines.append(f"Key artifacts: {', '.join(digest.artifacts_changed[:4])}.")
+            lines.append(
+                f"Key artifacts: {SessionDigestBuilder._sentence_fragment(', '.join(digest.artifacts_changed[:4]))}."
+            )
         if digest.decisions_made:
-            lines.append(f"Decisions recorded: {', '.join(digest.decisions_made[:3])}.")
+            lines.append(
+                f"Decisions recorded: {SessionDigestBuilder._sentence_fragment(', '.join(digest.decisions_made[:3]))}."
+            )
         if digest.open_loops:
-            lines.append(f"Still open: {digest.open_loops[-1]}.")
+            lines.append(
+                f"Still open: {SessionDigestBuilder._sentence_fragment(digest.open_loops[-1])}."
+            )
         return " ".join(lines)
+
+    @staticmethod
+    def _sentence_fragment(text: str) -> str:
+        """Trim trailing punctuation so fallback sentences stay readable."""
+        return text.strip().rstrip(".!")

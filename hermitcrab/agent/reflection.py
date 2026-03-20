@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import re
 from difflib import SequenceMatcher
+from importlib.resources import files as package_files
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Awaitable, Callable
 
@@ -39,6 +40,12 @@ class ReflectionService:
         "session_tactic",
     }
     VALID_PROMOTION_TARGETS = {"AGENTS.md", "TOOLS.md", "SOUL.md", "IDENTITY.md", "none"}
+    TARGET_SCOPE_MAP = {
+        "AGENTS.md": {"global_product", "session_tactic"},
+        "TOOLS.md": {"tool_usage"},
+        "SOUL.md": {"assistant_behavior"},
+        "IDENTITY.md": {"assistant_behavior"},
+    }
 
     SYSTEM_PROMPT = """Reflect on the recent conversation for your future self.
 
@@ -69,7 +76,7 @@ Respond with JSON:
   "evidence": "Concrete example from this session that supports the learning",
   "should_promote": true,
   "promotion_target": "AGENTS.md|TOOLS.md|SOUL.md|IDENTITY.md|none",
-  "promote_content": "One concise instruction that belongs in the target file"
+  "promote_content": "One concise bullet-ready instruction that belongs in the target file"
 }}
 
 If nothing is worth remembering, respond: {{"skip": true, "reason": "No new insights"}}
@@ -82,6 +89,8 @@ Rules:
 - do not produce a generic summary of the session
 - avoid duplicating recent reflections
 - only set should_promote=true if the learning is durable enough to belong in persistent context, not just this one session
+- prefer `AGENTS.md` for product/workflow policy, `TOOLS.md` for tool discipline, `SOUL.md` for stable behavior style, and `IDENTITY.md` only for durable self-model constraints
+- user-specific preferences usually stay in memory; only promote them when they clearly belong in durable assistant-wide context
 """
 
     def __init__(
@@ -325,6 +334,9 @@ Rules:
             result["promotion_target"] = self._default_promotion_target(scope)
         if result["promotion_target"] not in self.VALID_PROMOTION_TARGETS:
             return False
+        if not self._promotion_is_viable(result):
+            result["should_promote"] = False
+            result["promotion_target"] = "none"
 
         return self._is_grounded_in_digest(result, digest)
 
@@ -404,6 +416,45 @@ Rules:
             "session_tactic": "AGENTS.md",
         }
         return mapping.get(scope, "none")
+
+    def _promotion_is_viable(self, result: dict[str, Any]) -> bool:
+        """Allow promotion only for durable, target-appropriate learnings."""
+        if not result.get("should_promote"):
+            return True
+
+        confidence = float(result.get("confidence", 0.0) or 0.0)
+        if confidence < 0.8:
+            return False
+
+        scope = str(result.get("scope", "")).strip().lower()
+        target = str(result.get("promotion_target", "none")).strip()
+        if target == "none":
+            return False
+
+        if scope == "user_preference":
+            return False
+
+        allowed_scopes = self.TARGET_SCOPE_MAP.get(target)
+        if allowed_scopes and scope not in allowed_scopes:
+            return False
+
+        promote_content = self._normalize_promote_content(str(result.get("promote_content", "")))
+        if not promote_content:
+            return False
+        if len(promote_content) > 220:
+            return False
+        result["promote_content"] = promote_content
+        return True
+
+    @staticmethod
+    def _normalize_promote_content(content: str) -> str:
+        """Normalize promoted instructions into one concise durable bullet."""
+        stripped = " ".join(content.strip().split())
+        if not stripped:
+            return ""
+        if stripped.startswith("- "):
+            stripped = stripped[2:].strip()
+        return f"- {stripped}"
 
     def _looks_like_prompt_placeholder(
         self, title: str, lesson: str, recommended_behavior: str
@@ -542,7 +593,7 @@ Rules:
     async def _promote(self, result: dict) -> None:
         """Auto-promote reflection to bootstrap file."""
         target_file = self._normalize_promotion_target(result.get("promotion_target", "none"))
-        content = result.get("promote_content")
+        content = self._normalize_promote_content(str(result.get("promote_content", "")))
 
         if not content:
             return
@@ -563,6 +614,7 @@ Rules:
         section = section_map.get(result.get("scope", "assistant_behavior"), "## Learnings")
 
         file_path = self.memory.workspace / target_file
+        self._ensure_bootstrap_file(file_path)
         if file_path.exists():
             line_count = len(file_path.read_text(encoding="utf-8").splitlines())
             if line_count >= self.max_file_lines:
@@ -576,6 +628,15 @@ Rules:
 
         logger.info("Auto-promoted reflection to {}: {}", target_file, result["title"])
 
+    def _ensure_bootstrap_file(self, file_path: Path) -> None:
+        """Seed missing bootstrap files from bundled templates when possible."""
+        if file_path.exists():
+            return
+
+        template_resource = package_files("hermitcrab") / "templates" / file_path.name
+        if template_resource.is_file():
+            file_path.write_text(template_resource.read_text(encoding="utf-8"), encoding="utf-8")
+
     def _append_to_bootstrap(self, file_path: Path, section: str, content: str) -> None:
         """Append content to bootstrap file section."""
         if not file_path.exists():
@@ -583,6 +644,8 @@ Rules:
             return
 
         existing = file_path.read_text(encoding="utf-8")
+        if self._bootstrap_already_contains(existing, content):
+            return
 
         if section in existing:
             # Append to existing section
@@ -617,3 +680,19 @@ Rules:
             # Create new section at end
             separator = "\n\n" if existing and not existing.endswith("\n\n") else ""
             file_path.write_text(f"{existing}{separator}{section}\n\n{content}\n", encoding="utf-8")
+
+    def _bootstrap_already_contains(self, existing: str, content: str) -> bool:
+        """Avoid appending effectively duplicate promoted guidance."""
+        normalized_content = self._normalize_text(content)
+        if not normalized_content:
+            return True
+
+        for line in existing.splitlines():
+            normalized_line = self._normalize_text(line)
+            if not normalized_line:
+                continue
+            if normalized_line == normalized_content:
+                return True
+            if SequenceMatcher(None, normalized_line, normalized_content).ratio() >= 0.92:
+                return True
+        return False
