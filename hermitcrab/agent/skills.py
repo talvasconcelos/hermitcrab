@@ -98,7 +98,7 @@ class SkillsLoader:
 
         return "\n\n---\n\n".join(parts) if parts else ""
 
-    def build_skills_summary(self) -> str:
+    def build_skills_summary(self, exclude_names: set[str] | None = None) -> str:
         """
         Build a summary of all skills (name, description, path, availability).
 
@@ -108,6 +108,7 @@ class SkillsLoader:
         Returns:
             XML-formatted skills summary.
         """
+        exclude_names = exclude_names or set()
         all_skills = self.list_skills(filter_unavailable=False)
         if not all_skills:
             return ""
@@ -117,6 +118,8 @@ class SkillsLoader:
 
         lines = ["<skills>"]
         for s in all_skills:
+            if s["name"] in exclude_names:
+                continue
             name = escape_xml(s["name"])
             path = s["path"]
             desc = escape_xml(self._get_skill_description(s["name"]))
@@ -136,6 +139,9 @@ class SkillsLoader:
 
             lines.append("  </skill>")
         lines.append("</skills>")
+
+        if len(lines) == 2:
+            return ""
 
         return "\n".join(lines)
 

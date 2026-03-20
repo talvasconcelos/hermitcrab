@@ -30,7 +30,7 @@ Just move the `workspace/` folder and you’re back in business — same memorie
 
 - Supports **fully offline** operation with local models (Ollama via LiteLLM)  
 - Remembers things in **plain, human-readable Markdown files** (Obsidian compatible, git-friendly)  
-- Automatically **distills** conversations into facts, tasks, decisions, goals, reflections  
+- Can **distill** conversations into facts, tasks, decisions, goals, and reflections when that optional background pass is enabled  
 - **Reflects** on itself — spots patterns, mistakes, contradictions, and suggests improvements  
 - Talks via **Nostr** (primary), Telegram, email, or plain CLI — your choice  
 - Stays tiny, fast, and cheap — no 100k+ line monolith
@@ -51,14 +51,137 @@ Move your workspace anywhere. The agent picks up exactly where it left off.
    ```
    (creates `~/.hermitcrab/` with config and empty workspace)
 
-3. **Pick a model & run**  
-   Edit `~/.hermitcrab/config.json` to point to your favorite model (local or cloud).  
-   Then just:
+3. **Pick a model & run**
+
+   **Option A: Local Ollama (recommended for privacy & free)**
+   
+   a. Install Ollama:
+   ```bash
+   # macOS
+   brew install ollama
+   
+   # Linux
+   curl -fsSL https://ollama.com/install.sh | sh
+   
+   # Start Ollama (runs in background)
+   ollama serve
+   ```
+   
+   b. Pull a model:
+   ```bash
+   ollama pull lfm2.5-thinking:latest  # Fast thinking model
+   # Or: ollama pull llama3.1:8b      # General purpose
+   # Or: ollama pull qwen2.5-coder:7b # Coding specialist
+   ```
+   
+   c. Edit `~/.hermitcrab/config.json`:
+   ```json
+   {
+     "providers": {
+       "openai": {
+         "apiKey": "ollama",
+         "apiBase": "http://localhost:11434/v1"
+       }
+     },
+     "models": {
+       "main": {
+         "model": "openai/lfm2.5-thinking:latest"
+       },
+       "localCoder": {
+         "model": "ollama/qwen2.5-coder:7b"
+       }
+     },
+     "agents": {
+       "modelAliases": {
+         "coder": "localCoder"
+       },
+       "defaults": {
+         "model": "main",
+         "jobModels": {
+           "subagent": "localCoder"
+         }
+       }
+     }
+   }
+   ```
+
+   Advanced local Ollama example with named models, cloud-routed models, and optional shorthand aliases:
+   ```json
+   {
+     "providers": {
+       "openai": {
+         "apiKey": "ollama",
+         "apiBase": "http://localhost:11434/v1"
+       }
+     },
+     "models": {
+       "main": {
+         "model": "openai/kimi-k2.5:cloud"
+       },
+       "coder": {
+         "model": "ollama/qwen3.5:4b"
+       },
+       "fast": {
+         "model": "openai/lfm2.5-thinking:latest",
+         "reasoningEffort": "medium"
+       }
+     },
+     "agents": {
+       "modelAliases": {
+         "code": "coder"
+       },
+       "defaults": {
+         "model": "main",
+         "jobModels": {
+           "subagent": "coder",
+           "reflection": "fast",
+           "reasoningEffort": "medium"
+         }
+       }
+     }
+   }
+   ```
+   Notes:
+   - For Ollama, prefer the `openai` provider pointed at `http://localhost:11434/v1`. In practice this has much better tool-calling reliability than LiteLLM's native `ollama` route.
+   - The `ollama` provider is still available, but it currently has weaker tool coverage and more provider-specific tool-call quirks.
+   - Keep the model name exactly as Ollama exposes it when using the OpenAI-compatible route.
+   - Prefer the top-level `models` section as the canonical place for model definitions.
+   - Ollama's OpenAI-compatible `/v1` route does not currently support per-request context-size overrides; use `OLLAMA_CONTEXT_LENGTH` or custom Modelfile-based models when you need a larger local context window.
+   - `agents.modelAliases` is optional shorthand for runtime ergonomics; it is not required if your named model keys are already concise.
+   - Subagents can use named models directly, or aliases when you want shorter operator-facing names.
+   
+   **Option B: Cloud model (OpenRouter)**
+   ```bash
+   # Get API key at https://openrouter.ai/keys
+   ```
+   Edit `~/.hermitcrab/config.json`:
+   ```json
+   {
+     "providers": {
+       "openrouter": {
+         "apiKey": "sk-or-..."
+       }
+     },
+     "agents": {
+       "defaults": {
+         "model": "anthropic/claude-sonnet-4"
+       }
+     }
+   }
+   ```
+
+   Then run:
    ```bash
    hermitcrab agent
    ```
 
-You’re now talking to your own persistent, memory-aware agent.
+   Notes:
+   - OpenRouter should be configured under `providers.openrouter`, not `providers.custom`.
+   - Recommended model forms are `anthropic/...`, `openai/...`, `google/...`, and similar upstream model IDs.
+   - `openrouter/anthropic/...` also works if you want to be explicit.
+   - If OpenRouter is your only configured provider, HermitCrab will still route the default `anthropic/claude-opus-4-5` model through OpenRouter.
+
+You're now talking to your own persistent, memory-aware agent.
 
 ### How the agent actually thinks & remembers
 
@@ -68,7 +191,7 @@ Every session follows a clean lifecycle:
 1. You talk → agent responds → tools run if needed  
 2. Session ends (you exit, or 30 min of silence)  
 3. **Journal synthesis** — narrative summary of what happened (cheap model)  
-4. **Distillation** — extracts new facts, tasks, goals, decisions (cheap model)  
+4. **Optional distillation** — proposes fallback facts, tasks, goals, and decisions when enabled  
 5. **Reflection** — looks for mistakes, contradictions, patterns (smarter model)
 6. **Scratchpad archival** — per-session transient notes are archived on session end
 
@@ -95,6 +218,8 @@ Everything is:
 - Deterministic — Python, not the LLM, writes the files
 
 No vector databases. No silent embeddings. No hidden state corruption.
+
+Distillation is conservative and optional by design. Explicit memory writes remain authoritative.
 
 ### Scratchpad and channel prompts
 
@@ -127,7 +252,7 @@ All channels feed into the same memory & reflection engine.
 | web_fetch         | Fetch & extract URL content (sanitized)   |
 | knowledge_search  | Search your knowledge library             |
 | knowledge_ingest  | Save articles/docs to library             |
-| message           | Reply to you                              |
+| message           | Reply to you on the active channel        |
 | spawn             | Launch sub-agents                         |
 | cron              | Schedule recurring jobs                   |
 
@@ -147,6 +272,19 @@ HermitCrab gets smarter over time by:
   - Reflection → medium model
 
 This keeps costs low while letting the agent learn without constant supervision.
+
+### Subagents and models
+
+HermitCrab can delegate longer-running or specialized work to subagents while the main agent stays responsive.
+
+- Define reusable models in top-level `models`
+- Set a dedicated subagent model in `agents.defaults.jobModels.subagent`
+- Optionally add short aliases in `agents.modelAliases` for runtime convenience
+- The agent can use either named models or aliases when spawning delegated work
+
+Example use cases:
+- "Build a simple website for X, use the coder subagent"
+- "Investigate this bug in the background and report back"
 
 ### Architecture at a glance
 
@@ -241,4 +379,3 @@ Let's make it remember everything that matters.
 - Build: `docker compose build`
 - Run gateway: `docker compose up -d hermitcrab-gateway`
 - Persisted data lives at `~/.hermitcrab` (mounted into container).
-

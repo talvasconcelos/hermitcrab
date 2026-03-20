@@ -31,6 +31,7 @@ class OpenAICodexProvider(LLMProvider):
         model: str | None = None,
         max_tokens: int = 4096,
         temperature: float = 0.7,
+        reasoning_effort: str | None = None,
     ) -> LLMResponse:
         model = model or self.default_model
         system_prompt, input_items = _convert_messages(messages)
@@ -50,6 +51,9 @@ class OpenAICodexProvider(LLMProvider):
             "tool_choice": "auto",
             "parallel_tool_calls": True,
         }
+
+        if reasoning_effort:
+            body["reasoning"] = {"effort": reasoning_effort}
 
         if tools:
             body["tools"] = _convert_tools(tools)

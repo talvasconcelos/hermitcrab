@@ -1,8 +1,11 @@
 """Base LLM provider interface."""
 
+import asyncio
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import Any
+
+from loguru import logger
 
 
 @dataclass
@@ -35,6 +38,22 @@ class LLMProvider(ABC):
     Implementations should handle the specifics of each provider's API
     while maintaining a consistent interface.
     """
+
+    _CHAT_RETRY_DELAYS = (1, 2, 4)
+    _TRANSIENT_ERROR_MARKERS = (
+        "429",
+        "rate limit",
+        "500",
+        "502",
+        "503",
+        "504",
+        "overloaded",
+        "timeout",
+        "timed out",
+        "connection",
+        "server error",
+        "temporarily unavailable",
+    )
 
     def __init__(self, api_key: str | None = None, api_base: str | None = None):
         self.api_key = api_key
@@ -77,8 +96,28 @@ class LLMProvider(ABC):
                     result.append(clean)
                     continue
 
+            if isinstance(content, dict):
+                clean = dict(msg)
+                clean["content"] = [content]
+                result.append(clean)
+                continue
+
             result.append(msg)
         return result
+
+    @staticmethod
+    def _sanitize_request_messages(
+        messages: list[dict[str, Any]],
+        allowed_keys: frozenset[str],
+    ) -> list[dict[str, Any]]:
+        """Keep only provider-safe message keys and normalize assistant content."""
+        sanitized = []
+        for msg in messages:
+            clean = {k: v for k, v in msg.items() if k in allowed_keys}
+            if clean.get("role") == "assistant" and "content" not in clean:
+                clean["content"] = None
+            sanitized.append(clean)
+        return sanitized
 
     @abstractmethod
     async def chat(
@@ -88,6 +127,7 @@ class LLMProvider(ABC):
         model: str | None = None,
         max_tokens: int = 4096,
         temperature: float = 0.7,
+        reasoning_effort: str | None = None,
     ) -> LLMResponse:
         """
         Send a chat completion request.
@@ -103,6 +143,84 @@ class LLMProvider(ABC):
             LLMResponse with content and/or tool calls.
         """
         pass
+
+    async def close(self) -> None:
+        """Release provider-owned resources."""
+        return None
+
+    @classmethod
+    def _is_transient_error(cls, content: str | None) -> bool:
+        err = (content or "").lower()
+        return any(marker in err for marker in cls._TRANSIENT_ERROR_MARKERS)
+
+    async def chat_with_retry(
+        self,
+        messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]] | None = None,
+        model: str | None = None,
+        max_tokens: int = 4096,
+        temperature: float = 0.7,
+        reasoning_effort: str | None = None,
+    ) -> LLMResponse:
+        """Call chat() with retry on transient provider failures."""
+        attempts = len(self._CHAT_RETRY_DELAYS) + 1
+        for attempt, delay in enumerate(self._CHAT_RETRY_DELAYS, start=1):
+            try:
+                response = await self.chat(
+                    messages=messages,
+                    tools=tools,
+                    model=model,
+                    max_tokens=max_tokens,
+                    temperature=temperature,
+                    reasoning_effort=reasoning_effort,
+                )
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                response = LLMResponse(
+                    content=f"Error calling LLM: {exc}",
+                    finish_reason="error",
+                )
+
+            if response.finish_reason != "error":
+                return response
+            if not self._is_transient_error(response.content):
+                return response
+
+            logger.warning(
+                "LLM transient error (attempt {}/{}), retrying in {}s: {}",
+                attempt,
+                attempts,
+                delay,
+                (response.content or "")[:120].lower(),
+            )
+            await asyncio.sleep(delay)
+
+        try:
+            response = await self.chat(
+                messages=messages,
+                tools=tools,
+                model=model,
+                max_tokens=max_tokens,
+                temperature=temperature,
+                reasoning_effort=reasoning_effort,
+            )
+            if response.finish_reason == "error" and self._is_transient_error(response.content):
+                return LLMResponse(
+                    content="I hit a temporary provider error while generating the response. Please retry this request.",
+                    finish_reason="error",
+                )
+            return response
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            content = f"Error calling LLM: {exc}"
+            if self._is_transient_error(content):
+                content = (
+                    "I hit a temporary provider error while generating the response. "
+                    "Please retry this request."
+                )
+            return LLMResponse(content=content, finish_reason="error")
 
     @abstractmethod
     def get_default_model(self) -> str:
