@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-import re
 import time as _time
 import uuid
 from datetime import datetime
@@ -13,6 +12,7 @@ from typing import Any
 
 from loguru import logger
 
+from hermitcrab.agent.message_preparation import is_empty_response, is_intent_only_response
 from hermitcrab.agent.tool_call_recovery import coerce_inline_tool_calls, normalize_tool_calls
 from hermitcrab.agent.tools.filesystem import EditFileTool, ListDirTool, ReadFileTool, WriteFileTool
 from hermitcrab.agent.tools.registry import ToolRegistry
@@ -114,10 +114,7 @@ class SubagentManager:
                 resolved_reasoning_effort,
             )
         )
-        self._running_tasks[task_id] = bg_task
-
-        # Cleanup when done
-        bg_task.add_done_callback(lambda _: self._running_tasks.pop(task_id, None))
+        self._track_task(task_id, bg_task)
 
         logger.info("Spawned subagent [{}]: {} (model: {})", task_id, display_label, resolved_model)
         return f"Subagent [{display_label}] started (id: {task_id}). I'll notify you when it completes."
@@ -137,22 +134,36 @@ class SubagentManager:
     @staticmethod
     def _is_intent_only_response(text: str | None) -> bool:
         """Detect planning-only text that should not be treated as a final result."""
-        if not text:
-            return False
-        normalized = " ".join(text.strip().lower().split())
-        if not normalized:
-            return False
-        return bool(
-            re.match(
-                r"^(let me|i(?:'ll| will)|first[, ]+let me|now[, ]+let me|next[, ]+i(?:'ll| will)|i am going to)\b",
-                normalized,
-            )
-        )
+        return is_intent_only_response(text)
 
     @staticmethod
     def _is_empty_response(text: str | None) -> bool:
         """Treat blank or whitespace-only replies as missing output."""
-        return text is None or not text.strip()
+        return is_empty_response(text)
+
+    def _track_task(self, task_id: str, task: asyncio.Task[None]) -> None:
+        """Track a running subagent task until it completes."""
+        self._running_tasks[task_id] = task
+        task.add_done_callback(lambda _: self._running_tasks.pop(task_id, None))
+
+    def _build_tools(self) -> ToolRegistry:
+        """Build the restricted toolset available to subagents."""
+        tools = ToolRegistry()
+        allowed_dir = self.workspace if self.restrict_to_workspace else None
+        tools.register(ReadFileTool(workspace=self.workspace, allowed_dir=allowed_dir))
+        tools.register(WriteFileTool(workspace=self.workspace, allowed_dir=allowed_dir))
+        tools.register(EditFileTool(workspace=self.workspace, allowed_dir=allowed_dir))
+        tools.register(ListDirTool(workspace=self.workspace, allowed_dir=allowed_dir))
+        tools.register(
+            ExecTool(
+                working_dir=str(self.workspace),
+                timeout=self.exec_config.timeout,
+                restrict_to_workspace=self.restrict_to_workspace,
+            )
+        )
+        tools.register(WebSearchTool(api_key=self.brave_api_key))
+        tools.register(WebFetchTool())
+        return tools
 
     async def _run_subagent(
         self,
@@ -170,22 +181,7 @@ class SubagentManager:
         subagent_model = model or self.model
 
         try:
-            # Build subagent tools (no message tool, no spawn tool)
-            tools = ToolRegistry()
-            allowed_dir = self.workspace if self.restrict_to_workspace else None
-            tools.register(ReadFileTool(workspace=self.workspace, allowed_dir=allowed_dir))
-            tools.register(WriteFileTool(workspace=self.workspace, allowed_dir=allowed_dir))
-            tools.register(EditFileTool(workspace=self.workspace, allowed_dir=allowed_dir))
-            tools.register(ListDirTool(workspace=self.workspace, allowed_dir=allowed_dir))
-            tools.register(
-                ExecTool(
-                    working_dir=str(self.workspace),
-                    timeout=self.exec_config.timeout,
-                    restrict_to_workspace=self.restrict_to_workspace,
-                )
-            )
-            tools.register(WebSearchTool(api_key=self.brave_api_key))
-            tools.register(WebFetchTool())
+            tools = self._build_tools()
 
             # Build messages with subagent-specific prompt
             system_prompt = self._build_subagent_prompt(task)

@@ -93,13 +93,20 @@ Implemented on this branch so far:
 
 - shared tool-call recovery extracted from main/subagent loops
 - interactive turn execution extracted into `turn_runner.py`
-- background cognition, session lifecycle, message preparation, background messaging, and execution-state helpers split into focused modules
+- background cognition, session lifecycle, message preparation, background messaging, turn persistence, and execution-state helpers split into focused modules
+- background cognition further decomposed into session-digest, journal, distillation, and task-tracking helpers instead of one large helper file
 - `AgentLoop` behavior kept compatible while internals move toward a thinner orchestrator shape
+- final readability pass extracted message-processing helpers and subagent tool construction to reduce local function sprawl
 
 Current branch test status:
 
 - full suite passing with `uv run pytest`
 - local-only refactor regression tests may exist during development, but tests should not be newly committed until the suite is trimmed and made more targeted
+
+Phase 1 status:
+
+- core extraction goals are complete
+- further refactor work on this branch should stay incremental, low-risk, and behavior-preserving
 
 ## Session Continuity
 Use this file to preserve high-value context across new chat sessions.
@@ -194,14 +201,14 @@ This is especially useful for:
 - lightweight memory and orchestration safeguards
 
 ## Next Targets
-After stabilizing the current memory-quality branch, the next likely targets are:
+With Phase 1 largely complete, the next likely targets are:
 
-1. Better coordinator/task handoff clarity between main agent and subagents
-2. Smarter journal and reflection prioritization based on session structure
-3. NIP-17 and thread-aware messaging improvements for Nostr workflows
-4. Test-suite rationalization: keep high-value regressions, merge overlapping cases, and remove low-signal implementation-specific tests
-5. Further memory retrieval gains only if they stay lightweight and testable
-6. Add deterministic coordinator execution-state handling for plan/delegate/wait/fallback/complete so progress updates and recovery stay consistent
+1. Better coordinator/task handoff clarity between main agent and subagents, especially around delegated-progress and completion synthesis
+2. Smarter journal and reflection prioritization based on session structure rather than brittle phrase markers
+3. Deterministic coordinator execution-state handling for plan/delegate/wait/fallback/complete so progress updates and recovery stay consistent end to end
+4. Test-suite rationalization: keep high-value regressions, merge overlapping cases, and remove low-signal implementation-specific tests before changing git policy for tests
+5. Further memory retrieval gains only if they stay lightweight, Python-authoritative, and easy to validate
+6. NIP-17 and thread-aware messaging improvements for Nostr workflows after coordinator refactor fallout is settled
 
 ## Working Style
 When deciding what to do next:

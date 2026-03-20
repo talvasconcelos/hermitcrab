@@ -694,24 +694,7 @@ class AgentLoop:
         Returns:
             Tuple of (final_content, tools_used, all_messages).
         """
-        runner = TurnRunner(
-            context=self.context,
-            tools=self.tools,
-            config=TurnRunnerConfig(
-                max_iterations=self.max_iterations,
-                max_loop_seconds=self.max_loop_seconds,
-                max_identical_tool_cycles=self.max_identical_tool_cycles,
-                temperature=self.temperature,
-                max_tokens=self.max_tokens,
-                reasoning_effort=self._reasoning_effort,
-            ),
-            chat_callable=self._chat_with_retry,
-            get_model_for_job=self._get_model_for_job,
-            strip_think=self._strip_think,
-            tool_hint=self._tool_hint,
-            is_empty_response=is_empty_response,
-            is_intent_only_response=is_intent_only_response,
-        )
+        runner = self._build_turn_runner()
         return await runner.run(initial_messages, on_progress=on_progress, job_class=job_class)
 
     async def run(self) -> None:
@@ -816,190 +799,251 @@ class AgentLoop:
         Returns:
             OutboundMessage or None.
         """
-        # ====================================================================
-        # Phase A: Input handling + session retrieval (Tier 0, deterministic)
-        # ====================================================================
-
-        # System messages: parse origin from chat_id ("channel:chat_id")
         if msg.channel == "system":
-            channel, chat_id = (
-                msg.chat_id.split(":", 1) if ":" in msg.chat_id else ("cli", msg.chat_id)
-            )
-            logger.info("Processing system message from {}", msg.sender_id)
-            key = f"{channel}:{chat_id}"
-            self.execution_state.set(
-                key, ExecutionPhase.WAITING_BACKGROUND, "processing system update"
-            )
-            async with self._get_session_lock(key):
-                self._session_active_turns[key] += 1
-                self._update_session_timer(key)
-                session = self.sessions.get_or_create(key)
-                scratchpad_path = self._ensure_scratchpad(key)
-                self._set_tool_context(channel, chat_id, msg.metadata.get("message_id"))
-                try:
-                    history = session.get_history(max_messages=self.memory_window)
-                    messages = self.context.build_messages(
-                        history=history,
-                        current_message=msg.content,
-                        channel=channel,
-                        chat_id=chat_id,
-                        scratchpad_path=str(scratchpad_path),
-                    )
-                    # Phase B happens inside _run_agent_loop
-                    final_content, _, all_msgs = await self._run_agent_loop(
-                        messages,
-                        job_class=JobClass.INTERACTIVE_RESPONSE,
-                    )
-                    # Phase C: Deterministic save
-                    self._save_turn(session, all_msgs, 1 + len(history))
-                    self.sessions.save(session)
-                    safe_content = (
-                        fallback_system_task_summary(msg.content)
-                        if is_low_value_system_reply(final_content)
-                        else final_content
-                    )
-                    self.execution_state.set(key, ExecutionPhase.COMPLETED, "system update ready")
-                    return OutboundMessage(
-                        channel=channel,
-                        chat_id=chat_id,
-                        content=safe_content or fallback_system_task_summary(msg.content),
-                    )
-                finally:
-                    self._session_active_turns[key] -= 1
-                    if self._session_active_turns[key] <= 0:
-                        self._session_active_turns.pop(key, None)
+            return await self._process_system_message(msg)
 
-        # Regular user message
         preview = msg.content[:80] + "..." if len(msg.content) > 80 else msg.content
         logger.info("Processing message from {}:{}: {}", msg.channel, msg.sender_id, preview)
+        return await self._process_user_message(
+            msg, session_key=session_key, on_progress=on_progress
+        )
 
-        key = session_key or msg.session_key
-        self.execution_state.set(key, ExecutionPhase.PLANNING, "preparing turn")
-        async with self._get_session_lock(key):
-            self._session_active_turns[key] += 1
-            self._update_session_timer(key)
+    async def _process_system_message(self, msg: InboundMessage) -> OutboundMessage:
+        """Process a synthetic system message such as a subagent completion update."""
+        channel, chat_id = msg.chat_id.split(":", 1) if ":" in msg.chat_id else ("cli", msg.chat_id)
+        logger.info("Processing system message from {}", msg.sender_id)
+        key = f"{channel}:{chat_id}"
+        self.execution_state.set(key, ExecutionPhase.WAITING_BACKGROUND, "processing system update")
+        async with self._session_scope(key):
             session = self.sessions.get_or_create(key)
             scratchpad_path = self._ensure_scratchpad(key)
-            try:
-                # ====================================================================
-                # Phase D (early): Session end detection - explicit reset
-                # ====================================================================
+            self._set_tool_context(channel, chat_id, msg.metadata.get("message_id"))
+            history = session.get_history(max_messages=self.memory_window)
+            messages = self.context.build_messages(
+                history=history,
+                current_message=msg.content,
+                channel=channel,
+                chat_id=chat_id,
+                scratchpad_path=str(scratchpad_path),
+            )
+            final_content, _, all_msgs = await self._run_agent_loop(
+                messages,
+                job_class=JobClass.INTERACTIVE_RESPONSE,
+            )
+            self._save_turn(session, all_msgs, 1 + len(history))
+            self.sessions.save(session)
+            safe_content = (
+                fallback_system_task_summary(msg.content)
+                if is_low_value_system_reply(final_content)
+                else final_content
+            )
+            self.execution_state.set(key, ExecutionPhase.COMPLETED, "system update ready")
+            return OutboundMessage(
+                channel=channel,
+                chat_id=chat_id,
+                content=safe_content or fallback_system_task_summary(msg.content),
+            )
 
-                # Slash commands
-                cmd = msg.content.strip().lower()
-                if cmd == "/new":
-                    # Explicit session end - pass snapshot before clearing to preserve data for background tasks
-                    messages_snapshot = list(session.messages)
-                    await self._on_session_end(
-                        session, reason="explicit", messages_snapshot=messages_snapshot
-                    )
-                    self.execution_state.set(
-                        key, ExecutionPhase.WAITING_BACKGROUND, "starting new session"
-                    )
+    async def _process_user_message(
+        self,
+        msg: InboundMessage,
+        *,
+        session_key: str | None,
+        on_progress: Callable[[str], Awaitable[None]] | None,
+    ) -> OutboundMessage | None:
+        """Process a regular user-facing message turn."""
+        key = session_key or msg.session_key
+        self.execution_state.set(key, ExecutionPhase.PLANNING, "preparing turn")
+        async with self._session_scope(key):
+            session = self.sessions.get_or_create(key)
+            scratchpad_path = self._ensure_scratchpad(key)
 
-                    session.clear()
-                    session.metadata.pop("last_cognition_index", None)
-                    self.sessions.save(session)
-                    self.sessions.invalidate(session.key)
-                    return OutboundMessage(
-                        channel=msg.channel, chat_id=msg.chat_id, content="New session started."
-                    )
+            slash_response = await self._maybe_handle_slash_command(msg, key, session)
+            if slash_response is not None:
+                return slash_response
 
-                if cmd == "/help":
-                    return OutboundMessage(
-                        channel=msg.channel,
-                        chat_id=msg.chat_id,
-                        content="🦀 hermitcrab commands:\n/new — Start a new conversation\n/help — Show available commands",
-                    )
+            self._set_tool_context(msg.channel, msg.chat_id, msg.metadata.get("message_id"))
+            if message_tool := self.tools.get("message"):
+                if isinstance(message_tool, MessageTool):
+                    message_tool.start_turn()
 
-                # ====================================================================
-                # Phase A (continued): Tool context setup
-                # ====================================================================
+            history = session.get_history(max_messages=self.memory_window)
+            initial_messages = self._build_interactive_messages(msg, scratchpad_path, history)
+            progress_callback = on_progress or self._build_bus_progress_callback(msg, key)
+            final_content, _, all_msgs = await self._run_agent_loop(
+                initial_messages,
+                on_progress=progress_callback,
+                job_class=JobClass.INTERACTIVE_RESPONSE,
+            )
 
-                self._set_tool_context(msg.channel, msg.chat_id, msg.metadata.get("message_id"))
-                if message_tool := self.tools.get("message"):
-                    if isinstance(message_tool, MessageTool):
-                        message_tool.start_turn()
+            final_content = (
+                final_content or "I've completed processing but have no response to give."
+            )
+            self._record_final_execution_state(key, final_content)
+            preview = final_content[:120] + "..." if len(final_content) > 120 else final_content
+            logger.info("Response to {}:{}: {}", msg.channel, msg.sender_id, preview)
 
-                history = session.get_history(max_messages=self.memory_window)
-                initial_messages = self.context.build_messages(
-                    history=history,
-                    current_message=msg.content,
-                    media=msg.media if msg.media else None,
+            self._save_turn(session, all_msgs, 1 + len(history))
+            self.sessions.save(session)
+
+            if message_tool := self.tools.get("message"):
+                if isinstance(message_tool, MessageTool) and message_tool.has_sent_in_turn:
+                    return None
+
+            return OutboundMessage(
+                channel=msg.channel,
+                chat_id=msg.chat_id,
+                content=final_content,
+                metadata=msg.metadata or {},
+            )
+
+    async def _maybe_handle_slash_command(
+        self,
+        msg: InboundMessage,
+        session_key: str,
+        session: Session,
+    ) -> OutboundMessage | None:
+        """Handle early slash commands before building interactive context."""
+        cmd = msg.content.strip().lower()
+        if cmd == "/new":
+            messages_snapshot = list(session.messages)
+            await self._on_session_end(
+                session, reason="explicit", messages_snapshot=messages_snapshot
+            )
+            self.execution_state.set(
+                session_key, ExecutionPhase.WAITING_BACKGROUND, "starting new session"
+            )
+            session.clear()
+            session.metadata.pop("last_cognition_index", None)
+            self.sessions.save(session)
+            self.sessions.invalidate(session.key)
+            return OutboundMessage(
+                channel=msg.channel, chat_id=msg.chat_id, content="New session started."
+            )
+
+        if cmd == "/help":
+            return OutboundMessage(
+                channel=msg.channel,
+                chat_id=msg.chat_id,
+                content="🦀 hermitcrab commands:\n/new — Start a new conversation\n/help — Show available commands",
+            )
+
+        return None
+
+    def _build_interactive_messages(
+        self,
+        msg: InboundMessage,
+        scratchpad_path: Path,
+        history: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        """Build the interactive message list and insert deterministic hints when needed."""
+        messages = self.context.build_messages(
+            history=history,
+            current_message=msg.content,
+            media=msg.media if msg.media else None,
+            channel=msg.channel,
+            chat_id=msg.chat_id,
+            scratchpad_path=str(scratchpad_path),
+        )
+        if should_hint_subagent_delegation(
+            msg.content,
+            has_spawn_tool=self.tools.has("spawn"),
+            subagent_model=self._job_models.get(JobClass.SUBAGENT),
+        ):
+            messages.insert(
+                len(messages) - 1,
+                {
+                    "role": "system",
+                    "content": build_delegation_hint(
+                        self._job_models.get(JobClass.SUBAGENT) or self.model
+                    ),
+                },
+            )
+        return messages
+
+    def _build_bus_progress_callback(
+        self,
+        msg: InboundMessage,
+        session_key: str,
+    ) -> Callable[[str], Awaitable[None]]:
+        """Build the default progress publisher for interactive turns."""
+
+        async def _bus_progress(content: str, *, tool_hint: bool = False) -> None:
+            if not content or not content.strip():
+                return
+            phase = ExecutionPhase.RUNNING_TOOLS if tool_hint else ExecutionPhase.PLANNING
+            detail = "executing tools" if tool_hint else clean_snippet(content, max_chars=80)
+            self.execution_state.set(session_key, phase, detail)
+            metadata = dict(msg.metadata or {})
+            metadata["_progress"] = True
+            metadata["_tool_hint"] = tool_hint
+            await self.bus.publish_outbound(
+                OutboundMessage(
                     channel=msg.channel,
                     chat_id=msg.chat_id,
-                    scratchpad_path=str(scratchpad_path),
+                    content=content,
+                    metadata=metadata,
                 )
-                if should_hint_subagent_delegation(
-                    msg.content,
-                    has_spawn_tool=self.tools.has("spawn"),
-                    subagent_model=self._job_models.get(JobClass.SUBAGENT),
-                ):
-                    initial_messages.insert(
-                        len(initial_messages) - 1,
-                        {
-                            "role": "system",
-                            "content": build_delegation_hint(
-                                self._job_models.get(JobClass.SUBAGENT) or self.model
-                            ),
-                        },
-                    )
+            )
 
-                async def _bus_progress(content: str, *, tool_hint: bool = False) -> None:
-                    if not content or not content.strip():
-                        return
-                    phase = ExecutionPhase.RUNNING_TOOLS if tool_hint else ExecutionPhase.PLANNING
-                    detail = (
-                        "executing tools" if tool_hint else clean_snippet(content, max_chars=80)
-                    )
-                    self.execution_state.set(key, phase, detail)
-                    meta = dict(msg.metadata or {})
-                    meta["_progress"] = True
-                    meta["_tool_hint"] = tool_hint
-                    await self.bus.publish_outbound(
-                        OutboundMessage(
-                            channel=msg.channel,
-                            chat_id=msg.chat_id,
-                            content=content,
-                            metadata=meta,
-                        )
-                    )
+        return _bus_progress
 
-                final_content, tools_used, all_msgs = await self._run_agent_loop(
-                    initial_messages,
-                    on_progress=on_progress or _bus_progress,
-                    job_class=JobClass.INTERACTIVE_RESPONSE,
-                )
+    def _record_final_execution_state(self, session_key: str, final_content: str) -> None:
+        """Record the final execution state for a completed interactive turn."""
+        if "Subagent [" in final_content and "started" in final_content:
+            self.execution_state.set(session_key, ExecutionPhase.DELEGATED, "subagent spawned")
+            return
+        self.execution_state.set(
+            session_key,
+            ExecutionPhase.COMPLETED,
+            clean_snippet(final_content, max_chars=80),
+        )
 
-                if final_content is None:
-                    final_content = "I've completed processing but have no response to give."
+    def _build_turn_runner(self) -> TurnRunner:
+        """Build a turn runner configured with the current loop dependencies."""
+        return TurnRunner(
+            context=self.context,
+            tools=self.tools,
+            config=TurnRunnerConfig(
+                max_iterations=self.max_iterations,
+                max_loop_seconds=self.max_loop_seconds,
+                max_identical_tool_cycles=self.max_identical_tool_cycles,
+                temperature=self.temperature,
+                max_tokens=self.max_tokens,
+                reasoning_effort=self._reasoning_effort,
+            ),
+            chat_callable=self._chat_with_retry,
+            get_model_for_job=self._get_model_for_job,
+            strip_think=self._strip_think,
+            tool_hint=self._tool_hint,
+            is_empty_response=is_empty_response,
+            is_intent_only_response=is_intent_only_response,
+        )
 
-                preview = final_content[:120] + "..." if len(final_content) > 120 else final_content
-                logger.info("Response to {}:{}: {}", msg.channel, msg.sender_id, preview)
-                if "Subagent [" in final_content and "started" in final_content:
-                    self.execution_state.set(key, ExecutionPhase.DELEGATED, "subagent spawned")
-                else:
-                    self.execution_state.set(
-                        key, ExecutionPhase.COMPLETED, clean_snippet(final_content, max_chars=80)
-                    )
+    class _SessionScope:
+        """Context manager that tracks active turns for one session key."""
 
-                self._save_turn(session, all_msgs, 1 + len(history))
-                self.sessions.save(session)
+        def __init__(self, loop: "AgentLoop", session_key: str):
+            self.loop = loop
+            self.session_key = session_key
+            self.lock: asyncio.Lock | None = None
 
-                if message_tool := self.tools.get("message"):
-                    if isinstance(message_tool, MessageTool) and message_tool.has_sent_in_turn:
-                        return None
+        async def __aenter__(self) -> None:
+            self.lock = self.loop._get_session_lock(self.session_key)
+            await self.lock.acquire()
+            self.loop._session_active_turns[self.session_key] += 1
+            self.loop._update_session_timer(self.session_key)
 
-                return OutboundMessage(
-                    channel=msg.channel,
-                    chat_id=msg.chat_id,
-                    content=final_content,
-                    metadata=msg.metadata or {},
-                )
-            finally:
-                self._session_active_turns[key] -= 1
-                if self._session_active_turns[key] <= 0:
-                    self._session_active_turns.pop(key, None)
+        async def __aexit__(self, exc_type, exc, tb) -> None:
+            self.loop._session_active_turns[self.session_key] -= 1
+            if self.loop._session_active_turns[self.session_key] <= 0:
+                self.loop._session_active_turns.pop(self.session_key, None)
+            if self.lock is not None:
+                self.lock.release()
+
+    def _session_scope(self, session_key: str) -> _SessionScope:
+        """Return a scoped active-turn guard for one session."""
+        return self._SessionScope(self, session_key)
 
     def _save_turn(self, session: Session, messages: list[dict], skip: int) -> None:
         """
