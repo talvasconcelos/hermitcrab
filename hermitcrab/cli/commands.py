@@ -2,6 +2,7 @@
 
 import asyncio
 import os
+import re
 import select
 import signal
 import sys
@@ -12,14 +13,16 @@ import typer
 from prompt_toolkit import PromptSession
 from prompt_toolkit.formatted_text import HTML
 from prompt_toolkit.history import FileHistory
+from prompt_toolkit.key_binding import KeyBindings
 from prompt_toolkit.patch_stdout import patch_stdout
+from prompt_toolkit.shortcuts import print_formatted_text
 from rich.console import Console
 from rich.markdown import Markdown
 from rich.table import Table
 from rich.text import Text
 
 from hermitcrab import __logo__, __version__
-from hermitcrab.config.schema import Config
+from hermitcrab.config.schema import Config, ModelAliasConfig
 
 app = typer.Typer(
     name="hermitcrab",
@@ -36,6 +39,7 @@ EXIT_COMMANDS = {"exit", "quit", "/exit", "/quit", ":q"}
 
 _PROMPT_SESSION: PromptSession | None = None
 _SAVED_TERM_ATTRS = None  # original termios settings, restored on exit
+_ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
 
 
 def _build_job_models_from_config(config: Config) -> dict | None:
@@ -60,6 +64,7 @@ def _build_job_models_from_config(config: Config) -> dict | None:
         or job_models_config.distillation is not None
         or job_models_config.reflection is not None
         or job_models_config.summarisation is not None
+        or job_models_config.subagent is not None
     )
 
     if not has_config:
@@ -68,14 +73,31 @@ def _build_job_models_from_config(config: Config) -> dict | None:
     primary_model = config.agents.defaults.model
 
     return {
-        JobClass.INTERACTIVE_RESPONSE: job_models_config.get_model(
-            "interactive_response", primary_model
-        ),
+        JobClass.INTERACTIVE_RESPONSE: job_models_config.get_model("interactive_response", primary_model),
         JobClass.JOURNAL_SYNTHESIS: job_models_config.get_model("journal_synthesis", primary_model),
         JobClass.DISTILLATION: job_models_config.get_model("distillation", primary_model),
         JobClass.REFLECTION: job_models_config.get_model("reflection", primary_model),
         JobClass.SUMMARISATION: job_models_config.get_model("summarisation", primary_model),
+        JobClass.SUBAGENT: job_models_config.get_model("subagent", primary_model),
     }
+
+
+def _build_runtime_model_aliases(config: Config) -> dict[str, str | ModelAliasConfig]:
+    """Resolve any named-model references inside runtime aliases."""
+    resolved_aliases: dict[str, str | ModelAliasConfig] = {}
+    for alias, value in config.agents.model_aliases.items():
+        if isinstance(value, ModelAliasConfig):
+            resolved = config.resolve_model_config(value.model)
+            resolved_aliases[alias] = ModelAliasConfig(
+                model=value.model,
+                reasoning_effort=value.reasoning_effort or resolved.reasoning_effort,
+                thinking=value.thinking,
+            )
+            continue
+
+        resolved_aliases[alias] = value if value in config.models else (config.resolve_model_config(value).model or value)
+
+    return resolved_aliases
 
 
 def _flush_pending_tty_input() -> None:
@@ -133,16 +155,47 @@ def _init_prompt_session() -> None:
     history_file = Path.home() / ".hermitcrab" / "history" / "cli_history"
     history_file.parent.mkdir(parents=True, exist_ok=True)
 
+    key_bindings = _build_prompt_key_bindings()
+
     _PROMPT_SESSION = PromptSession(
         history=FileHistory(str(history_file)),
         enable_open_in_editor=False,
-        multiline=False,  # Enter submits (single line mode)
+        multiline=True,
+        key_bindings=key_bindings,
     )
 
 
-def _print_agent_response(response: str, render_markdown: bool) -> None:
+def _build_prompt_key_bindings() -> KeyBindings:
+    """Build prompt-toolkit bindings for submit-vs-newline behavior."""
+    bindings = KeyBindings()
+
+    @bindings.add("c-m")
+    def _submit(event) -> None:
+        event.current_buffer.validate_and_handle()
+
+    @bindings.add("c-j")
+    def _newline(event) -> None:
+        event.current_buffer.insert_text("\n")
+
+    return bindings
+
+
+def _strip_ansi(text: str) -> str:
+    """Remove terminal escape sequences from model output before plain rendering."""
+    return _ANSI_ESCAPE_RE.sub("", text)
+
+
+def _print_agent_response(response: str, render_markdown: bool, *, prompt_safe: bool = False) -> None:
     """Render assistant response with consistent terminal styling."""
     content = response or ""
+    if prompt_safe:
+        clean = _strip_ansi(content)
+        print_formatted_text("")
+        print_formatted_text(HTML("<ansicyan>🦀 hermitcrab</ansicyan>"))
+        print_formatted_text(clean)
+        print_formatted_text("")
+        return
+
     body = Markdown(content) if render_markdown else Text(content)
     console.print()
     console.print(f"[cyan]{__logo__} hermitcrab[/cyan]")
@@ -162,6 +215,7 @@ async def _read_interactive_input_async() -> str:
     - Multiline paste (bracketed paste mode)
     - History navigation (up/down arrows)
     - Clean display (no ghost characters or artifacts)
+    - Ctrl+J inserts a newline; Enter submits
     """
     if _PROMPT_SESSION is None:
         raise RuntimeError("Call _init_prompt_session() first")
@@ -283,29 +337,76 @@ def _make_provider(config: Config):
     """Create the appropriate LLM provider from config."""
     from hermitcrab.providers.custom_provider import CustomProvider
     from hermitcrab.providers.litellm_provider import LiteLLMProvider
+    from hermitcrab.providers.ollama_provider import OllamaProvider
     from hermitcrab.providers.openai_codex_provider import OpenAICodexProvider
 
     model = config.agents.defaults.model
+    resolved_model = config.resolve_model_config(model)
     provider_name = config.get_provider_name(model)
     p = config.get_provider(model)
 
     # OpenAI Codex (OAuth)
     if provider_name == "openai_codex" or model.startswith("openai-codex/"):
-        return OpenAICodexProvider(default_model=model)
+        return OpenAICodexProvider(default_model=resolved_model.model or model)
 
     # Custom: direct OpenAI-compatible endpoint, bypasses LiteLLM
     if provider_name == "custom":
         return CustomProvider(
             api_key=p.api_key if p else "no-key",
             api_base=config.get_api_base(model) or "http://localhost:8000/v1",
-            default_model=model,
+            default_model=resolved_model.model or model,
         )
 
     from hermitcrab.providers.registry import find_by_name
 
+    def _request_config_resolver(request_model: str) -> dict[str, Any]:
+        resolved_request = config.resolve_model_config(request_model)
+        request_provider = config.get_provider(request_model)
+        request_provider_name = config.get_provider_name(request_model)
+        return {
+            "model": resolved_request.model or request_model,
+            "api_key": request_provider.api_key if request_provider else None,
+            "api_base": config.get_api_base(request_model),
+            "extra_headers": request_provider.extra_headers if request_provider else None,
+            "provider_name": request_provider_name,
+            "provider_options": resolved_request.provider_options or {},
+            "reasoning_effort": resolved_request.reasoning_effort,
+        }
+
     spec = find_by_name(provider_name)
+
+    # Special handling for Ollama - show helpful message if misconfigured
+    resolved_model_name = resolved_model.model or model
+
+    if provider_name == "ollama" or "ollama" in resolved_model_name.lower():
+        # Check if api_base is explicitly set to None/empty (not using default)
+        ollama_config = config.providers.ollama if hasattr(config.providers, 'ollama') else None
+        api_base = config.get_api_base(model)
+
+        # If user explicitly configured ollama provider but with null/empty api_base
+        if ollama_config and ollama_config.api_base is None and api_base is None:
+            console.print("[yellow]Warning: Ollama provider configured without api_base.[/yellow]")
+            console.print("Using default: http://localhost:11434")
+            console.print("\n[dim]If this is wrong, edit ~/.hermitcrab/config.json:[/dim]")
+            console.print("""{
+  "providers": {
+    "ollama": {
+      "apiBase": "http://localhost:11434"
+    }
+  },
+  "agents": {
+    "defaults": {
+      "model": "ollama_chat/llama3.1"
+    }
+  }
+}""")
+            console.print("\n[dim]Notes:[/dim]")
+            console.print("  • Use [bold]ollama_chat/[/bold] prefix for chat models (recommended)")
+            console.print("  • Or [bold]ollama/[/bold] for text completion")
+            console.print("  • api_base should NOT include /v1 suffix")
+
     if (
-        not model.startswith("bedrock/")
+        not resolved_model_name.startswith("bedrock/")
         and not (p and p.api_key)
         and not (spec and (spec.is_oauth or spec.is_local))
     ):
@@ -313,13 +414,26 @@ def _make_provider(config: Config):
         console.print("Set one in ~/.hermitcrab/config.json under providers section")
         raise typer.Exit(1)
 
-    return LiteLLMProvider(
+    fallback_provider = LiteLLMProvider(
         api_key=p.api_key if p else None,
         api_base=config.get_api_base(model),
         default_model=model,
         extra_headers=p.extra_headers if p else None,
         provider_name=provider_name,
+        request_config_resolver=_request_config_resolver,
     )
+
+    if provider_name == "ollama":
+        return OllamaProvider(
+            api_key=p.api_key if p else None,
+            api_base=config.get_api_base(model),
+            default_model=model,
+            extra_headers=p.extra_headers if p else None,
+            request_config_resolver=_request_config_resolver,
+            fallback_provider=fallback_provider,
+        )
+
+    return fallback_provider
 
 
 # ============================================================================
@@ -348,6 +462,7 @@ def gateway(
     from hermitcrab.cron.types import CronJob
     from hermitcrab.heartbeat.service import HeartbeatService
     from hermitcrab.session.manager import SessionManager
+    from hermitcrab.session.timeout_service import SessionTimeoutService
 
     configured_level = "DEBUG" if verbose else log_level.upper()
     logger.remove()
@@ -386,6 +501,12 @@ def gateway(
         mcp_servers=config.tools.mcp_servers,
         channels_config=config.channels,
         job_models=job_models,  # Pass job models (or None for defaults)
+        distillation_enabled=config.agents.defaults.enable_distillation,
+        model_aliases=_build_runtime_model_aliases(config),
+        named_models=config.models,
+        reasoning_effort_config={
+            "reasoning_effort": config.agents.defaults.job_models.reasoning_effort,
+        },
         inactivity_timeout_s=config.agents.defaults.inactivity_timeout_s,
         llm_max_retries=config.agents.defaults.llm_max_retries,
         llm_retry_base_delay_s=config.agents.defaults.llm_retry_base_delay_s,
@@ -481,6 +602,11 @@ def gateway(
         interval_s=hb_cfg.interval_s,
         enabled=hb_cfg.enabled,
     )
+    timeout_monitor = SessionTimeoutService(
+        agent.process_expired_sessions,
+        interval_s=min(60, max(5, config.agents.defaults.inactivity_timeout_s // 6)),
+        enabled=True,
+    )
 
     if channels.enabled_channels:
         console.print(f"[green]✓[/green] Channels enabled: {', '.join(channels.enabled_channels)}")
@@ -497,6 +623,7 @@ def gateway(
         try:
             await cron.start()
             await heartbeat.start()
+            await timeout_monitor.start()
             await asyncio.gather(
                 agent.run(),
                 channels.start_all(),
@@ -504,7 +631,8 @@ def gateway(
         except KeyboardInterrupt:
             console.print("\nShutting down...")
         finally:
-            await agent.close_mcp()
+            await agent.close()
+            timeout_monitor.stop()
             heartbeat.stop()
             cron.stop()
             agent.stop()
@@ -524,6 +652,7 @@ def _run_nostr_mode(
     nostr_pubkey: str,
     markdown: bool,
     thinking_ctx: Any,
+    timeout_monitor: Any,
 ) -> None:
     """
     Run agent in Nostr listen mode.
@@ -536,6 +665,7 @@ def _run_nostr_mode(
         nostr_pubkey: Nostr pubkey (npub or hex) to listen for.
         markdown: Whether to render responses as Markdown.
         thinking_ctx: Context manager for "thinking" spinner.
+        timeout_monitor: Session timeout monitor service.
     """
 
     # Normalize pubkey to hex
@@ -566,6 +696,7 @@ def _run_nostr_mode(
     signal.signal(signal.SIGINT, _exit_on_sigint)
 
     async def run_nostr_listen():
+        await timeout_monitor.start()
         bus_task = asyncio.create_task(agent_loop.run())
         turn_done = asyncio.Event()
         turn_done.set()
@@ -577,6 +708,8 @@ def _run_nostr_mode(
                 try:
                     msg = await asyncio.wait_for(bus.consume_outbound(), timeout=1.0)
                     if msg.metadata.get("_progress"):
+                        if not msg.content or not msg.content.strip():
+                            continue
                         is_tool_hint = msg.metadata.get("_tool_hint", False)
                         ch = agent_loop.channels_config
                         if ch and is_tool_hint and not ch.send_tool_hints:
@@ -590,8 +723,11 @@ def _run_nostr_mode(
                             turn_response.append(msg.content)
                         turn_done.set()
                     elif msg.content:
-                        console.print()
-                        _print_agent_response(msg.content, render_markdown=markdown)
+                        _print_agent_response(
+                            msg.content,
+                            render_markdown=markdown,
+                            prompt_safe=True,
+                        )
                 except asyncio.TimeoutError:
                     continue
                 except asyncio.CancelledError:
@@ -626,10 +762,11 @@ def _run_nostr_mode(
                 except asyncio.CancelledError:
                     break
         finally:
+            timeout_monitor.stop()
             agent_loop.stop()
             outbound_task.cancel()
             await asyncio.gather(bus_task, outbound_task, return_exceptions=True)
-            await agent_loop.close_mcp()
+            await agent_loop.close()
 
     asyncio.run(run_nostr_listen())
 
@@ -666,6 +803,7 @@ def agent(
     from hermitcrab.bus.queue import MessageBus
     from hermitcrab.config.loader import get_data_dir, load_config
     from hermitcrab.cron.service import CronService
+    from hermitcrab.session.timeout_service import SessionTimeoutService
 
     config = load_config()
 
@@ -700,6 +838,12 @@ def agent(
         mcp_servers=config.tools.mcp_servers,
         channels_config=config.channels,
         job_models=job_models,  # Pass job models (or None for defaults)
+        distillation_enabled=config.agents.defaults.enable_distillation,
+        model_aliases=_build_runtime_model_aliases(config),
+        named_models=config.models,
+        reasoning_effort_config={
+            "reasoning_effort": config.agents.defaults.job_models.reasoning_effort,
+        },
         inactivity_timeout_s=config.agents.defaults.inactivity_timeout_s,
         llm_max_retries=config.agents.defaults.llm_max_retries,
         llm_retry_base_delay_s=config.agents.defaults.llm_retry_base_delay_s,
@@ -715,6 +859,11 @@ def agent(
             "notify_user": config.reflection.promotion.notify_user,
         },
     )
+    timeout_monitor = SessionTimeoutService(
+        agent_loop.process_expired_sessions,
+        interval_s=min(60, max(5, config.agents.defaults.inactivity_timeout_s // 6)),
+        enabled=bool(nostr_pubkey or not message),
+    )
 
     # Show spinner when logs are off (no output to miss); skip when logs are on
     def _thinking_ctx():
@@ -726,6 +875,8 @@ def agent(
         return console.status("[dim]hermitcrab is thinking...[/dim]", spinner="dots")
 
     async def _cli_progress(content: str, *, tool_hint: bool = False) -> None:
+        if not content or not content.strip():
+            return
         ch = agent_loop.channels_config
         if ch and tool_hint and not ch.send_tool_hints:
             return
@@ -741,7 +892,7 @@ def agent(
                     message, session_id, on_progress=_cli_progress
                 )
             _print_agent_response(response, render_markdown=markdown)
-            await agent_loop.close_mcp()
+            await agent_loop.close()
 
         asyncio.run(run_once())
     elif nostr_pubkey:
@@ -752,6 +903,7 @@ def agent(
             nostr_pubkey=nostr_pubkey,
             markdown=markdown,
             thinking_ctx=_thinking_ctx,
+            timeout_monitor=timeout_monitor,
         )
     else:
         # Interactive mode — route through bus like other channels
@@ -775,6 +927,7 @@ def agent(
         signal.signal(signal.SIGINT, _exit_on_sigint)
 
         async def run_interactive():
+            await timeout_monitor.start()
             bus_task = asyncio.create_task(agent_loop.run())
             turn_done = asyncio.Event()
             turn_done.set()
@@ -785,6 +938,8 @@ def agent(
                     try:
                         msg = await asyncio.wait_for(bus.consume_outbound(), timeout=1.0)
                         if msg.metadata.get("_progress"):
+                            if not msg.content or not msg.content.strip():
+                                continue
                             is_tool_hint = msg.metadata.get("_tool_hint", False)
                             ch = agent_loop.channels_config
                             if ch and is_tool_hint and not ch.send_tool_hints:
@@ -798,8 +953,11 @@ def agent(
                                 turn_response.append(msg.content)
                             turn_done.set()
                         elif msg.content:
-                            console.print()
-                            _print_agent_response(msg.content, render_markdown=markdown)
+                            _print_agent_response(
+                                msg.content,
+                                render_markdown=markdown,
+                                prompt_safe=True,
+                            )
                     except asyncio.TimeoutError:
                         continue
                     except asyncio.CancelledError:
@@ -869,10 +1027,11 @@ def agent(
                         console.print("\nGoodbye!")
                         break
             finally:
+                timeout_monitor.stop()
                 agent_loop.stop()
                 outbound_task.cancel()
                 await asyncio.gather(bus_task, outbound_task, return_exceptions=True)
-                await agent_loop.close_mcp()
+                await agent_loop.close()
 
         asyncio.run(run_interactive())
 
@@ -898,134 +1057,26 @@ def channels_status():
     table.add_column("Enabled", style="green")
     table.add_column("Configuration", style="yellow")
 
-    # WhatsApp
-    wa = config.channels.whatsapp
-    table.add_row("WhatsApp", "✓" if wa.enabled else "✗", wa.bridge_url)
-
-    dc = config.channels.discord
-    table.add_row("Discord", "✓" if dc.enabled else "✗", dc.gateway_url)
-
-    # Feishu
-    fs = config.channels.feishu
-    fs_config = f"app_id: {fs.app_id[:10]}..." if fs.app_id else "[dim]not configured[/dim]"
-    table.add_row("Feishu", "✓" if fs.enabled else "✗", fs_config)
-
-    # Mochat
-    mc = config.channels.mochat
-    mc_base = mc.base_url or "[dim]not configured[/dim]"
-    table.add_row("Mochat", "✓" if mc.enabled else "✗", mc_base)
-
     # Telegram
     tg = config.channels.telegram
     tg_config = f"token: {tg.token[:10]}..." if tg.token else "[dim]not configured[/dim]"
     table.add_row("Telegram", "✓" if tg.enabled else "✗", tg_config)
-
-    # Slack
-    slack = config.channels.slack
-    slack_config = "socket" if slack.app_token and slack.bot_token else "[dim]not configured[/dim]"
-    table.add_row("Slack", "✓" if slack.enabled else "✗", slack_config)
-
-    # DingTalk
-    dt = config.channels.dingtalk
-    dt_config = (
-        f"client_id: {dt.client_id[:10]}..." if dt.client_id else "[dim]not configured[/dim]"
-    )
-    table.add_row("DingTalk", "✓" if dt.enabled else "✗", dt_config)
-
-    # QQ
-    qq = config.channels.qq
-    qq_config = f"app_id: {qq.app_id[:10]}..." if qq.app_id else "[dim]not configured[/dim]"
-    table.add_row("QQ", "✓" if qq.enabled else "✗", qq_config)
 
     # Email
     em = config.channels.email
     em_config = em.imap_host if em.imap_host else "[dim]not configured[/dim]"
     table.add_row("Email", "✓" if em.enabled else "✗", em_config)
 
+    # Nostr
+    nostr = config.channels.nostr
+    nostr_config = (
+        f"{nostr.protocol}, {len(nostr.relays)} relay(s)"
+        if nostr.private_key
+        else "[dim]not configured[/dim]"
+    )
+    table.add_row("Nostr", "✓" if nostr.enabled else "✗", nostr_config)
+
     console.print(table)
-
-
-def _get_bridge_dir() -> Path:
-    """Get the bridge directory, setting it up if needed."""
-    import shutil
-    import subprocess
-
-    # User's bridge location
-    user_bridge = Path.home() / ".hermitcrab" / "bridge"
-
-    # Check if already built
-    if (user_bridge / "dist" / "index.js").exists():
-        return user_bridge
-
-    # Check for npm
-    if not shutil.which("npm"):
-        console.print("[red]npm not found. Please install Node.js >= 18.[/red]")
-        raise typer.Exit(1)
-
-    # Find source bridge: first check package data, then source dir
-    pkg_bridge = Path(__file__).parent.parent / "bridge"  # hermitcrab/bridge (installed)
-    src_bridge = Path(__file__).parent.parent.parent / "bridge"  # repo root/bridge (dev)
-
-    source = None
-    if (pkg_bridge / "package.json").exists():
-        source = pkg_bridge
-    elif (src_bridge / "package.json").exists():
-        source = src_bridge
-
-    if not source:
-        console.print("[red]Bridge source not found.[/red]")
-        console.print("Try reinstalling: pip install --force-reinstall hermitcrab")
-        raise typer.Exit(1)
-
-    console.print(f"{__logo__} Setting up bridge...")
-
-    # Copy to user directory
-    user_bridge.parent.mkdir(parents=True, exist_ok=True)
-    if user_bridge.exists():
-        shutil.rmtree(user_bridge)
-    shutil.copytree(source, user_bridge, ignore=shutil.ignore_patterns("node_modules", "dist"))
-
-    # Install and build
-    try:
-        console.print("  Installing dependencies...")
-        subprocess.run(["npm", "install"], cwd=user_bridge, check=True, capture_output=True)
-
-        console.print("  Building...")
-        subprocess.run(["npm", "run", "build"], cwd=user_bridge, check=True, capture_output=True)
-
-        console.print("[green]✓[/green] Bridge ready\n")
-    except subprocess.CalledProcessError as e:
-        console.print(f"[red]Build failed: {e}[/red]")
-        if e.stderr:
-            console.print(f"[dim]{e.stderr.decode()[:500]}[/dim]")
-        raise typer.Exit(1)
-
-    return user_bridge
-
-
-@channels_app.command("login")
-def channels_login():
-    """Link device via QR code."""
-    import subprocess
-
-    from hermitcrab.config.loader import load_config
-
-    config = load_config()
-    bridge_dir = _get_bridge_dir()
-
-    console.print(f"{__logo__} Starting bridge...")
-    console.print("Scan the QR code to connect.\n")
-
-    env = {**os.environ}
-    if config.channels.whatsapp.bridge_token:
-        env["BRIDGE_TOKEN"] = config.channels.whatsapp.bridge_token
-
-    try:
-        subprocess.run(["npm", "start"], cwd=bridge_dir, check=True, env=env)
-    except subprocess.CalledProcessError as e:
-        console.print(f"[red]Bridge failed: {e}[/red]")
-    except FileNotFoundError:
-        console.print("[red]npm not found. Please install Node.js.[/red]")
 
 
 # ============================================================================
@@ -1107,7 +1158,7 @@ def cron_add(
     deliver: bool = typer.Option(False, "--deliver", "-d", help="Deliver response to channel"),
     to: str = typer.Option(None, "--to", help="Recipient for delivery"),
     channel: str = typer.Option(
-        None, "--channel", help="Channel for delivery (e.g. 'telegram', 'whatsapp')"
+        None, "--channel", help="Channel for delivery (e.g. 'telegram', 'email', 'nostr')"
     ),
 ):
     """Add a scheduled job."""
@@ -1227,6 +1278,12 @@ def cron_run(
         mcp_servers=config.tools.mcp_servers,
         channels_config=config.channels,
         job_models=job_models,  # Pass job models (or None for defaults)
+        distillation_enabled=config.agents.defaults.enable_distillation,
+        model_aliases=_build_runtime_model_aliases(config),
+        named_models=config.models,
+        reasoning_effort_config={
+            "reasoning_effort": config.agents.defaults.job_models.reasoning_effort,
+        },
         inactivity_timeout_s=config.agents.defaults.inactivity_timeout_s,
         llm_max_retries=config.agents.defaults.llm_max_retries,
         llm_retry_base_delay_s=config.agents.defaults.llm_retry_base_delay_s,

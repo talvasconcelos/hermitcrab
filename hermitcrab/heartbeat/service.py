@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable, Coroutine
 
@@ -10,6 +11,9 @@ from loguru import logger
 
 if TYPE_CHECKING:
     from hermitcrab.providers.base import LLMProvider
+
+_HEARTBEAT_DISABLED_MARKER = "HEARTBEAT_DISABLED"
+_HEARTBEAT_DIRECT_MARKER = "HEARTBEAT_DIRECT"
 
 _HEARTBEAT_TOOL = [
     {
@@ -93,7 +97,71 @@ class HeartbeatService:
 
         # Check for disable marker in first 500 chars (should be at top)
         preview = content[:500].upper()
-        return "HEARTBEAT_DISABLED" in preview
+        return _HEARTBEAT_DISABLED_MARKER in preview
+
+    def _should_bypass_llm(self, content: str) -> bool:
+        """Check if heartbeat should execute directly without an LLM call."""
+        if not content:
+            return False
+        return _HEARTBEAT_DIRECT_MARKER in content[:500].upper()
+
+    def _extract_active_tasks(self, content: str) -> str:
+        """Extract non-comment task lines from the Active Tasks section."""
+        lines = content.splitlines()
+        in_active_tasks = False
+        task_lines: list[str] = []
+
+        for line in lines:
+            stripped = line.strip()
+
+            if stripped.startswith("## "):
+                if in_active_tasks:
+                    break
+                in_active_tasks = stripped.lower() == "## active tasks"
+                continue
+
+            if not in_active_tasks:
+                continue
+
+            if not stripped or stripped.startswith("<!--"):
+                continue
+
+            task_lines.append(line.rstrip())
+
+        return "\n".join(task_lines).strip()
+
+    def _parse_heartbeat_tool_args(self, arguments: Any) -> dict[str, Any]:
+        """Normalize tool call arguments from providers that return JSON strings."""
+        if isinstance(arguments, dict):
+            return arguments
+
+        if isinstance(arguments, str):
+            try:
+                parsed = json.loads(arguments)
+            except json.JSONDecodeError:
+                logger.warning("Heartbeat: invalid tool arguments, defaulting to skip")
+                return {}
+            if isinstance(parsed, dict):
+                return parsed
+
+        logger.warning("Heartbeat: unexpected tool arguments type {}, defaulting to skip", type(arguments).__name__)
+        return {}
+
+    def _normalize_decision(self, arguments: Any) -> tuple[str, str]:
+        """Return a safe heartbeat decision tuple from provider tool arguments."""
+        args = self._parse_heartbeat_tool_args(arguments)
+
+        action = args.get("action", "skip")
+        if action not in {"skip", "run"}:
+            logger.warning("Heartbeat: invalid action {!r}, defaulting to skip", action)
+            action = "skip"
+
+        tasks = args.get("tasks", "")
+        if not isinstance(tasks, str):
+            logger.warning("Heartbeat: invalid tasks type {}, defaulting to empty string", type(tasks).__name__)
+            tasks = ""
+
+        return action, tasks
 
     async def _decide(self, content: str) -> tuple[str, str]:
         """Phase 1: ask LLM to decide skip/run via virtual tool call.
@@ -115,8 +183,7 @@ class HeartbeatService:
         if not response.has_tool_calls:
             return "skip", ""
 
-        args = response.tool_calls[0].arguments
-        return args.get("action", "skip"), args.get("tasks", "")
+        return self._normalize_decision(response.tool_calls[0].arguments)
 
     async def start(self) -> None:
         """Start the heartbeat service."""
@@ -159,6 +226,19 @@ class HeartbeatService:
             logger.debug("Heartbeat: disabled via marker or empty file")
             return
 
+        if self._should_bypass_llm(content):
+            tasks = self._extract_active_tasks(content)
+            if not tasks:
+                logger.info("Heartbeat: direct mode enabled, but no active tasks found")
+                return
+            logger.info("Heartbeat: direct mode enabled, executing without LLM")
+            if self.on_execute:
+                response = await self.on_execute(tasks)
+                if response and self.on_notify:
+                    logger.info("Heartbeat: completed, delivering response")
+                    await self.on_notify(response)
+            return
+
         logger.info("Heartbeat: checking for tasks...")
 
         try:
@@ -185,6 +265,12 @@ class HeartbeatService:
         if self._is_heartbeat_disabled(content):
             logger.debug("Heartbeat: disabled via marker or empty file")
             return None
+
+        if self._should_bypass_llm(content):
+            tasks = self._extract_active_tasks(content)
+            if not tasks or not self.on_execute:
+                return None
+            return await self.on_execute(tasks)
 
         action, tasks = await self._decide(content)
         if action != "run" or not self.on_execute:

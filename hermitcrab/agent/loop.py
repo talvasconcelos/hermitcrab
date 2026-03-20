@@ -25,24 +25,36 @@ Core Principles:
 from __future__ import annotations
 
 import asyncio
+import inspect
 import json
 import re
-import time
-from collections import defaultdict
 from contextlib import AsyncExitStack
-from datetime import datetime, timezone
 from enum import Enum
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Awaitable, Callable
 
 from loguru import logger
 
+from hermitcrab.agent.background_jobs import BackgroundJobManager, SessionDigest
+from hermitcrab.agent.background_messages import (
+    fallback_system_task_summary,
+    is_low_value_system_reply,
+)
 from hermitcrab.agent.context import ContextBuilder
-from hermitcrab.agent.distillation import AtomicCandidate, CandidateType
+from hermitcrab.agent.distillation import AtomicCandidate
+from hermitcrab.agent.execution_state import ExecutionPhase, ExecutionStateTracker
 from hermitcrab.agent.journal import JournalStore
 from hermitcrab.agent.knowledge import KnowledgeStore
 from hermitcrab.agent.memory import MemoryStore
+from hermitcrab.agent.message_preparation import (
+    build_delegation_hint,
+    clean_snippet,
+    is_empty_response,
+    is_intent_only_response,
+    should_hint_subagent_delegation,
+)
 from hermitcrab.agent.reflection import ReflectionService
+from hermitcrab.agent.session_lifecycle import SessionLifecycleManager
 from hermitcrab.agent.subagent import SubagentManager
 from hermitcrab.agent.tools.cron import CronTool
 from hermitcrab.agent.tools.filesystem import EditFileTool, ListDirTool, ReadFileTool, WriteFileTool
@@ -55,6 +67,8 @@ from hermitcrab.agent.tools.knowledge import (
 )
 from hermitcrab.agent.tools.mcp import connect_mcp_servers
 from hermitcrab.agent.tools.memory import (
+    ReadMemoryTool,
+    SearchMemoryTool,
     WriteDecisionTool,
     WriteFactTool,
     WriteGoalTool,
@@ -66,12 +80,12 @@ from hermitcrab.agent.tools.registry import ToolRegistry
 from hermitcrab.agent.tools.shell import ExecTool
 from hermitcrab.agent.tools.spawn import SpawnTool
 from hermitcrab.agent.tools.web import WebFetchTool, WebSearchTool
+from hermitcrab.agent.turn_runner import TurnRunner, TurnRunnerConfig
 from hermitcrab.bus.events import InboundMessage, OutboundMessage
 from hermitcrab.bus.queue import MessageBus
-from hermitcrab.config.schema import ExecToolConfig
+from hermitcrab.config.schema import ExecToolConfig, ModelAliasConfig, NamedModelConfig
 from hermitcrab.providers.base import LLMProvider
 from hermitcrab.session.manager import Session, SessionManager
-from hermitcrab.utils.helpers import ensure_dir, safe_filename
 
 if TYPE_CHECKING:
     from hermitcrab.config.schema import ChannelsConfig
@@ -94,6 +108,7 @@ class JobClass(str, Enum):
     DISTILLATION = "distillation"  # Atomic extraction, local only
     REFLECTION = "reflection"  # Meta-analysis, local preferred
     SUMMARISATION = "summarisation"  # Content summarization, flexible
+    SUBAGENT = "subagent"  # Background subagent tasks
 
 
 # Session inactivity timeout (30 minutes)
@@ -141,6 +156,12 @@ class AgentLoop:
         job_models: dict[JobClass, str | None] | None = None,
         # Optional: reflection promotion config
         reflection_config: dict[str, Any] | None = None,
+        distillation_enabled: bool = False,
+        # Optional: model aliases (friendly names like "qwen", "local")
+        model_aliases: dict[str, str | ModelAliasConfig] | None = None,
+        named_models: dict[str, NamedModelConfig] | None = None,
+        # Optional: reasoning effort config (loaded from config)
+        reasoning_effort_config: dict[str, Any] | None = None,
         inactivity_timeout_s: int = INACTIVITY_TIMEOUT_S,
         llm_max_retries: int = 2,
         llm_retry_base_delay_s: float = 0.5,
@@ -164,6 +185,7 @@ class AgentLoop:
         self.llm_retry_base_delay_s = max(0.0, llm_retry_base_delay_s)
         self.max_loop_seconds = max(1, max_loop_seconds)
         self.max_identical_tool_cycles = max(2, max_identical_tool_cycles)
+        self.distillation_enabled = distillation_enabled
         self.brave_api_key = brave_api_key
         self.exec_config = exec_config or ExecToolConfig()
         self.cron_service = cron_service
@@ -181,53 +203,83 @@ class AgentLoop:
                 JobClass.DISTILLATION: None,  # Skip by default
                 JobClass.REFLECTION: self.model,
                 JobClass.SUMMARISATION: self.model,
+                JobClass.SUBAGENT: self.model,
             }
+        self.model_aliases = model_aliases or {}
+        self.named_models = named_models or {}
+
+        # Reasoning effort configuration (default: "medium")
+        self._reasoning_effort = (
+            reasoning_effort_config.get("reasoning_effort", "medium")
+            if reasoning_effort_config
+            else "medium"
+        )
 
         self.context = ContextBuilder(
             workspace,
             memory_max_chars=memory_context_max_chars,
             memory_max_items_per_category=memory_context_max_items_per_category,
             memory_max_item_chars=memory_context_max_item_chars,
+            model_aliases=self.model_aliases,
+            named_models=self.named_models,
         )
         self.sessions = session_manager or SessionManager(workspace)
         self.journal = JournalStore(workspace)
         self.memory = MemoryStore(workspace)
         self.knowledge = KnowledgeStore(workspace)
         self.tools = ToolRegistry()
+        self.execution_state = ExecutionStateTracker()
         self.subagents = SubagentManager(
             provider=provider,
             workspace=workspace,
             bus=bus,
-            model=self.model,
+            model=self._job_models.get(JobClass.SUBAGENT) or self.model,
             temperature=self.temperature,
             max_tokens=self.max_tokens,
             brave_api_key=brave_api_key,
             exec_config=self.exec_config,
             restrict_to_workspace=restrict_to_workspace,
+            model_aliases=self.model_aliases,
+            named_models=self.named_models,
         )
 
         # Initialize reflection service
         reflection_model = self._get_model_for_job(JobClass.REFLECTION) or self.model
+        reflection_promotion = reflection_config or {}
         self._reflection_service = ReflectionService(
             memory=self.memory,
-            provider=provider,
+            chat_callable=self._chat_with_retry,
             model=reflection_model,
+            auto_promote=bool(reflection_promotion.get("auto_promote", False)),
+            allowed_targets=reflection_promotion.get("target_files") or [],
+            max_file_lines=int(reflection_promotion.get("max_file_lines", 500) or 500),
         )
-        self._reflection_auto_promote = reflection_config.get("auto_promote", True) if reflection_config else False
-        self._reflection_notify = reflection_config.get("notify_user", True) if reflection_config else True
 
         self._running = False
         self._mcp_servers = mcp_servers or {}
         self._mcp_stack: AsyncExitStack | None = None
         self._mcp_connected = False
         self._mcp_connecting = False
-        self._scratchpad_dir = ensure_dir(workspace / "scratchpads")
-        # Track background tasks for cleanup (fire-and-forget, but track for shutdown)
-        self._background_tasks: set[asyncio.Task] = set()
-        # Session timeout tracking (checked on each message)
-        self._session_timers: dict[str, datetime] = {}
-        # Per-session lock to prevent concurrent turn processing races
-        self._session_locks: defaultdict[str, asyncio.Lock] = defaultdict(asyncio.Lock)
+        self._background_jobs = BackgroundJobManager(
+            workspace=workspace,
+            journal=self.journal,
+            memory=self.memory,
+            reflection_service=self._reflection_service,
+            chat_callable=self._chat_with_retry,
+            get_model_for_job=self._get_model_for_job,
+            strip_think=self._strip_think,
+            reasoning_effort=self._reasoning_effort,
+        )
+        self._background_tasks = self._background_jobs._background_tasks
+        self._session_lifecycle = SessionLifecycleManager(
+            workspace=workspace,
+            sessions=self.sessions,
+            inactivity_timeout_s=self.inactivity_timeout_s,
+        )
+        self._session_timers = self._session_lifecycle.session_timers
+        self._session_active_turns = self._session_lifecycle.session_active_turns
+        self._session_end_in_progress = self._session_lifecycle.session_end_in_progress
+        self._session_locks = self._session_lifecycle.session_locks
         self._register_default_tools()
 
     def _register_default_tools(self) -> None:
@@ -247,6 +299,8 @@ class AgentLoop:
         self.tools.register(MessageTool(send_callback=self.bus.publish_outbound))
         self.tools.register(SpawnTool(manager=self.subagents))
 
+        self.tools.register(ReadMemoryTool(self.memory))
+        self.tools.register(SearchMemoryTool(self.memory))
         self.tools.register(WriteFactTool(self.memory))
         self.tools.register(WriteDecisionTool(self.memory))
         self.tools.register(WriteGoalTool(self.memory))
@@ -310,7 +364,12 @@ class AgentLoop:
         """Format tool calls as concise hint, e.g. 'web_search("query")'."""
 
         def _fmt(tc):
-            val = next(iter(tc.arguments.values()), None) if tc.arguments else None
+            if isinstance(tc.arguments, dict):
+                val = next(iter(tc.arguments.values()), None) if tc.arguments else None
+            elif isinstance(tc.arguments, str):
+                val = tc.arguments
+            else:
+                val = None
             if isinstance(val, str):
                 return f'{tc.name}("{val[:40]}…")' if len(val) > 40 else f'{tc.name}("{val}")'
             if val is None:
@@ -353,39 +412,30 @@ class AgentLoop:
         max_tokens: int,
         tools: list[dict[str, Any]] | None = None,
         job_class: JobClass | None = None,
+        reasoning_effort: str | None = None,
     ):
         """Call provider.chat with bounded retries/backoff."""
-        attempts = self.llm_max_retries + 1
-        for attempt in range(attempts):
-            try:
-                return await self.provider.chat(
-                    messages=messages,
-                    tools=tools,
-                    model=model,
-                    temperature=temperature,
-                    max_tokens=max_tokens,
-                )
-            except asyncio.CancelledError:
-                raise
-            except Exception as e:
-                if attempt >= attempts - 1:
-                    raise
-                delay = self.llm_retry_base_delay_s * (2**attempt)
-                logger.warning(
-                    "LLM call failed (attempt {}/{}; job={}): {}",
-                    attempt + 1,
-                    attempts,
-                    job_class.value if job_class else "unknown",
-                    e,
-                )
-                if delay > 0:
-                    await asyncio.sleep(delay)
+        chat_with_retry = getattr(self.provider, "chat_with_retry", None)
+        if callable(chat_with_retry):
+            response = chat_with_retry(
+                messages=messages,
+                tools=tools,
+                model=model,
+                temperature=temperature,
+                max_tokens=max_tokens,
+                reasoning_effort=reasoning_effort,
+            )
+            if inspect.isawaitable(response):
+                return await response
 
-    @staticmethod
-    def _tool_cycle_signature(tool_calls: list) -> str:
-        """Create deterministic signature for a batch of tool calls."""
-        payload = [{"name": tc.name, "arguments": tc.arguments} for tc in tool_calls]
-        return json.dumps(payload, sort_keys=True, ensure_ascii=False, default=str)
+        return await self.provider.chat(
+            messages=messages,
+            tools=tools,
+            model=model,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            reasoning_effort=reasoning_effort,
+        )
 
     def _schedule_background(
         self,
@@ -405,19 +455,7 @@ class AgentLoop:
             task_name: Human-readable name for logging.
         """
 
-        async def _wrapped():
-            try:
-                await coro
-            except asyncio.CancelledError:
-                logger.debug("Background task cancelled: {}", task_name)
-            except Exception as e:
-                # Background cognition failures never affect correctness
-                logger.warning("Background task failed (non-fatal): {}: {}", task_name, e)
-            finally:
-                self._background_tasks.discard(asyncio.current_task())
-
-        task = asyncio.create_task(_wrapped(), name=task_name)
-        self._background_tasks.add(task)
+        self._background_jobs.schedule_background(coro, task_name)
 
     def _check_session_timeout(self, session_key: str) -> bool:
         """
@@ -431,17 +469,7 @@ class AgentLoop:
         Returns:
             True if session timed out, False otherwise.
         """
-        last_activity = self._session_timers.get(session_key)
-        if last_activity is None:
-            return False
-
-        elapsed = (datetime.now(timezone.utc) - last_activity).total_seconds()
-        timed_out = elapsed > self.inactivity_timeout_s
-
-        if timed_out:
-            logger.info("Session timed out ({}s inactivity): {}", elapsed, session_key)
-
-        return timed_out
+        return self._session_lifecycle.check_session_timeout(session_key)
 
     def _update_session_timer(self, session_key: str) -> None:
         """
@@ -452,43 +480,41 @@ class AgentLoop:
         Args:
             session_key: Session identifier.
         """
-        self._session_timers[session_key] = datetime.now(timezone.utc)
+        self._session_lifecycle.update_session_timer(session_key)
+
+    async def process_expired_sessions(self) -> int:
+        """Finalize sessions that exceeded the inactivity timeout."""
+        return await self._session_lifecycle.process_expired_sessions(
+            schedule_background=self._schedule_background,
+            run_session_end=self._run_session_end,
+        )
+
+    async def _run_session_end(self, session: Session, reason: str) -> None:
+        """Run the session-end pipeline and clear in-progress tracking."""
+        await self._session_lifecycle.run_session_end(
+            session,
+            reason,
+            on_session_end=lambda current_session, current_reason: self._on_session_end(
+                current_session,
+                reason=current_reason,
+            ),
+        )
 
     def _get_session_lock(self, session_key: str) -> asyncio.Lock:
         """Get/create lock for a session key."""
-        return self._session_locks[session_key]
+        return self._session_lifecycle.get_session_lock(session_key)
 
     def _scratchpad_path(self, session_key: str) -> Path:
         """Get filesystem path for a session's scratchpad."""
-        return self._scratchpad_dir / f"{safe_filename(session_key.replace(':', '_'))}.md"
+        return self._session_lifecycle.scratchpad_path(session_key)
 
     def _ensure_scratchpad(self, session_key: str) -> Path:
         """Ensure scratchpad file exists for the current session."""
-        path = self._scratchpad_path(session_key)
-        if not path.exists():
-            path.write_text(
-                f"# Scratchpad: {session_key}\n\n"
-                "Transient notes for this session. Archived on session end.\n",
-                encoding="utf-8",
-            )
-        return path
+        return self._session_lifecycle.ensure_scratchpad(session_key)
 
     def _finalize_scratchpad(self, session_key: str, reason: str) -> None:
         """Archive or clear session scratchpad when a session ends."""
-        path = self._scratchpad_path(session_key)
-        if not path.exists():
-            return
-        content = path.read_text(encoding="utf-8").strip()
-        if not content:
-            path.unlink(missing_ok=True)
-            return
-
-        archive_dir = ensure_dir(self._scratchpad_dir / "archive")
-        ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H-%M-%S")
-        archive_name = f"{safe_filename(session_key.replace(':', '_'))}-{reason}-{ts}.md"
-        archive_path = archive_dir / archive_name
-        path.replace(archive_path)
-        logger.info("Archived scratchpad for {} -> {}", session_key, archive_path.name)
+        self._session_lifecycle.finalize_scratchpad(session_key, reason)
 
     async def _on_session_end(
         self,
@@ -512,69 +538,18 @@ class AgentLoop:
             reason: "explicit" (user reset) or "timeout" (inactivity).
             messages_snapshot: Optional immutable copy of session messages for background tasks.
         """
-        logger.info("Session ended ({}): {}", reason, session.key)
-        self._finalize_scratchpad(session.key, reason)
-
-        # Clean up timer
-        self._session_timers.pop(session.key, None)
-
-        # Use snapshot if provided (for explicit reset before clear), otherwise use session
-        all_messages = (
-            messages_snapshot if messages_snapshot is not None else list(session.messages)
+        await self._session_lifecycle.on_session_end(
+            session,
+            reason=reason,
+            messages_snapshot=messages_snapshot,
+            schedule_background=self._schedule_background,
+            synthesize_journal_from_messages=self._synthesize_journal_from_messages,
+            distillation_enabled=self.distillation_enabled,
+            distillation_model_available=bool(self._get_model_for_job(JobClass.DISTILLATION)),
+            distill_session_from_messages=self._distill_session_from_messages,
+            reflection_model_available=bool(self._get_model_for_job(JobClass.REFLECTION)),
+            reflect_on_session_from_messages=self._reflect_on_session_from_messages,
         )
-        last_cognition_index = int(session.metadata.get("last_cognition_index", 0) or 0)
-        if last_cognition_index < 0:
-            last_cognition_index = 0
-        if last_cognition_index > len(all_messages):
-            last_cognition_index = len(all_messages)
-        messages_for_background = all_messages[last_cognition_index:]
-        session.metadata["last_cognition_index"] = len(all_messages)
-        self.sessions.save(session)
-
-        if not messages_for_background:
-            logger.debug(
-                "Session end pipeline has no new messages: key={} reason={} last_index={}",
-                session.key,
-                reason,
-                last_cognition_index,
-            )
-        logger.debug(
-            "Session end pipeline start: key={} reason={} messages={}",
-            session.key,
-            reason,
-            len(messages_for_background),
-        )
-
-        # Phase E: Deferred journal synthesis (non-blocking)
-        # Journal is narrative, lossy, non-authoritative
-        self._schedule_background(
-            self._synthesize_journal_from_messages(messages_for_background, session.key),
-            f"journal:{session.key}",
-        )
-        logger.debug("Scheduled journal synthesis for {}", session.key)
-
-        # Optional: distillation (atomic extraction, local only)
-        # Skip if no local model available
-        distillation_model = self._get_model_for_job(JobClass.DISTILLATION)
-        if distillation_model:
-            self._schedule_background(
-                self._distill_session_from_messages(messages_for_background, session.key),
-                f"distill:{session.key}",
-            )
-            logger.debug("Scheduled distillation for {}", session.key)
-        else:
-            logger.debug("Distillation skipped (no local model): {}", session.key)
-
-        # Optional: reflection (meta-analysis)
-        reflection_model = self._get_model_for_job(JobClass.REFLECTION)
-        if reflection_model:
-            self._schedule_background(
-                self._reflect_on_session_from_messages(messages_for_background, session.key),
-                f"reflect:{session.key}",
-            )
-            logger.debug("Scheduled reflection for {}", session.key)
-        else:
-            logger.debug("Reflection skipped (no model): {}", session.key)
 
     async def _synthesize_journal(self, session: Session) -> None:
         """
@@ -592,90 +567,7 @@ class AgentLoop:
         Args:
             session: Session to synthesize.
         """
-        try:
-            # Gather session data for synthesis
-            messages = session.messages
-            if not messages:
-                return  # Empty session, no journal needed
-
-            # Extract tool call names (not raw outputs) for context
-            tool_names = set()
-            for msg in messages:
-                if msg.get("role") == "tool":
-                    tool_names.add(msg.get("name", "unknown"))
-
-            # Build synthesis prompt
-            user_messages = [m for m in messages if m.get("role") == "user"]
-            assistant_messages = [m for m in messages if m.get("role") == "assistant"]
-            timestamps = [
-                m.get("timestamp") for m in messages if isinstance(m.get("timestamp"), str)
-            ]
-            time_span = (
-                f"{timestamps[0]} -> {timestamps[-1]}" if len(timestamps) >= 2 else "unknown"
-            )
-            user_preview = "; ".join(
-                (m.get("content", "") or "").strip().replace("\n", " ")[:120]
-                for m in user_messages[:3]
-                if m.get("content")
-            )
-
-            channel = (
-                getattr(session, "channel", None) or getattr(session, "chat_id", None) or "unknown"
-            )
-            prompt = (
-                f"This is your own journal, written in your own words, to help the user and yourself.\n"
-                f"Your workspace is your house, your memories are here to help you help the user.\n"
-                f"Summarize this session as a brief narrative, framing yourself as 'I' (the assistant).\n"
-                f"Channel: {channel}\n"
-                f"Time span (ISO): {time_span}\n"
-                f"User messages: {len(user_messages)}\n"
-                f"My responses: {len(assistant_messages)}\n"
-                f"Tools used: {', '.join(tool_names) if tool_names else 'none'}\n\n"
-                f"User intent snippets: {user_preview or 'none'}\n\n"
-                "Write 3-5 concise sentences that mention what the user requested, what I attempted, what succeeded or failed, and any important outcome.\n"
-                "Each entry should state the channel it came from."
-            )
-
-            # Try LLM synthesis if model available
-            model = self._get_model_for_job(JobClass.JOURNAL_SYNTHESIS)
-            if model:
-                try:
-                    response = await self._chat_with_retry(
-                        messages=[{"role": "user", "content": prompt}],
-                        model=model,
-                        temperature=0.05,
-                        max_tokens=256,
-                        job_class=JobClass.JOURNAL_SYNTHESIS,
-                    )
-                    content = self._strip_think(response.content)
-                    if content:
-                        self.journal.write_entry(
-                            content=content,
-                            session_keys=[session.key],
-                            tags=["session", "synthesis"],
-                        )
-                        logger.info("Journal synthesized (LLM): {}", session.key)
-                        return
-                except Exception as e:
-                    logger.warning("Journal LLM failed, using fallback: {}", e)
-
-            # Fallback: deterministic summary
-            fallback = (
-                f"## Session: {session.key}\n\n"
-                f"User sent {len(user_messages)} message(s). "
-                f"Agent responded {len(assistant_messages)} time(s). "
-                f"Tools: {', '.join(sorted(tool_names)) if tool_names else 'none'}."
-            )
-            self.journal.write_entry(
-                content=fallback,
-                session_keys=[session.key],
-                tags=["session", "fallback"],
-            )
-            logger.info("Journal written (fallback): {}", session.key)
-
-        except Exception as e:
-            # Journal failures never block agent operation
-            logger.warning("Journal synthesis failed (non-fatal): {}: {}", session.key, e)
+        await self._background_jobs.synthesize_journal(session, JobClass.JOURNAL_SYNTHESIS)
 
     async def _synthesize_journal_from_messages(
         self,
@@ -691,19 +583,15 @@ class AgentLoop:
             messages: List of session messages.
             session_key: Session identifier.
         """
-
-        # Create minimal session-like object
-        class _SessionSnapshot:
-            def __init__(self, messages: list[dict], key: str):
-                self.messages = messages
-                self.key = key
-
-        snapshot = _SessionSnapshot(messages, session_key)
-        await self._synthesize_journal(snapshot)
+        await self._background_jobs.synthesize_journal_from_messages(
+            messages,
+            session_key,
+            JobClass.JOURNAL_SYNTHESIS,
+        )
 
     async def _distill_session(self, session: Session) -> None:
         """
-        Extract atomic candidates from session (fact, task, goal, decision, reflection).
+        Extract atomic candidates from session (fact, task, goal, decision).
 
         Distillation:
         - Produces proposals only (not authoritative)
@@ -714,159 +602,7 @@ class AgentLoop:
         Args:
             session: Session to distill.
         """
-        try:
-            logger.debug("Distillation started: {}", session.key)
-            messages = self._filter_messages_for_distillation(session.messages, session.key)
-            if not messages:
-                logger.debug("Distillation skipped (no messages after filtering): {}", session.key)
-                return  # Empty session, nothing to distill
-
-            # Build distillation prompt
-            prompt = (
-                "Extract atomic knowledge candidates from this agent session.\n\n"
-                "Look for:\n"
-                "- FACTS: User preferences, project context, established truths\n"
-                "- DECISIONS: Architectural choices, trade-offs, locked decisions\n"
-                "- GOALS: Objectives, outcomes the user wants to achieve\n"
-                "- TASKS: Action items, todos, things to do (MUST include task_assignee)\n"
-                "- REFLECTIONS: Insights, patterns, observations about the work\n\n"
-                "IMPORTANT: For TASK type candidates, you MUST specify task_assignee field.\n"
-                "Use 'user' for user tasks, or the specific person/system responsible.\n\n"
-                "Session content:\n"
-            )
-
-            for msg in messages[:50]:  # Limit to first 50 messages
-                role = msg.get("role", "unknown")
-                content = msg.get("content", "")[:500]  # Truncate each message
-                if role == "user":
-                    prompt += f"User: {content}\n"
-                elif role == "assistant":
-                    prompt += f"Assistant: {content}\n"
-
-            prompt += (
-                "\n\nReturn candidates as a JSON object with 'candidates' array.\n"
-                "Each candidate must have: type, title, content.\n"
-                "Optional: confidence (0-1), tags, and type-specific fields.\n"
-                "For TASK type: task_assignee (REQUIRED), task_status, task_deadline, task_priority\n"
-                "For GOAL type: goal_status, goal_priority, goal_horizon\n"
-                "For DECISION type: decision_status, decision_rationale, decision_supersedes\n"
-                "Be conservative - only extract clear, atomic knowledge."
-            )
-
-            # Try LLM distillation
-            model = self._get_model_for_job(JobClass.DISTILLATION)
-            if not model:
-                logger.debug("Distillation skipped (no model): {}", session.key)
-                return
-
-            try:
-                response = await self._chat_with_retry(
-                    messages=[{"role": "user", "content": prompt}],
-                    model=model,
-                    temperature=0.1,
-                    max_tokens=2048,
-                    job_class=JobClass.DISTILLATION,
-                )
-
-                content = self._strip_think(response.content)
-                if not content:
-                    return
-
-                # Try to extract JSON from response
-                json_start = content.find("{")
-                json_end = content.rfind("}") + 1
-                if json_start >= 0 and json_end > json_start:
-                    json_str = content[json_start:json_end]
-                    data = json.loads(json_str)
-
-                    candidates = data.get("candidates", [])
-                    validated_count = 0
-
-                    for candidate_data in candidates:
-                        try:
-                            candidate = AtomicCandidate.from_dict(candidate_data)
-                            candidate.source_session = session.key
-
-                            # Validate candidate
-                            errors = candidate.validate()
-                            if errors:
-                                logger.warning(
-                                    "Candidate validation failed: {}: {}",
-                                    candidate.title,
-                                    errors,
-                                )
-                                continue
-
-                            # Commit to memory via Tier 0 path
-                            # This is the authoritative write - distillation proposes, memory decides
-                            self._commit_candidate_to_memory(candidate)
-                            validated_count += 1
-
-                        except Exception as e:
-                            logger.warning(
-                                "Failed to parse candidate: {}: {}",
-                                candidate_data.get("title", "unknown"),
-                                e,
-                            )
-
-                    if validated_count > 0:
-                        logger.info(
-                            "Distillation complete: {} candidates from {}",
-                            validated_count,
-                            session.key,
-                        )
-                    else:
-                        logger.debug("No valid candidates distilled: {}", session.key)
-
-            except json.JSONDecodeError as e:
-                logger.warning("Distillation response not valid JSON: {}: {}", session.key, e)
-            except Exception as e:
-                logger.warning("Distillation LLM failed: {}: {}", session.key, e)
-
-        except Exception as e:
-            # Distillation failures never block agent operation
-            logger.warning("Distillation failed (non-fatal): {}: {}", session.key, e)
-
-    @staticmethod
-    def _iter_strings(obj: Any) -> list[str]:
-        """Collect string values recursively from nested objects."""
-        values: list[str] = []
-        if isinstance(obj, str):
-            return [obj]
-        if isinstance(obj, dict):
-            for v in obj.values():
-                values.extend(AgentLoop._iter_strings(v))
-        elif isinstance(obj, list):
-            for item in obj:
-                values.extend(AgentLoop._iter_strings(item))
-        return values
-
-    def _tool_call_targets_scratchpad(self, tc: dict[str, Any], session_key: str) -> bool:
-        """Return True if tool call arguments reference current session scratchpad."""
-        fn = tc.get("function", {}) if isinstance(tc, dict) else {}
-        args_raw = fn.get("arguments", {})
-        if isinstance(args_raw, str):
-            try:
-                args = json.loads(args_raw)
-            except Exception:
-                args = args_raw
-        else:
-            args = args_raw
-
-        strings = self._iter_strings(args)
-        scratchpad = self._scratchpad_path(session_key).resolve()
-        for value in strings:
-            try:
-                p = Path(value)
-                if not p.is_absolute():
-                    p = (self.workspace / p).resolve()
-                else:
-                    p = p.resolve()
-            except Exception:
-                continue
-            if p == scratchpad:
-                return True
-        return False
+        await self._background_jobs.distill_session(session, JobClass.DISTILLATION)
 
     def _filter_messages_for_distillation(
         self,
@@ -874,34 +610,7 @@ class AgentLoop:
         session_key: str,
     ) -> list[dict[str, Any]]:
         """Drop scratchpad-specific tool traces so they aren't distilled."""
-        excluded_tool_call_ids: set[str] = set()
-        filtered: list[dict[str, Any]] = []
-
-        for msg in messages:
-            if msg.get("role") == "assistant" and isinstance(msg.get("tool_calls"), list):
-                kept_calls = []
-                for tc in msg["tool_calls"]:
-                    if self._tool_call_targets_scratchpad(tc, session_key):
-                        if tc_id := tc.get("id"):
-                            excluded_tool_call_ids.add(tc_id)
-                        continue
-                    kept_calls.append(tc)
-
-                if kept_calls != msg["tool_calls"]:
-                    msg_copy = dict(msg)
-                    if kept_calls:
-                        msg_copy["tool_calls"] = kept_calls
-                    else:
-                        msg_copy.pop("tool_calls", None)
-                    filtered.append(msg_copy)
-                    continue
-
-            if msg.get("role") == "tool" and msg.get("tool_call_id") in excluded_tool_call_ids:
-                continue
-
-            filtered.append(msg)
-
-        return filtered
+        return self._background_jobs.filter_messages_for_distillation(messages, session_key)
 
     async def _distill_session_from_messages(
         self,
@@ -918,13 +627,11 @@ class AgentLoop:
             session_key: Session identifier.
         """
 
-        class _SessionSnapshot:
-            def __init__(self, messages: list[dict], key: str):
-                self.messages = messages
-                self.key = key
-
-        snapshot = _SessionSnapshot(messages, session_key)
-        await self._distill_session(snapshot)
+        await self._background_jobs.distill_session_from_messages(
+            messages,
+            session_key,
+            JobClass.DISTILLATION,
+        )
 
     def _commit_candidate_to_memory(self, candidate: AtomicCandidate) -> None:
         """
@@ -941,40 +648,7 @@ class AgentLoop:
             - Each candidate type maps to specific memory.write_*() method
             - This is Tier 0 logic - deterministic, Python-authoritative
         """
-        try:
-            params = candidate.to_memory_params()
-
-            if candidate.type == CandidateType.FACT:
-                self.memory.write_fact(**params)
-                logger.info("Memory commit: fact '{}'", candidate.title)
-
-            elif candidate.type == CandidateType.DECISION:
-                self.memory.write_decision(**params)
-                logger.info("Memory commit: decision '{}'", candidate.title)
-
-            elif candidate.type == CandidateType.GOAL:
-                self.memory.write_goal(**params)
-                logger.info("Memory commit: goal '{}'", candidate.title)
-
-            elif candidate.type == CandidateType.TASK:
-                # Ensure assignee is set (required field)
-                if not params.get("assignee"):
-                    params["assignee"] = "distilled"  # Default for distilled tasks
-                self.memory.write_task(**params)
-                logger.info("Memory commit: task '{}'", candidate.title)
-
-            elif candidate.type == CandidateType.REFLECTION:
-                self.memory.write_reflection(**params)
-                logger.info("Memory commit: reflection '{}'", candidate.title)
-
-        except Exception as e:
-            # Memory commit failures logged but don't propagate
-            # (called from background task, must not affect main loop)
-            logger.error(
-                "Failed to commit candidate to memory: {}: {}",
-                candidate.title,
-                e,
-            )
+        self._background_jobs.commit_candidate_to_memory(candidate)
 
     async def _reflect_on_session(self, session: Session) -> None:
         """
@@ -985,10 +659,7 @@ class AgentLoop:
         Args:
             session: Session to reflect on.
         """
-        await self._reflection_service.reflect_on_session(
-            messages=session.messages,
-            session_key=session.key,
-        )
+        await self._background_jobs.reflect_on_session(session)
 
     async def _reflect_on_session_from_messages(
         self,
@@ -1002,10 +673,7 @@ class AgentLoop:
             messages: List of session messages.
             session_key: Session identifier.
         """
-        await self._reflection_service.reflect_on_session(
-            messages=messages,
-            session_key=session_key,
-        )
+        await self._background_jobs.reflect_on_session_from_messages(messages, session_key)
 
     async def _run_agent_loop(
         self,
@@ -1026,109 +694,8 @@ class AgentLoop:
         Returns:
             Tuple of (final_content, tools_used, all_messages).
         """
-        messages = initial_messages
-        iteration = 0
-        final_content = None
-        tools_used: list[str] = []
-        started_at = time.monotonic()
-        last_tool_signature: str | None = None
-        repeated_tool_cycles = 0
-
-        # Get model for this job class
-        model = self._get_model_for_job(job_class)
-        if model is None:
-            # No model available (distillation case) - skip gracefully
-            return None, [], []
-
-        while iteration < self.max_iterations:
-            if time.monotonic() - started_at > self.max_loop_seconds:
-                logger.warning("Max loop time reached ({}s)", self.max_loop_seconds)
-                final_content = (
-                    f"I hit the time limit for this response ({self.max_loop_seconds}s) "
-                    "before completing all tool calls. Try a smaller step."
-                )
-                break
-
-            iteration += 1
-
-            response = await self._chat_with_retry(
-                messages=messages,
-                tools=self.tools.get_definitions(),
-                model=model,
-                temperature=self.temperature,
-                max_tokens=self.max_tokens,
-                job_class=job_class,
-            )
-
-            if response.has_tool_calls:
-                tool_signature = self._tool_cycle_signature(response.tool_calls)
-                if tool_signature == last_tool_signature:
-                    repeated_tool_cycles += 1
-                else:
-                    repeated_tool_cycles = 1
-                    last_tool_signature = tool_signature
-
-                if repeated_tool_cycles >= self.max_identical_tool_cycles:
-                    logger.warning(
-                        "Breaking repeated tool cycle after {} identical iterations",
-                        repeated_tool_cycles,
-                    )
-                    final_content = (
-                        "I detected repeated tool calls without progress and stopped to avoid a loop. "
-                        "Please refine the request or provide more constraints."
-                    )
-                    break
-
-                if on_progress:
-                    clean = self._strip_think(response.content)
-                    if clean:
-                        await on_progress(clean)
-                    await on_progress(self._tool_hint(response.tool_calls), tool_hint=True)
-
-                tool_call_dicts = [
-                    {
-                        "id": tc.id,
-                        "type": "function",
-                        "function": {
-                            "name": tc.name,
-                            "arguments": json.dumps(tc.arguments, ensure_ascii=False),
-                        },
-                    }
-                    for tc in response.tool_calls
-                ]
-                messages = self.context.add_assistant_message(
-                    messages,
-                    response.content,
-                    tool_call_dicts,
-                    reasoning_content=response.reasoning_content,
-                )
-
-                for tool_call in response.tool_calls:
-                    tools_used.append(tool_call.name)
-                    args_str = json.dumps(tool_call.arguments, ensure_ascii=False)
-                    logger.info("Tool call: {}({})", tool_call.name, args_str[:200])
-                    try:
-                        result = await self.tools.execute(tool_call.name, tool_call.arguments)
-                    except Exception as e:
-                        logger.error("Tool execution failed: {}: {}", tool_call.name, e)
-                        result = f"Tool error: {type(e).__name__}: {e}"
-                    messages = self.context.add_tool_result(
-                        messages, tool_call.id, tool_call.name, result
-                    )
-            else:
-                repeated_tool_cycles = 0
-                last_tool_signature = None
-                final_content = self._strip_think(response.content)
-                break
-
-        if final_content is None and iteration >= self.max_iterations:
-            logger.warning("Max iterations ({}) reached", self.max_iterations)
-            final_content = (
-                f"I reached the maximum number of tool call iterations ({self.max_iterations}) "
-                "without completing the task. You can try breaking the task into smaller steps."
-            )
-
-        return final_content, tools_used, messages
+        runner = self._build_turn_runner()
+        return await runner.run(initial_messages, on_progress=on_progress, job_class=job_class)
 
     async def run(self) -> None:
         """Run the agent loop, processing messages from the bus."""
@@ -1154,6 +721,7 @@ class AgentLoop:
                             )
                     except Exception as e:
                         logger.error("Error processing message: {}", e)
+                        self.execution_state.set(msg.session_key, ExecutionPhase.FAILED, str(e))
                         await self.bus.publish_outbound(
                             OutboundMessage(
                                 channel=msg.channel,
@@ -1170,13 +738,7 @@ class AgentLoop:
 
     async def _shutdown_background_tasks(self) -> None:
         """Cancel and await all tracked background tasks."""
-        if not self._background_tasks:
-            return
-        pending = list(self._background_tasks)
-        for task in pending:
-            task.cancel()
-        await asyncio.gather(*pending, return_exceptions=True)
-        self._background_tasks.clear()
+        await self._background_jobs.shutdown_background_tasks()
 
     async def wait_for_background_tasks(self, timeout_s: float = 5.0) -> tuple[int, int]:
         """
@@ -1192,21 +754,7 @@ class AgentLoop:
         Returns:
             Tuple of (completed_count, pending_count).
         """
-        if not self._background_tasks:
-            return 0, 0
-
-        tasks = [t for t in self._background_tasks if not t.done()]
-        if not tasks:
-            return 0, 0
-
-        done, pending = await asyncio.wait(tasks, timeout=max(0.0, timeout_s))
-        if pending:
-            logger.warning(
-                "Background tasks still running after {:.1f}s: {} pending",
-                timeout_s,
-                len(pending),
-            )
-        return len(done), len(pending)
+        return await self._background_jobs.wait_for_background_tasks(timeout_s)
 
     async def close_mcp(self) -> None:
         """Close MCP connections."""
@@ -1216,6 +764,11 @@ class AgentLoop:
             except (RuntimeError, BaseExceptionGroup):
                 pass  # MCP SDK cancel scope cleanup is noisy but harmless
             self._mcp_stack = None
+
+    async def close(self) -> None:
+        """Release externally owned resources used by the agent loop."""
+        await self.close_mcp()
+        await self.provider.close()
 
     def stop(self) -> None:
         """Stop the agent loop."""
@@ -1246,90 +799,68 @@ class AgentLoop:
         Returns:
             OutboundMessage or None.
         """
-        # ====================================================================
-        # Phase A: Input handling + session retrieval (Tier 0, deterministic)
-        # ====================================================================
-
-        # System messages: parse origin from chat_id ("channel:chat_id")
         if msg.channel == "system":
-            channel, chat_id = (
-                msg.chat_id.split(":", 1) if ":" in msg.chat_id else ("cli", msg.chat_id)
-            )
-            logger.info("Processing system message from {}", msg.sender_id)
-            key = f"{channel}:{chat_id}"
-            async with self._get_session_lock(key):
-                session = self.sessions.get_or_create(key)
-                scratchpad_path = self._ensure_scratchpad(key)
-                self._set_tool_context(channel, chat_id, msg.metadata.get("message_id"))
+            return await self._process_system_message(msg)
 
-                # Update session timer (reset inactivity clock)
-                self._update_session_timer(key)
-
-                history = session.get_history(max_messages=self.memory_window)
-                messages = self.context.build_messages(
-                    history=history,
-                    current_message=msg.content,
-                    channel=channel,
-                    chat_id=chat_id,
-                    scratchpad_path=str(scratchpad_path),
-                )
-                # Phase B happens inside _run_agent_loop
-                final_content, _, all_msgs = await self._run_agent_loop(
-                    messages,
-                    job_class=JobClass.INTERACTIVE_RESPONSE,
-                )
-                # Phase C: Deterministic save
-                self._save_turn(session, all_msgs, 1 + len(history))
-                self.sessions.save(session)
-                return OutboundMessage(
-                    channel=channel,
-                    chat_id=chat_id,
-                    content=final_content or "Background task completed.",
-                )
-
-        # Regular user message
         preview = msg.content[:80] + "..." if len(msg.content) > 80 else msg.content
         logger.info("Processing message from {}:{}: {}", msg.channel, msg.sender_id, preview)
+        return await self._process_user_message(
+            msg, session_key=session_key, on_progress=on_progress
+        )
 
+    async def _process_system_message(self, msg: InboundMessage) -> OutboundMessage:
+        """Process a synthetic system message such as a subagent completion update."""
+        channel, chat_id = msg.chat_id.split(":", 1) if ":" in msg.chat_id else ("cli", msg.chat_id)
+        logger.info("Processing system message from {}", msg.sender_id)
+        key = f"{channel}:{chat_id}"
+        self.execution_state.set(key, ExecutionPhase.WAITING_BACKGROUND, "processing system update")
+        async with self._session_scope(key):
+            session = self.sessions.get_or_create(key)
+            scratchpad_path = self._ensure_scratchpad(key)
+            self._set_tool_context(channel, chat_id, msg.metadata.get("message_id"))
+            history = session.get_history(max_messages=self.memory_window)
+            messages = self.context.build_messages(
+                history=history,
+                current_message=msg.content,
+                channel=channel,
+                chat_id=chat_id,
+                scratchpad_path=str(scratchpad_path),
+            )
+            final_content, _, all_msgs = await self._run_agent_loop(
+                messages,
+                job_class=JobClass.INTERACTIVE_RESPONSE,
+            )
+            self._save_turn(session, all_msgs, 1 + len(history))
+            self.sessions.save(session)
+            safe_content = (
+                fallback_system_task_summary(msg.content)
+                if is_low_value_system_reply(final_content)
+                else final_content
+            )
+            self.execution_state.set(key, ExecutionPhase.COMPLETED, "system update ready")
+            return OutboundMessage(
+                channel=channel,
+                chat_id=chat_id,
+                content=safe_content or fallback_system_task_summary(msg.content),
+            )
+
+    async def _process_user_message(
+        self,
+        msg: InboundMessage,
+        *,
+        session_key: str | None,
+        on_progress: Callable[[str], Awaitable[None]] | None,
+    ) -> OutboundMessage | None:
+        """Process a regular user-facing message turn."""
         key = session_key or msg.session_key
-        async with self._get_session_lock(key):
+        self.execution_state.set(key, ExecutionPhase.PLANNING, "preparing turn")
+        async with self._session_scope(key):
             session = self.sessions.get_or_create(key)
             scratchpad_path = self._ensure_scratchpad(key)
 
-            # Update session timer (reset inactivity clock)
-            self._update_session_timer(key)
-
-            # ====================================================================
-            # Phase D (early): Session end detection - explicit reset
-            # ====================================================================
-
-            # Slash commands
-            cmd = msg.content.strip().lower()
-            if cmd == "/new":
-                # Explicit session end - pass snapshot before clearing to preserve data for background tasks
-                messages_snapshot = list(session.messages)
-                await self._on_session_end(
-                    session, reason="explicit", messages_snapshot=messages_snapshot
-                )
-
-                session.clear()
-                session.metadata.pop("last_cognition_index", None)
-                self.sessions.save(session)
-                self.sessions.invalidate(session.key)
-                return OutboundMessage(
-                    channel=msg.channel, chat_id=msg.chat_id, content="New session started."
-                )
-
-            if cmd == "/help":
-                return OutboundMessage(
-                    channel=msg.channel,
-                    chat_id=msg.chat_id,
-                    content="🐈 hermitcrab commands:\n/new — Start a new conversation\n/help — Show available commands",
-                )
-
-            # ====================================================================
-            # Phase A (continued): Tool context setup
-            # ====================================================================
+            slash_response = await self._maybe_handle_slash_command(msg, key, session)
+            if slash_response is not None:
+                return slash_response
 
             self._set_tool_context(msg.channel, msg.chat_id, msg.metadata.get("message_id"))
             if message_tool := self.tools.get("message"):
@@ -1337,74 +868,23 @@ class AgentLoop:
                     message_tool.start_turn()
 
             history = session.get_history(max_messages=self.memory_window)
-            initial_messages = self.context.build_messages(
-                history=history,
-                current_message=msg.content,
-                media=msg.media if msg.media else None,
-                channel=msg.channel,
-                chat_id=msg.chat_id,
-                scratchpad_path=str(scratchpad_path),
-            )
-
-            async def _bus_progress(content: str, *, tool_hint: bool = False) -> None:
-                meta = dict(msg.metadata or {})
-                meta["_progress"] = True
-                meta["_tool_hint"] = tool_hint
-                await self.bus.publish_outbound(
-                    OutboundMessage(
-                        channel=msg.channel,
-                        chat_id=msg.chat_id,
-                        content=content,
-                        metadata=meta,
-                    )
-                )
-
-            # ====================================================================
-            # Phase B: Interactive response (LLM allowed, policy gated)
-            # ====================================================================
-
-            final_content, tools_used, all_msgs = await self._run_agent_loop(
+            initial_messages = self._build_interactive_messages(msg, scratchpad_path, history)
+            progress_callback = on_progress or self._build_bus_progress_callback(msg, key)
+            final_content, _, all_msgs = await self._run_agent_loop(
                 initial_messages,
-                on_progress=on_progress or _bus_progress,
+                on_progress=progress_callback,
                 job_class=JobClass.INTERACTIVE_RESPONSE,
             )
 
-            if final_content is None:
-                final_content = "I've completed processing but have no response to give."
-
+            final_content = (
+                final_content or "I've completed processing but have no response to give."
+            )
+            self._record_final_execution_state(key, final_content)
             preview = final_content[:120] + "..." if len(final_content) > 120 else final_content
             logger.info("Response to {}:{}: {}", msg.channel, msg.sender_id, preview)
 
-            # ====================================================================
-            # Phase C: Deterministic session save (Tier 0)
-            # ====================================================================
-
             self._save_turn(session, all_msgs, 1 + len(history))
             self.sessions.save(session)
-
-            # ====================================================================
-            # Phase D: Session end detection - inactivity timeout check
-            # ====================================================================
-
-            # Check if any other sessions have timed out
-            timed_out_sessions = [
-                k for k in list(self._session_timers.keys()) if self._check_session_timeout(k)
-            ]
-            for timed_out_key in timed_out_sessions:
-                timed_out_session = self.sessions.get_or_create(timed_out_key)
-                # Trigger session end asynchronously (non-blocking)
-                self._schedule_background(
-                    self._on_session_end(timed_out_session, reason="timeout"),
-                    f"session_end:{timed_out_key}",
-                )
-
-            # ====================================================================
-            # Phase E: Deferred journal + background cognition (non-blocking)
-            # ====================================================================
-
-            # NOTE: Journal is NOT written per-turn anymore.
-            # Journal synthesis happens only on session end (explicit or timeout).
-            # This is intentional: journal is narrative, not authoritative.
 
             if message_tool := self.tools.get("message"):
                 if isinstance(message_tool, MessageTool) and message_tool.has_sent_in_turn:
@@ -1417,7 +897,153 @@ class AgentLoop:
                 metadata=msg.metadata or {},
             )
 
-    _TOOL_RESULT_MAX_CHARS = 500
+    async def _maybe_handle_slash_command(
+        self,
+        msg: InboundMessage,
+        session_key: str,
+        session: Session,
+    ) -> OutboundMessage | None:
+        """Handle early slash commands before building interactive context."""
+        cmd = msg.content.strip().lower()
+        if cmd == "/new":
+            messages_snapshot = list(session.messages)
+            await self._on_session_end(
+                session, reason="explicit", messages_snapshot=messages_snapshot
+            )
+            self.execution_state.set(
+                session_key, ExecutionPhase.WAITING_BACKGROUND, "starting new session"
+            )
+            session.clear()
+            session.metadata.pop("last_cognition_index", None)
+            self.sessions.save(session)
+            self.sessions.invalidate(session.key)
+            return OutboundMessage(
+                channel=msg.channel, chat_id=msg.chat_id, content="New session started."
+            )
+
+        if cmd == "/help":
+            return OutboundMessage(
+                channel=msg.channel,
+                chat_id=msg.chat_id,
+                content="🦀 hermitcrab commands:\n/new — Start a new conversation\n/help — Show available commands",
+            )
+
+        return None
+
+    def _build_interactive_messages(
+        self,
+        msg: InboundMessage,
+        scratchpad_path: Path,
+        history: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        """Build the interactive message list and insert deterministic hints when needed."""
+        messages = self.context.build_messages(
+            history=history,
+            current_message=msg.content,
+            media=msg.media if msg.media else None,
+            channel=msg.channel,
+            chat_id=msg.chat_id,
+            scratchpad_path=str(scratchpad_path),
+        )
+        if should_hint_subagent_delegation(
+            msg.content,
+            has_spawn_tool=self.tools.has("spawn"),
+            subagent_model=self._job_models.get(JobClass.SUBAGENT),
+        ):
+            messages.insert(
+                len(messages) - 1,
+                {
+                    "role": "system",
+                    "content": build_delegation_hint(
+                        self._job_models.get(JobClass.SUBAGENT) or self.model
+                    ),
+                },
+            )
+        return messages
+
+    def _build_bus_progress_callback(
+        self,
+        msg: InboundMessage,
+        session_key: str,
+    ) -> Callable[[str], Awaitable[None]]:
+        """Build the default progress publisher for interactive turns."""
+
+        async def _bus_progress(content: str, *, tool_hint: bool = False) -> None:
+            if not content or not content.strip():
+                return
+            phase = ExecutionPhase.RUNNING_TOOLS if tool_hint else ExecutionPhase.PLANNING
+            detail = "executing tools" if tool_hint else clean_snippet(content, max_chars=80)
+            self.execution_state.set(session_key, phase, detail)
+            metadata = dict(msg.metadata or {})
+            metadata["_progress"] = True
+            metadata["_tool_hint"] = tool_hint
+            await self.bus.publish_outbound(
+                OutboundMessage(
+                    channel=msg.channel,
+                    chat_id=msg.chat_id,
+                    content=content,
+                    metadata=metadata,
+                )
+            )
+
+        return _bus_progress
+
+    def _record_final_execution_state(self, session_key: str, final_content: str) -> None:
+        """Record the final execution state for a completed interactive turn."""
+        if "Subagent [" in final_content and "started" in final_content:
+            self.execution_state.set(session_key, ExecutionPhase.DELEGATED, "subagent spawned")
+            return
+        self.execution_state.set(
+            session_key,
+            ExecutionPhase.COMPLETED,
+            clean_snippet(final_content, max_chars=80),
+        )
+
+    def _build_turn_runner(self) -> TurnRunner:
+        """Build a turn runner configured with the current loop dependencies."""
+        return TurnRunner(
+            context=self.context,
+            tools=self.tools,
+            config=TurnRunnerConfig(
+                max_iterations=self.max_iterations,
+                max_loop_seconds=self.max_loop_seconds,
+                max_identical_tool_cycles=self.max_identical_tool_cycles,
+                temperature=self.temperature,
+                max_tokens=self.max_tokens,
+                reasoning_effort=self._reasoning_effort,
+            ),
+            chat_callable=self._chat_with_retry,
+            get_model_for_job=self._get_model_for_job,
+            strip_think=self._strip_think,
+            tool_hint=self._tool_hint,
+            is_empty_response=is_empty_response,
+            is_intent_only_response=is_intent_only_response,
+        )
+
+    class _SessionScope:
+        """Context manager that tracks active turns for one session key."""
+
+        def __init__(self, loop: "AgentLoop", session_key: str):
+            self.loop = loop
+            self.session_key = session_key
+            self.lock: asyncio.Lock | None = None
+
+        async def __aenter__(self) -> None:
+            self.lock = self.loop._get_session_lock(self.session_key)
+            await self.lock.acquire()
+            self.loop._session_active_turns[self.session_key] += 1
+            self.loop._update_session_timer(self.session_key)
+
+        async def __aexit__(self, exc_type, exc, tb) -> None:
+            self.loop._session_active_turns[self.session_key] -= 1
+            if self.loop._session_active_turns[self.session_key] <= 0:
+                self.loop._session_active_turns.pop(self.session_key, None)
+            if self.lock is not None:
+                self.lock.release()
+
+    def _session_scope(self, session_key: str) -> _SessionScope:
+        """Return a scoped active-turn guard for one session."""
+        return self._SessionScope(self, session_key)
 
     def _save_turn(self, session: Session, messages: list[dict], skip: int) -> None:
         """
@@ -1430,18 +1056,26 @@ class AgentLoop:
             messages: New messages to append.
             skip: Number of messages to skip from the start.
         """
-        for m in messages[skip:]:
-            entry = {k: v for k, v in m.items() if k != "reasoning_content"}
-            if entry.get("role") == "tool" and isinstance(entry.get("content"), str):
-                content = entry["content"]
-                if len(content) > self._TOOL_RESULT_MAX_CHARS:
-                    entry["content"] = content[: self._TOOL_RESULT_MAX_CHARS] + "\n... (truncated)"
-            entry.setdefault("timestamp", datetime.now(timezone.utc).isoformat())
-            session.messages.append(entry)
-        session.updated_at = datetime.now(timezone.utc)
+        self._background_jobs.save_turn(session, messages, skip, self._update_session_timer)
 
-        # Update session timer for inactivity tracking
-        self._update_session_timer(session.key)
+    @staticmethod
+    def _build_journal_event_trace(digest: SessionDigest) -> list[str]:
+        """Build a journal-safe event trace with raw tool mechanics filtered out."""
+        return BackgroundJobManager.build_journal_event_trace(digest)
+
+    def _build_session_digest(
+        self, messages: list[dict[str, Any]], session_key: str
+    ) -> SessionDigest:
+        """Build a deterministic digest of a session for weak-model jobs."""
+        return self._background_jobs.build_session_digest(messages, session_key)
+
+    def _format_journal_entry(self, digest: SessionDigest, body: str) -> str:
+        """Wrap a journal body with deterministic per-entry metadata."""
+        return self._background_jobs.format_journal_entry(digest, body)
+
+    def _build_fallback_journal_body(self, digest: SessionDigest) -> str:
+        """Build a deterministic journal narrative when LLM synthesis fails."""
+        return self._background_jobs.build_fallback_journal_body(digest)
 
     async def process_direct(
         self,

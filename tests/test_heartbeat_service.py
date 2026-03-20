@@ -2,6 +2,7 @@
 
 import asyncio
 from pathlib import Path
+from unittest.mock import Mock
 
 import pytest
 
@@ -115,7 +116,6 @@ async def test_tick_with_heartbeat_file(tmp_path: Path) -> None:
     # Mock provider
     class MockProvider:
         async def chat(self, **kwargs):
-            from unittest.mock import Mock
             response = Mock()
             response.has_tool_calls = True
             response.tool_calls = [Mock(arguments={"action": "run", "tasks": "test tasks"})]
@@ -135,3 +135,114 @@ async def test_tick_with_heartbeat_file(tmp_path: Path) -> None:
 
     assert len(captured_tasks) == 1
     assert captured_tasks[0] == "test tasks"
+
+
+@pytest.mark.asyncio
+async def test_tick_parses_json_string_tool_arguments(tmp_path: Path) -> None:
+    """Heartbeat should tolerate providers returning JSON string arguments."""
+    heartbeat_file = tmp_path / "HEARTBEAT.md"
+    heartbeat_file.write_text("# Tasks\n- Task 1\n", encoding="utf-8")
+
+    captured_tasks: list[str] = []
+
+    async def _on_execute(tasks: str) -> str:
+        captured_tasks.append(tasks)
+        return "completed"
+
+    class MockProvider:
+        async def chat(self, **kwargs):
+            response = Mock()
+            response.has_tool_calls = True
+            response.tool_calls = [Mock(arguments='{"action": "run", "tasks": "json tasks"}')]
+            return response
+
+    service = HeartbeatService(
+        workspace=tmp_path,
+        provider=MockProvider(),  # type: ignore
+        model="test-model",
+        on_execute=_on_execute,
+        interval_s=9999,
+        enabled=True,
+    )
+
+    await service._tick()
+
+    assert captured_tasks == ["json tasks"]
+
+
+@pytest.mark.asyncio
+async def test_tick_skips_invalid_tool_arguments_without_crashing(tmp_path: Path) -> None:
+    """Heartbeat should degrade safely when providers return malformed tool arguments."""
+    heartbeat_file = tmp_path / "HEARTBEAT.md"
+    heartbeat_file.write_text("# Tasks\n- Task 1\n", encoding="utf-8")
+
+    captured_tasks: list[str] = []
+
+    async def _on_execute(tasks: str) -> str:
+        captured_tasks.append(tasks)
+        return "completed"
+
+    class MockProvider:
+        async def chat(self, **kwargs):
+            response = Mock()
+            response.has_tool_calls = True
+            response.tool_calls = [Mock(arguments='not-json')]
+            return response
+
+    service = HeartbeatService(
+        workspace=tmp_path,
+        provider=MockProvider(),  # type: ignore
+        model="test-model",
+        on_execute=_on_execute,
+        interval_s=9999,
+        enabled=True,
+    )
+
+    await service._tick()
+
+    assert captured_tasks == []
+
+
+@pytest.mark.asyncio
+async def test_tick_bypasses_llm_with_direct_marker(tmp_path: Path) -> None:
+    """Heartbeat direct mode should execute Active Tasks without calling the provider."""
+    heartbeat_file = tmp_path / "HEARTBEAT.md"
+    heartbeat_file.write_text(
+        "\n".join(
+            [
+                "<!-- HEARTBEAT_DIRECT -->",
+                "# Heartbeat Tasks",
+                "",
+                "## Active Tasks",
+                "",
+                "- Check inbox",
+                "- Review alerts",
+                "",
+                "## Completed",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    captured_tasks: list[str] = []
+
+    async def _on_execute(tasks: str) -> str:
+        captured_tasks.append(tasks)
+        return "completed"
+
+    class FailingProvider:
+        async def chat(self, **kwargs):
+            raise AssertionError("provider.chat should not be called in direct mode")
+
+    service = HeartbeatService(
+        workspace=tmp_path,
+        provider=FailingProvider(),  # type: ignore
+        model="test-model",
+        on_execute=_on_execute,
+        interval_s=9999,
+        enabled=True,
+    )
+
+    await service._tick()
+
+    assert captured_tasks == ["- Check inbox\n- Review alerts"]

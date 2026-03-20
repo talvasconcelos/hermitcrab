@@ -2,8 +2,171 @@
 
 from typing import Any
 
-from hermitcrab.agent.memory import MemoryStore
+from loguru import logger
+
+from hermitcrab.agent.memory import MemoryItem, MemoryStore
 from hermitcrab.agent.tools.base import Tool
+
+_MAX_MEMORY_ITEM_CHARS = 400
+
+
+def _truncate(text: str, max_chars: int = _MAX_MEMORY_ITEM_CHARS) -> str:
+    """Truncate long memory content for tool results."""
+    text = text.strip()
+    if len(text) <= max_chars:
+        return text
+    return text[:max_chars].rstrip() + "...(truncated)"
+
+
+def _format_memory_items(items: list[MemoryItem], *, limit: int | None = None) -> str:
+    """Render memory items into compact text for tool results."""
+    if limit is not None:
+        items = items[:limit]
+
+    if not items:
+        return "No memory items found."
+
+    lines: list[str] = []
+    for item in items:
+        lines.append(f"[{item.category.value}] {item.title} (id={item.id})")
+        if item.content:
+            lines.append(_truncate(item.content))
+    return "\n".join(lines)
+
+
+class ReadMemoryTool(Tool):
+    """Tool to read memory items from a specific category."""
+
+    def __init__(self, memory: MemoryStore):
+        self.memory = memory
+
+    @property
+    def name(self) -> str:
+        return "read_memory"
+
+    @property
+    def description(self) -> str:
+        return (
+            "Read memory items from one category. "
+            "Use this when you need user-specific or project-specific long-term context."
+        )
+
+    @property
+    def parameters(self) -> dict[str, Any]:
+        return {
+            "type": "object",
+            "properties": {
+                "category": {
+                    "type": "string",
+                    "enum": sorted(self.memory.VALID_CATEGORIES),
+                    "description": "Memory category to read",
+                },
+                "id": {
+                    "type": "string",
+                    "description": "Optional exact memory item ID",
+                },
+                "query": {
+                    "type": "string",
+                    "description": "Optional title/content substring filter",
+                },
+                "limit": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 50,
+                    "description": "Maximum number of items to return",
+                },
+            },
+            "required": ["category"],
+        }
+
+    async def execute(
+        self,
+        category: str,
+        id: str | None = None,
+        query: str | None = None,
+        limit: int | None = None,
+        **kwargs: Any,
+    ) -> str:
+        try:
+            logger.info(
+                "read_memory start: category={}, id={}, query={}, limit={}",
+                category,
+                id,
+                query,
+                limit,
+            )
+            items = self.memory.read_memory(category=category, id=id, query=query)
+            logger.info("read_memory found {} item(s) in category={}", len(items), category)
+            return _format_memory_items(items, limit=limit)
+        except Exception as e:
+            logger.exception("read_memory failed")
+            return f"Error reading memory: {str(e)}"
+
+
+class SearchMemoryTool(Tool):
+    """Tool to search memory across categories."""
+
+    def __init__(self, memory: MemoryStore):
+        self.memory = memory
+
+    @property
+    def name(self) -> str:
+        return "search_memory"
+
+    @property
+    def description(self) -> str:
+        return (
+            "Search long-term memory across categories. "
+            "Use this before answering when historical or user-specific context may matter."
+        )
+
+    @property
+    def parameters(self) -> dict[str, Any]:
+        return {
+            "type": "object",
+            "properties": {
+                "query": {
+                    "type": "string",
+                    "description": "Search query for titles, tags, and content",
+                },
+                "categories": {
+                    "type": "array",
+                    "items": {
+                        "type": "string",
+                        "enum": sorted(self.memory.VALID_CATEGORIES),
+                    },
+                    "description": "Optional categories to search; omit for all",
+                },
+                "limit": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 50,
+                    "description": "Maximum number of results to return",
+                },
+            },
+            "required": ["query"],
+        }
+
+    async def execute(
+        self,
+        query: str,
+        categories: list[str] | None = None,
+        limit: int | None = None,
+        **kwargs: Any,
+    ) -> str:
+        try:
+            logger.info(
+                "search_memory start: query={}, categories={}, limit={}",
+                query,
+                categories,
+                limit,
+            )
+            items = self.memory.search_memory(query=query, categories=categories, limit=limit)
+            logger.info("search_memory found {} item(s) for query={}", len(items), query)
+            return _format_memory_items(items, limit=limit)
+        except Exception as e:
+            logger.exception("search_memory failed")
+            return f"Error searching memory: {str(e)}"
 
 
 class WriteFactTool(Tool):
@@ -89,7 +252,8 @@ class WriteDecisionTool(Tool):
     @property
     def description(self) -> str:
         return (
-            "Save a decision to memory (architectural choices, trade-offs, locked decisions). "
+            "Save a decision to memory (explicit user-confirmed locked choices only). "
+            "Do not use this for assistant recommendations, analysis, reports, or tentative options. "
             "Use wikilinks [[Like This]] to connect to related [[Goals]], [[Facts]], or other [[Decisions]]."
         )
 
@@ -104,7 +268,11 @@ class WriteDecisionTool(Tool):
                 },
                 "content": {
                     "type": "string",
-                    "description": "Decision content. Use wikilinks [[Like This]] to connect related memories."
+                    "description": (
+                        "Decision content describing the committed choice. "
+                        "Do not store recommendations or reports here. "
+                        "Use wikilinks [[Like This]] to connect related memories."
+                    )
                 },
                 "tags": {
                     "type": "array",
@@ -118,7 +286,7 @@ class WriteDecisionTool(Tool):
                 },
                 "rationale": {
                     "type": "string",
-                    "description": "Reasoning behind the decision"
+                    "description": "Reasoning behind the committed decision"
                 },
                 "supersedes": {
                     "type": "string",

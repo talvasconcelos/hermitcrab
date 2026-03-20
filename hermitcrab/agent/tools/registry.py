@@ -2,6 +2,8 @@
 
 from typing import Any
 
+from loguru import logger
+
 from hermitcrab.agent.tools.base import Tool
 
 
@@ -44,14 +46,19 @@ class ToolRegistry:
             return f"Error: Tool '{name}' not found. Available: {', '.join(self.tool_names)}"
 
         try:
+            logger.info("Tool registry executing '{}' with params keys={}", name, sorted(params.keys()))
             errors = tool.validate_params(params)
             if errors:
+                logger.warning("Tool validation failed for '{}': {}", name, errors)
                 return f"Error: Invalid parameters for tool '{name}': " + "; ".join(errors) + _HINT
             result = await tool.execute(**params)
             if isinstance(result, str) and result.startswith("Error"):
+                logger.warning("Tool '{}' returned error result: {}", name, result[:200])
                 return result + _HINT
+            logger.info("Tool registry completed '{}'", name)
             return result
         except Exception as e:
+            logger.exception("Tool registry raised while executing '{}'", name)
             return f"Error executing {name}: {str(e)}" + _HINT
 
     @property

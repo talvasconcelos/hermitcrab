@@ -7,14 +7,19 @@ Includes Ollama-specific enhancements:
 - Multimodal support (IMAGE marker extraction)
 """
 
+import hashlib
 import json
 import os
 import re
-from typing import Any
+import secrets
+import string
+from collections.abc import Callable
+from typing import Any, Literal
 
 import json_repair
 import litellm
 from litellm import acompletion
+from loguru import logger
 
 from hermitcrab.providers.base import LLMProvider, LLMResponse, ToolCallRequest
 from hermitcrab.providers.registry import find_by_model, find_gateway
@@ -23,10 +28,23 @@ from hermitcrab.providers.registry import find_by_model, find_gateway
 _ALLOWED_MSG_KEYS = frozenset({"role", "content", "tool_calls", "tool_call_id", "name"})
 # Ollama-specific message keys (multimodal support)
 _OLLAMA_MSG_KEYS = frozenset({"images"})
+_ALNUM = string.ascii_letters + string.digits
 
 # Image marker pattern for multimodal support
 # Matches: [IMAGE:data:image/png;base64,abcd==] or [IMAGE:base64data]
 _IMAGE_MARKER_PATTERN = re.compile(r'\[IMAGE:([^\]]+)\]')
+
+
+def _short_tool_id() -> str:
+    """Generate a provider-safe short tool call ID."""
+    return "".join(secrets.choice(_ALNUM) for _ in range(9))
+
+
+def _tool_function_parts(function: Any) -> tuple[str | None, Any]:
+    """Extract tool function name and arguments from object- or dict-shaped payloads."""
+    if isinstance(function, dict):
+        return function.get("name"), function.get("arguments")
+    return getattr(function, "name", None), getattr(function, "arguments", None)
 
 
 class LiteLLMProvider(LLMProvider):
@@ -45,10 +63,12 @@ class LiteLLMProvider(LLMProvider):
         default_model: str = "anthropic/claude-opus-4-5",
         extra_headers: dict[str, str] | None = None,
         provider_name: str | None = None,
+        request_config_resolver: Callable[[str], dict[str, Any]] | None = None,
     ):
         super().__init__(api_key, api_base)
         self.default_model = default_model
         self.extra_headers = extra_headers or {}
+        self._request_config_resolver = request_config_resolver
 
         # Detect gateway / local deployment.
         # provider_name (from config key) is the primary signal;
@@ -70,6 +90,30 @@ class LiteLLMProvider(LLMProvider):
         # Ollama-specific configuration
         self._ollama_cloud_api_key = api_key  # For :cloud suffix routing
         self._ollama_reasoning_enabled = False  # For reasoning models (DeepSeek, etc.)
+
+    def _get_request_config(self, model: str) -> dict[str, Any]:
+        """Resolve per-request provider credentials/base from the target model."""
+        if not self._request_config_resolver:
+            return {
+                "model": model,
+                "api_key": self.api_key,
+                "api_base": self.api_base,
+                "extra_headers": self.extra_headers,
+                "provider_options": {},
+                "provider_name": None,
+                "reasoning_effort": None,
+            }
+
+        resolved = self._request_config_resolver(model) or {}
+        return {
+            "model": resolved.get("model", model),
+            "api_key": resolved.get("api_key", self.api_key),
+            "api_base": resolved.get("api_base", self.api_base),
+            "extra_headers": resolved.get("extra_headers", self.extra_headers),
+            "provider_options": resolved.get("provider_options", {}),
+            "provider_name": resolved.get("provider_name"),
+            "reasoning_effort": resolved.get("reasoning_effort"),
+        }
 
     def _is_ollama_model(self, model: str) -> bool:
         """Detect if model should use Ollama-specific handling.
@@ -99,7 +143,9 @@ class LiteLLMProvider(LLMProvider):
             model: Model name, potentially with :cloud suffix
 
         Returns:
-            Tuple of (stripped_model_name, should_use_cloud)
+            Tuple of (model_name_for_api, should_use_cloud)
+            - For local Ollama: keeps :cloud suffix (Ollama needs it for routing)
+            - For direct cloud: strips :cloud suffix (API handles routing)
 
         Raises:
             ValueError: If :cloud requested but no local Ollama and no API key
@@ -116,9 +162,9 @@ class LiteLLMProvider(LLMProvider):
             any(host in self.api_base.lower() for host in ['localhost', '127.0.0.1', '::1'])
         )
 
-        # If local Ollama is available, :cloud just routes through it
+        # If local Ollama is available, keep :cloud suffix for Ollama to route
         if is_local_ollama:
-            return normalized_model, True
+            return model, True
 
         # No local Ollama - need API key for direct cloud access
         if not self._ollama_cloud_api_key:
@@ -128,7 +174,7 @@ class LiteLLMProvider(LLMProvider):
                 f"Start Ollama locally or set api_key in provider config."
             )
 
-        # Use API key for direct cloud access
+        # Use API key for direct cloud access (stripped model name)
         return normalized_model, True
 
     def _extract_ollama_images(self, content: str) -> tuple[str | None, list[str]]:
@@ -295,7 +341,20 @@ class LiteLLMProvider(LLMProvider):
                 model = f"{prefix}/{model}"
             return model
 
-        # Standard mode: auto-prefix for known providers
+        # Standard mode: respect explicit provider prefixes first.
+        if "/" in model:
+            from hermitcrab.providers.registry import find_by_name
+
+            explicit_prefix = model.split("/", 1)[0]
+            explicit_spec = find_by_name(explicit_prefix)
+            if explicit_spec and explicit_spec.litellm_prefix:
+                return self._canonicalize_explicit_prefix(
+                    model,
+                    explicit_spec.name,
+                    explicit_spec.litellm_prefix,
+                )
+
+        # Otherwise, auto-prefix for known providers inferred from model name.
         spec = find_by_model(model)
         if spec and spec.litellm_prefix:
             model = self._canonicalize_explicit_prefix(model, spec.name, spec.litellm_prefix)
@@ -366,14 +425,56 @@ class LiteLLMProvider(LLMProvider):
             is_ollama: If True, allow Ollama-specific keys like 'images'
         """
         allowed_keys = _ALLOWED_MSG_KEYS | _OLLAMA_MSG_KEYS if is_ollama else _ALLOWED_MSG_KEYS
-        sanitized = []
-        for msg in messages:
-            clean = {k: v for k, v in msg.items() if k in allowed_keys}
-            # Strict providers require "content" even when assistant only has tool_calls
-            if clean.get("role") == "assistant" and "content" not in clean:
-                clean["content"] = None
-            sanitized.append(clean)
+        sanitized = LLMProvider._sanitize_request_messages(messages, allowed_keys)
+        id_map: dict[str, str] = {}
+
+        def map_id(value: Any) -> Any:
+            if not isinstance(value, str):
+                return value
+            return id_map.setdefault(value, LiteLLMProvider._normalize_tool_call_id(value))
+
+        for clean in sanitized:
+            if isinstance(clean.get("tool_calls"), list):
+                normalized_tool_calls = []
+                for tc in clean["tool_calls"]:
+                    if not isinstance(tc, dict):
+                        normalized_tool_calls.append(tc)
+                        continue
+                    tc_clean = dict(tc)
+                    tc_clean["id"] = map_id(tc_clean.get("id"))
+                    function = tc_clean.get("function")
+                    if isinstance(function, dict):
+                        function_clean = dict(function)
+                        arguments = function_clean.get("arguments")
+                        if arguments is not None:
+                            if isinstance(arguments, str):
+                                try:
+                                    repaired = json_repair.loads(arguments)
+                                except Exception:
+                                    logger.warning(
+                                        "Dropping unrecoverable tool-call arguments from outbound history for tool {}",
+                                        function_clean.get("name", "<unknown>"),
+                                    )
+                                    repaired = {}
+                                function_clean["arguments"] = json.dumps(repaired, ensure_ascii=False)
+                            else:
+                                function_clean["arguments"] = json.dumps(arguments, ensure_ascii=False)
+                        tc_clean["function"] = function_clean
+                    normalized_tool_calls.append(tc_clean)
+                clean["tool_calls"] = normalized_tool_calls
+
+            if "tool_call_id" in clean and clean["tool_call_id"]:
+                clean["tool_call_id"] = map_id(clean["tool_call_id"])
         return sanitized
+
+    @staticmethod
+    def _normalize_tool_call_id(tool_call_id: Any) -> Any:
+        """Normalize tool_call_id to a strict-provider-safe alphanumeric form."""
+        if not isinstance(tool_call_id, str):
+            return tool_call_id
+        if len(tool_call_id) == 9 and tool_call_id.isalnum():
+            return tool_call_id
+        return hashlib.sha1(tool_call_id.encode()).hexdigest()[:9]
 
     async def chat(
         self,
@@ -382,6 +483,7 @@ class LiteLLMProvider(LLMProvider):
         model: str | None = None,
         max_tokens: int = 4096,
         temperature: float = 0.7,
+        reasoning_effort: Literal["none", "low", "medium", "high"] | None = None,
     ) -> LLMResponse:
         """
         Send a chat completion request via LiteLLM.
@@ -392,12 +494,28 @@ class LiteLLMProvider(LLMProvider):
             model: Model identifier (e.g., 'anthropic/claude-sonnet-4-5').
             max_tokens: Maximum tokens in response.
             temperature: Sampling temperature.
+            reasoning_effort: Control reasoning/thinking effort for supported models.
+                Values: "none", "low", "medium", "high". Silently ignored if unsupported.
 
         Returns:
             LLMResponse with content and/or tool calls.
         """
         original_model = model or self.default_model
-        model = self._resolve_model(original_model)
+        request_config = self._get_request_config(original_model)
+        resolved_model = request_config.get("model") or original_model
+        request_provider_name = request_config.get("provider_name")
+        request_gateway = find_gateway(
+            request_provider_name,
+            request_config.get("api_key"),
+            request_config.get("api_base"),
+        )
+
+        original_gateway = self._gateway
+        self._gateway = request_gateway
+        try:
+            model = self._resolve_model(resolved_model)
+        finally:
+            self._gateway = original_gateway
 
         # Check for Ollama :cloud routing
         use_ollama_cloud = False
@@ -405,7 +523,7 @@ class LiteLLMProvider(LLMProvider):
         if self._is_ollama_model(model):
             ollama_model, use_ollama_cloud = self._resolve_ollama_cloud_routing(ollama_model)
 
-        if self._supports_cache_control(original_model):
+        if self._supports_cache_control(resolved_model):
             messages, tools = self._apply_cache_control(messages, tools)
 
         # Apply Ollama multimodal support (image markers → images array)
@@ -427,21 +545,43 @@ class LiteLLMProvider(LLMProvider):
         # Apply model-specific overrides (e.g. kimi-k2.5 temperature)
         self._apply_model_overrides(ollama_model, kwargs)
 
+        provider_options = request_config.get("provider_options") or {}
+        reserved_option_keys = {
+            "model",
+            "messages",
+            "tools",
+            "tool_choice",
+            "api_key",
+            "api_base",
+            "extra_headers",
+        }
+        for key, value in provider_options.items():
+            if key not in reserved_option_keys:
+                kwargs[key] = value
+
         # Pass api_key directly — more reliable than env vars alone
-        if self.api_key:
-            kwargs["api_key"] = self.api_key
+        request_api_key = request_config.get("api_key")
+        if request_api_key:
+            kwargs["api_key"] = request_api_key
 
         # Pass api_base for custom endpoints
-        if self.api_base:
-            kwargs["api_base"] = self.api_base
+        request_api_base = request_config.get("api_base")
+        if request_api_base:
+            kwargs["api_base"] = request_api_base
 
         # Pass extra headers (e.g. APP-Code for AiHubMix)
-        if self.extra_headers:
-            kwargs["extra_headers"] = self.extra_headers
+        request_extra_headers = request_config.get("extra_headers")
+        if request_extra_headers:
+            kwargs["extra_headers"] = request_extra_headers
 
         if tools:
             kwargs["tools"] = tools
             kwargs["tool_choice"] = "auto"
+
+        # Add reasoning effort if specified (LiteLLM silently ignores if unsupported)
+        effective_reasoning_effort = reasoning_effort or request_config.get("reasoning_effort")
+        if effective_reasoning_effort:
+            kwargs["reasoning_effort"] = effective_reasoning_effort
 
         # Ollama reasoning model support (think parameter)
         # Some Ollama models (DeepSeek, etc.) support internal reasoning
@@ -467,24 +607,68 @@ class LiteLLMProvider(LLMProvider):
         """
         choice = response.choices[0]
         message = choice.message
+        content = message.content
+        finish_reason = choice.finish_reason
+        raw_tool_calls: list[Any] = []
+
+        for ch in response.choices:
+            msg = ch.message
+            if hasattr(msg, "tool_calls") and msg.tool_calls:
+                raw_tool_calls.extend(msg.tool_calls)
+                if ch.finish_reason in ("tool_calls", "stop"):
+                    finish_reason = ch.finish_reason
+            if not content and getattr(msg, "content", None):
+                content = msg.content
+
+        if len(response.choices) > 1:
+            logger.debug(
+                "LiteLLM response has {} choices, merged {} tool_calls",
+                len(response.choices),
+                len(raw_tool_calls),
+            )
 
         # Use Ollama-specific tool call parsing if applicable
         is_ollama = model and self._is_ollama_model(model)
 
         if is_ollama:
-            tool_calls = self._parse_ollama_tool_calls(message)
+            if raw_tool_calls:
+                tool_calls = self._parse_ollama_tool_calls_from_list(raw_tool_calls)
+            else:
+                tool_calls = self._parse_ollama_tool_calls(message)
         else:
             tool_calls = []
-            if hasattr(message, "tool_calls") and message.tool_calls:
+            for tc in raw_tool_calls:
+                function = tc.get("function") if isinstance(tc, dict) else getattr(tc, "function", None)
+                name, args = _tool_function_parts(function)
+
+                if not name:
+                    continue
+
+                if args is None:
+                    args = {}
+
+                if isinstance(args, str):
+                    args = json_repair.loads(args)
+
+                tool_calls.append(ToolCallRequest(
+                    id=(tc.get("id") if isinstance(tc, dict) else getattr(tc, "id", None)) or _short_tool_id(),
+                    name=name,
+                    arguments=args,
+                ))
+
+            if not raw_tool_calls and hasattr(message, "tool_calls") and message.tool_calls:
                 for tc in message.tool_calls:
                     # Parse arguments from JSON string if needed
-                    args = tc.function.arguments
+                    function = tc.get("function") if isinstance(tc, dict) else getattr(tc, "function", None)
+                    name, args = _tool_function_parts(function)
+                    if not name:
+                        continue
                     if isinstance(args, str):
                         args = json_repair.loads(args)
 
                     tool_calls.append(ToolCallRequest(
-                        id=tc.id,
-                        name=tc.function.name,
+                        id=(tc.get("id") if isinstance(tc, dict) else getattr(tc, "id", None)) or _short_tool_id(),
+                        name=name,
                         arguments=args,
                     ))
 
@@ -498,13 +682,67 @@ class LiteLLMProvider(LLMProvider):
 
         reasoning_content = getattr(message, "reasoning_content", None) or None
 
+        if not tool_calls:
+            legacy_function_call = getattr(message, "function_call", None)
+            legacy_name, legacy_args = _tool_function_parts(legacy_function_call)
+            if legacy_name:
+                legacy_args = legacy_args or {}
+                if isinstance(legacy_args, str):
+                    try:
+                        legacy_args = json_repair.loads(legacy_args)
+                    except Exception:
+                        legacy_args = {}
+                if isinstance(legacy_args, dict):
+                    tool_calls = [
+                        ToolCallRequest(
+                            id=_short_tool_id(),
+                            name=legacy_name,
+                            arguments=legacy_args,
+                        )
+                    ]
+
+        normalized_finish_reason = finish_reason or "stop"
+        if normalized_finish_reason == "tool_calls" and not tool_calls:
+            logger.warning(
+                "LiteLLM returned finish_reason=tool_calls but no tool calls were parsed; downgrading to stop"
+            )
+            normalized_finish_reason = "stop"
+
         return LLMResponse(
-            content=message.content,
+            content=content,
             tool_calls=tool_calls,
-            finish_reason=choice.finish_reason or "stop",
+            finish_reason=normalized_finish_reason,
             usage=usage,
             reasoning_content=reasoning_content,
         )
+
+    def _parse_ollama_tool_calls_from_list(self, tool_calls: list[Any]) -> list[ToolCallRequest]:
+        """Parse Ollama tool calls from an aggregated list across choices."""
+        parsed: list[ToolCallRequest] = []
+
+        for tc in tool_calls:
+            function = getattr(tc, "function", None)
+            raw_name = getattr(function, "name", "") or ""
+            args = getattr(function, "arguments", "{}")
+
+            if isinstance(args, str):
+                try:
+                    args = json_repair.loads(args)
+                except Exception:
+                    args = {}
+
+            clean_name, clean_args = self._extract_ollama_tool_name(raw_name, args)
+            args_str = json.dumps(clean_args) if isinstance(clean_args, dict) else str(clean_args)
+
+            parsed.append(
+                ToolCallRequest(
+                    id=getattr(tc, "id", None) or _short_tool_id(),
+                    name=clean_name,
+                    arguments=args_str,
+                )
+            )
+
+        return parsed
 
     def get_default_model(self) -> str:
         """Get the default model."""

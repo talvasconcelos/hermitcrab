@@ -153,6 +153,79 @@ class MemoryStore:
         hash_input = f"{title}:{content}"
         return hashlib.sha256(hash_input.encode()).hexdigest()[:8]
 
+    @staticmethod
+    def _tokenize_search(text: str) -> set[str]:
+        """Tokenize text into lowercase alphanumeric search terms."""
+        return {token for token in re.findall(r"[a-z0-9]+", text.lower()) if token}
+
+    @classmethod
+    def _search_match_score(cls, item: MemoryItem, file_path: Path, query: str) -> int:
+        """Score a memory item for deterministic search ranking."""
+        query_lower = query.lower().strip()
+        if not query_lower:
+            return 0
+
+        query_tokens = cls._tokenize_search(query_lower)
+        title_lower = item.title.lower()
+        stem_lower = file_path.stem.lower()
+        content_lower = item.content.lower()
+        tag_tokens = {tag.lower() for tag in item.tags}
+        item_tokens = cls._tokenize_search(" ".join([item.title, item.content, " ".join(item.tags)]))
+
+        score = 0
+        if stem_lower == query_lower:
+            score += 140
+        elif query_lower in stem_lower:
+            score += 90
+
+        if title_lower == query_lower:
+            score += 180
+        elif query_lower in title_lower:
+            score += 120
+
+        if any(query_lower == tag for tag in tag_tokens):
+            score += 100
+        elif any(query_lower in tag for tag in tag_tokens):
+            score += 70
+
+        if query_lower in content_lower:
+            score += 40
+
+        token_overlap = len(query_tokens & item_tokens)
+        score += token_overlap * 12
+
+        if item.category == MemoryCategory.TASKS:
+            status = item.metadata.get("status", TaskStatus.OPEN.value)
+            if status == TaskStatus.IN_PROGRESS.value:
+                score += 8
+            elif status == TaskStatus.OPEN.value:
+                score += 6
+
+        return score
+
+    @staticmethod
+    def _context_priority(item: MemoryItem) -> int:
+        """Prioritize memory items that are more likely to help active work."""
+        if item.category == MemoryCategory.TASKS:
+            status = item.metadata.get("status", TaskStatus.OPEN.value)
+            priorities = {
+                TaskStatus.IN_PROGRESS.value: 4,
+                TaskStatus.OPEN.value: 3,
+                TaskStatus.DEFERRED.value: 1,
+                TaskStatus.DONE.value: 0,
+            }
+            return priorities.get(status, 0)
+        if item.category == MemoryCategory.GOALS:
+            return 2 if item.metadata.get("status", "active") == "active" else 0
+        if item.category == MemoryCategory.DECISIONS:
+            return 2 if item.metadata.get("status", "active") == "active" else 1
+        if item.category == MemoryCategory.REFLECTIONS:
+            title = " ".join(re.sub(r"[^a-z0-9\s]+", " ", item.title.lower()).split())
+            if title in {"short descriptive title", "descriptive title", "insight", "learning"}:
+                return -1
+            return 1
+        return 1
+
     def _slugify(self, text: str) -> str:
         """Convert text to a safe URL-friendly slug."""
         text = text.lower().strip()
@@ -220,8 +293,8 @@ class MemoryStore:
 
     def _validate_required_fields(self, meta: dict, category: MemoryCategory) -> None:
         """Validate required fields for a memory category."""
-        # Common required fields
-        for field_name in ["id", "created_at", "type"]:
+        # Common required fields (id is optional - auto-generated if missing)
+        for field_name in ["created_at", "type"]:
             if field_name not in meta:
                 raise ValueError(f"Missing required field '{field_name}' in {category.value} memory")
 
@@ -725,7 +798,7 @@ class MemoryStore:
             List of matching MemoryItems.
         """
         query_lower = query.lower()
-        results: list[MemoryItem] = []
+        scored_results: dict[str, tuple[int, MemoryItem]] = {}
 
         # Determine which categories to search
         if categories is None:
@@ -747,35 +820,25 @@ class MemoryStore:
                 continue
 
             for file_path in category_path.glob("*.md"):
-                # Fast filename check first
-                if query_lower in file_path.stem.lower():
-                    item = self._read_file(file_path)
-                    if item:
-                        results.append(item)
-                        continue
-
-                # Then frontmatter/content check
                 item = self._read_file(file_path)
                 if item is None:
                     continue
 
-                # Check title
-                if query_lower in item.title.lower():
-                    results.append(item)
+                score = self._search_match_score(item, file_path, query_lower)
+                if score <= 0:
                     continue
 
-                # Check tags
-                if any(query_lower in tag.lower() for tag in item.tags):
-                    results.append(item)
-                    continue
+                existing = scored_results.get(item.id)
+                if existing is None or score > existing[0] or (
+                    score == existing[0] and item.updated_at > existing[1].updated_at
+                ):
+                    scored_results[item.id] = (score, item)
 
-                # Check content
-                if query_lower in item.content.lower():
-                    results.append(item)
-                    continue
-
-        # Sort by recency
-        results.sort(key=lambda x: x.updated_at, reverse=True)
+        results = [item for _, item in sorted(
+            scored_results.values(),
+            key=lambda pair: (pair[0], pair[1].updated_at),
+            reverse=True,
+        )]
 
         if limit:
             results = results[:limit]
@@ -1044,6 +1107,11 @@ class MemoryStore:
                 continue
 
             active_items = [item for item in items if "archived" not in str(item.file_path)]
+            active_items = [item for item in active_items if self._context_priority(item) >= 0]
+            active_items.sort(
+                key=lambda item: (self._context_priority(item), item.updated_at),
+                reverse=True,
+            )
             if max_items_per_category is not None:
                 active_items = active_items[:max_items_per_category]
             if not active_items:
@@ -1067,6 +1135,34 @@ class MemoryStore:
             return content
 
         return ""
+
+    def get_relevant_context(
+        self,
+        query: str,
+        *,
+        limit: int = 6,
+        max_chars: int | None = None,
+        max_item_chars: int | None = None,
+    ) -> str:
+        """Build a compact context section from memories relevant to a live query."""
+        if not query or not query.strip():
+            return ""
+
+        items = self.search_memory(query=query, limit=limit)
+        if not items:
+            return ""
+
+        section_lines: list[str] = []
+        for item in items:
+            formatted = self._format_memory_item(item, item.category)
+            if max_item_chars is not None and len(formatted) > max_item_chars:
+                formatted = formatted[:max_item_chars].rstrip() + "\n...(truncated)"
+            section_lines.append(formatted)
+
+        content = "\n".join(section_lines)
+        if max_chars is not None and len(content) > max_chars:
+            return content[:max_chars].rstrip() + "\n\n_[Relevant memory truncated]_"
+        return content
 
     def _format_memory_item(self, item: MemoryItem, category: MemoryCategory) -> str:
         """Format a single memory item for context display."""

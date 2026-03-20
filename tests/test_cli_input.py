@@ -58,5 +58,6 @@ def test_init_prompt_session_creates_session():
         assert commands._PROMPT_SESSION is not None
         MockSession.assert_called_once()
         _, kwargs = MockSession.call_args
-        assert kwargs["multiline"] is False
+        assert kwargs["multiline"] is True
         assert kwargs["enable_open_in_editor"] is False
+        assert "key_bindings" in kwargs
