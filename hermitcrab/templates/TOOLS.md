@@ -2,6 +2,12 @@
 
 Tool signatures provided via function calling. Non-obvious constraints below.
 
+## Session-Aware Retrieval
+
+- Check the recent conversation first when the user seems to be replying to your own prior message.
+- Use memory search for durable facts, decisions, workflows, and preferences.
+- Do not say you lack context until you have checked both recent conversation and memory when relevant.
+
 ## Memory vs Knowledge
 
 **Memory** = Identity (authoritative, auto-distilled from conversations)
@@ -55,3 +61,10 @@ Use `write_decision` only when the user made or clearly accepted the choice. Ass
 - **exec**: Timeout 60s, dangerous commands blocked, output truncated at 10k chars
 - **cron**: See cron skill for scheduled tasks
 - **spawn**: Background tasks with isolated sessions, shared memory
+
+## Cost And Loop Discipline
+
+- Prefer `search`, line ranges, or metadata before reading whole large files.
+- Verify state before acting; do not edit based on assumptions.
+- If the same fix fails three times in a row, stop retrying blindly and change approach or report the blocker.
+- Use subagents for bounded grunt work, not to hand off the entire strategic deliverable.

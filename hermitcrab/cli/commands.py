@@ -631,7 +631,7 @@ def gateway(
         except KeyboardInterrupt:
             console.print("\nShutting down...")
         finally:
-            await agent.close_mcp()
+            await agent.close()
             timeout_monitor.stop()
             heartbeat.stop()
             cron.stop()
@@ -766,7 +766,7 @@ def _run_nostr_mode(
             agent_loop.stop()
             outbound_task.cancel()
             await asyncio.gather(bus_task, outbound_task, return_exceptions=True)
-            await agent_loop.close_mcp()
+            await agent_loop.close()
 
     asyncio.run(run_nostr_listen())
 
@@ -892,7 +892,7 @@ def agent(
                     message, session_id, on_progress=_cli_progress
                 )
             _print_agent_response(response, render_markdown=markdown)
-            await agent_loop.close_mcp()
+            await agent_loop.close()
 
         asyncio.run(run_once())
     elif nostr_pubkey:
@@ -1031,7 +1031,7 @@ def agent(
                 agent_loop.stop()
                 outbound_task.cancel()
                 await asyncio.gather(bus_task, outbound_task, return_exceptions=True)
-                await agent_loop.close_mcp()
+                await agent_loop.close()
 
         asyncio.run(run_interactive())
 

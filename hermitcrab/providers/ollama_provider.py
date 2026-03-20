@@ -390,3 +390,7 @@ class OllamaProvider(LLMProvider):
 
     def get_default_model(self) -> str:
         return self.default_model
+
+    async def close(self) -> None:
+        if self._fallback_provider is not None:
+            await self._fallback_provider.close()

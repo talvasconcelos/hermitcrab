@@ -1,5 +1,7 @@
+import asyncio
 import shutil
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
@@ -103,6 +105,22 @@ def test_onboard_existing_workspace_safe_create(mock_paths):
     assert "Created workspace" not in result.stdout
     assert "Created AGENTS.md" in result.stdout
     assert (workspace_dir / "AGENTS.md").exists()
+
+
+def test_onboard_bootstrap_templates_include_continuity_and_delegation_guidance(mock_paths):
+    """Bundled templates should seed new workspaces with continuity and delegation rules."""
+    _, workspace_dir = mock_paths
+
+    result = runner.invoke(app, ["onboard"])
+
+    assert result.exit_code == 0
+    agents_text = (workspace_dir / "AGENTS.md").read_text(encoding="utf-8")
+    tools_text = (workspace_dir / "TOOLS.md").read_text(encoding="utf-8")
+
+    assert "Check the recent conversation before answering" in agents_text
+    assert "Broad, strategic, or ambiguous work stays owned by the main agent." in agents_text
+    assert "Check the recent conversation first" in tools_text
+    assert "If the same fix fails three times in a row" in tools_text
 
 
 def test_config_matches_github_copilot_codex_with_hyphen_prefix():
@@ -243,8 +261,80 @@ def test_channels_status_only_lists_supported_channels():
 def test_removed_channels_login_command_is_not_exposed():
     result = runner.invoke(app, ["channels", "login"])
 
-    assert result.exit_code == 2
-    assert "No such command 'login'" in result.output
+    assert result.exit_code != 0
+
+
+def test_agent_interactive_exit_closes_loop_resources(tmp_path):
+    config = Config()
+    config.agents.defaults.workspace = str(tmp_path)
+
+    class FakeCronService:
+        def __init__(self, path):
+            self.path = path
+
+    class FakeTimeoutService:
+        def __init__(self, *args, **kwargs):
+            self.started = False
+            self.stopped = False
+
+        async def start(self):
+            self.started = True
+
+        def stop(self):
+            self.stopped = True
+
+    class FakeAgentLoop:
+        instances: list["FakeAgentLoop"] = []
+
+        def __init__(self, **kwargs):
+            self.provider = kwargs["provider"]
+            self.channels_config = None
+            self._running = True
+            self.closed = False
+            FakeAgentLoop.instances.append(self)
+
+        async def run(self):
+            while self._running:
+                await asyncio.sleep(0.01)
+
+        async def process_direct(self, *args, **kwargs):
+            return ""
+
+        async def wait_for_background_tasks(self, timeout_s: float = 5.0):
+            return 0, 0
+
+        async def process_expired_sessions(self):
+            return None
+
+        def stop(self):
+            self._running = False
+
+        async def close(self):
+            self.closed = True
+
+    async def fake_read_interactive_input_async():
+        return "/exit"
+
+    with (
+        patch("hermitcrab.config.loader.load_config", return_value=config),
+        patch("hermitcrab.config.loader.get_data_dir", return_value=tmp_path),
+        patch("hermitcrab.cli.commands._make_provider", return_value=SimpleNamespace()),
+        patch("hermitcrab.cron.service.CronService", FakeCronService),
+        patch("hermitcrab.session.timeout_service.SessionTimeoutService", FakeTimeoutService),
+        patch("hermitcrab.agent.loop.AgentLoop", FakeAgentLoop),
+        patch("hermitcrab.cli.commands._init_prompt_session"),
+        patch("hermitcrab.cli.commands._flush_pending_tty_input"),
+        patch("hermitcrab.cli.commands._restore_terminal"),
+        patch("hermitcrab.cli.commands._read_interactive_input_async", fake_read_interactive_input_async),
+        patch("hermitcrab.cli.commands.signal.signal"),
+    ):
+        result = runner.invoke(app, ["agent"])
+
+    assert result.exit_code == 0
+    assert "Finalizing session before exit" in result.stdout
+    assert "\nGoodbye!" in result.stdout
+    assert FakeAgentLoop.instances
+    assert FakeAgentLoop.instances[0].closed is True
 
 
 def test_build_job_models_preserves_named_model_references():

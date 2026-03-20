@@ -144,6 +144,10 @@ class LLMProvider(ABC):
         """
         pass
 
+    async def close(self) -> None:
+        """Release provider-owned resources."""
+        return None
+
     @classmethod
     def _is_transient_error(cls, content: str | None) -> bool:
         err = (content or "").lower()

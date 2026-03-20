@@ -1734,6 +1734,11 @@ class AgentLoop:
                 pass  # MCP SDK cancel scope cleanup is noisy but harmless
             self._mcp_stack = None
 
+    async def close(self) -> None:
+        """Release externally owned resources used by the agent loop."""
+        await self.close_mcp()
+        await self.provider.close()
+
     def stop(self) -> None:
         """Stop the agent loop."""
         self._running = False

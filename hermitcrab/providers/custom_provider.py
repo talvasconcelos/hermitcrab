@@ -94,3 +94,6 @@ class CustomProvider(LLMProvider):
 
     def get_default_model(self) -> str:
         return self.default_model
+
+    async def close(self) -> None:
+        await self._client.close()

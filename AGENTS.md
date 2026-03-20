@@ -123,6 +123,7 @@ Current continuity points to preserve:
 - Coordinator failures should be treated as product issues to fix at the root cause, not by stacking narrow prompt band-aids.
 - Broad tasks should stay owned by the main agent; subagents are for bounded execution work, not for handing off the whole deliverable.
 - Prompt/context changes should preserve strong recent-conversation awareness; avoid bloated or duplicated bootstrap prompt sections that drown out the live exchange.
+- The user wants the main agent to behave as a visible coordinator for substantial work: plan first, delegate bounded research/execution where appropriate, stay responsive, and avoid filler or repeated apology loops.
 
 ## Coordinator And Subagent Policy
 Broad or strategic tasks must remain owned by the main agent.
@@ -136,6 +137,10 @@ Expected behavior:
 - retry with tighter scope or take over directly when subagents fail
 - never surface raw inner-loop failure text as the final user-facing answer
 - give useful progress updates when background work is underway
+- keep status reporting consistent with actual execution state; do not claim "no blockers" if a subagent failed and fallback/retry is still in progress
+- prefer deterministic fallback over user-visible thrash when delegation fails
+- avoid repeating acknowledgements after a correction; record it once, then act
+- for longer tasks, updates should clearly state what is in progress, what is done, whether there is any blocker, and what fallback path exists
 
 Do not offload an entire strategic deliverable to a weaker subagent just because delegation is available.
 
@@ -198,6 +203,7 @@ After stabilizing the current memory-quality branch, the next likely targets are
 3. NIP-17 and thread-aware messaging improvements for Nostr workflows
 4. Test-suite rationalization: keep high-value regressions, merge overlapping cases, and remove low-signal implementation-specific tests
 5. Further memory retrieval gains only if they stay lightweight and testable
+6. Add deterministic coordinator execution-state handling for plan/delegate/wait/fallback/complete so progress updates and recovery stay consistent
 
 ## Working Style
 When deciding what to do next:
