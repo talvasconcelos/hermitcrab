@@ -253,6 +253,7 @@ class AgentLoop:
             auto_promote=bool(reflection_promotion.get("auto_promote", False)),
             allowed_targets=reflection_promotion.get("target_files") or [],
             max_file_lines=int(reflection_promotion.get("max_file_lines", 500) or 500),
+            notify_user=bool(reflection_promotion.get("notify_user", True)),
         )
 
         self._running = False
