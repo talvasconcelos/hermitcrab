@@ -102,6 +102,7 @@ Rules:
         auto_promote: bool,
         allowed_targets: list[str],
         max_file_lines: int,
+        notify_user: bool = True,
     ):
         """
         Initialize reflection service.
@@ -122,6 +123,7 @@ Rules:
             "IDENTITY.md",
         ]
         self.max_file_lines = max(50, max_file_lines)
+        self.notify_user = notify_user
 
     async def reflect_on_session(
         self,
@@ -417,6 +419,10 @@ Rules:
         }
         return mapping.get(scope, "none")
 
+    def _promotion_audit_path(self) -> Path:
+        """Return the audit log path for bootstrap promotions."""
+        return self.memory.workspace / "bootstrap_promotion_log.md"
+
     def _promotion_is_viable(self, result: dict[str, Any]) -> bool:
         """Allow promotion only for durable, target-appropriate learnings."""
         if not result.get("should_promote"):
@@ -442,6 +448,8 @@ Rules:
         if not promote_content:
             return False
         if len(promote_content) > 220:
+            return False
+        if promote_content.count("-") > 1:
             return False
         result["promote_content"] = promote_content
         return True
@@ -614,6 +622,12 @@ Rules:
         section = section_map.get(result.get("scope", "assistant_behavior"), "## Learnings")
 
         file_path = self.memory.workspace / target_file
+        if self._bootstrap_conflict_exists(target_file, content):
+            logger.info(
+                "Skipping bootstrap promotion for {} due to duplicate/conflict in existing bootstrap guidance",
+                result["title"],
+            )
+            return
         self._ensure_bootstrap_file(file_path)
         if file_path.exists():
             line_count = len(file_path.read_text(encoding="utf-8").splitlines())
@@ -625,6 +639,7 @@ Rules:
                 )
                 return
         self._append_to_bootstrap(file_path, section, content)
+        self._append_promotion_audit(result, target_file, content)
 
         logger.info("Auto-promoted reflection to {}: {}", target_file, result["title"])
 
@@ -696,3 +711,42 @@ Rules:
             if SequenceMatcher(None, normalized_line, normalized_content).ratio() >= 0.92:
                 return True
         return False
+
+    def _bootstrap_conflict_exists(self, target_file: str, content: str) -> bool:
+        """Reject promotions that already exist or nearly exist in bootstrap files."""
+        normalized_content = self._normalize_text(content)
+        if not normalized_content:
+            return True
+
+        for candidate_name in self.allowed_targets:
+            candidate_path = self.memory.workspace / candidate_name
+            if not candidate_path.exists():
+                continue
+            existing = candidate_path.read_text(encoding="utf-8")
+            for line in existing.splitlines():
+                normalized_line = self._normalize_text(line)
+                if not normalized_line:
+                    continue
+                similarity = SequenceMatcher(None, normalized_line, normalized_content).ratio()
+                if similarity >= 0.92:
+                    return True
+                if candidate_name != target_file and similarity >= 0.84:
+                    return True
+        return False
+
+    def _append_promotion_audit(
+        self, result: dict[str, Any], target_file: str, content: str
+    ) -> None:
+        """Append an auditable record of bootstrap promotions."""
+        audit_path = self._promotion_audit_path()
+        entry = (
+            f"## {result['title']}\n\n"
+            f"- target: {target_file}\n"
+            f"- scope: {result.get('scope', 'unknown')}\n"
+            f"- confidence: {result.get('confidence', 0.0)}\n"
+            f"- notify_user: {self.notify_user}\n"
+            f"- content: {content}\n"
+        )
+        existing = audit_path.read_text(encoding="utf-8") if audit_path.exists() else ""
+        separator = "\n\n" if existing and not existing.endswith("\n\n") else ""
+        audit_path.write_text(f"{existing}{separator}{entry}", encoding="utf-8")
