@@ -85,28 +85,24 @@ These points reflect the current state of the codebase and should override older
 - Interactive CLI input supports multiline entry with `Ctrl+J`.
 
 ## Current Branch Focus
-Active branch: `refactor/codebase-cleanup`
+Active branch: `feat/memory-retrieval-quality`
 
-This branch is focused on Phase 1 agent-loop refactoring: shrinking coordinator complexity, centralizing duplicate recovery/session logic, and preserving existing reliability-first behavior.
+This branch is focused on memory quality and coordinator reliability, not new product surface area.
 
 Implemented on this branch so far:
 
-- shared tool-call recovery extracted from main/subagent loops
-- interactive turn execution extracted into `turn_runner.py`
-- background cognition, session lifecycle, message preparation, background messaging, turn persistence, and execution-state helpers split into focused modules
-- background cognition further decomposed into session-digest, journal, distillation, and task-tracking helpers instead of one large helper file
-- `AgentLoop` behavior kept compatible while internals move toward a thinner orchestrator shape
-- final readability pass extracted message-processing helpers and subagent tool construction to reduce local function sprawl
+- query-aware memory injection in prompt building
+- deterministic retrieval ranking improvements
+- history-window boundary repair for truncated session slices
+- prompt token estimation and retrieval budgeting
+- journaling scope cleanup to reduce raw tool and subagent noise
+- reflection validation hardening and duplicate/contradiction guards
+- suppression of blank progress updates and low-value background-task replies
+- deterministic reflection override for high-priority delegation/ownership corrections
 
 Current branch test status:
 
 - full suite passing with `uv run pytest`
-- local-only refactor regression tests may exist during development, but tests should not be newly committed until the suite is trimmed and made more targeted
-
-Phase 1 status:
-
-- core extraction goals are complete
-- further refactor work on this branch should stay incremental, low-risk, and behavior-preserving
 
 ## Session Continuity
 Use this file to preserve high-value context across new chat sessions.
@@ -124,7 +120,6 @@ Do not use this file as a raw journal or a dumping ground. Prefer concise, durab
 Current continuity points to preserve:
 
 - The user expects new sessions to recover branch direction and recent progress from `AGENTS.md` rather than requiring the same re-explanation in chat.
-- Tests are intentionally local-only for now; do not newly commit test files until the suite is reviewed, reduced, and made more targeted.
 - Coordinator failures should be treated as product issues to fix at the root cause, not by stacking narrow prompt band-aids.
 - Broad tasks should stay owned by the main agent; subagents are for bounded execution work, not for handing off the whole deliverable.
 - Prompt/context changes should preserve strong recent-conversation awareness; avoid bloated or duplicated bootstrap prompt sections that drown out the live exchange.
@@ -201,14 +196,14 @@ This is especially useful for:
 - lightweight memory and orchestration safeguards
 
 ## Next Targets
-With Phase 1 largely complete, the next likely targets are:
+After stabilizing the current memory-quality branch, the next likely targets are:
 
-1. Better coordinator/task handoff clarity between main agent and subagents, especially around delegated-progress and completion synthesis
-2. Smarter journal and reflection prioritization based on session structure rather than brittle phrase markers
-3. Deterministic coordinator execution-state handling for plan/delegate/wait/fallback/complete so progress updates and recovery stay consistent end to end
-4. Test-suite rationalization: keep high-value regressions, merge overlapping cases, and remove low-signal implementation-specific tests before changing git policy for tests
-5. Further memory retrieval gains only if they stay lightweight, Python-authoritative, and easy to validate
-6. NIP-17 and thread-aware messaging improvements for Nostr workflows after coordinator refactor fallout is settled
+1. Better coordinator/task handoff clarity between main agent and subagents
+2. Smarter journal and reflection prioritization based on session structure
+3. NIP-17 and thread-aware messaging improvements for Nostr workflows
+4. Test-suite rationalization: keep high-value regressions, merge overlapping cases, and remove low-signal implementation-specific tests
+5. Further memory retrieval gains only if they stay lightweight and testable
+6. Add deterministic coordinator execution-state handling for plan/delegate/wait/fallback/complete so progress updates and recovery stay consistent
 
 ## Working Style
 When deciding what to do next:
