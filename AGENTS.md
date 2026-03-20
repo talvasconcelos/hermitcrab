@@ -85,24 +85,21 @@ These points reflect the current state of the codebase and should override older
 - Interactive CLI input supports multiline entry with `Ctrl+J`.
 
 ## Current Branch Focus
-Active branch: `feat/memory-retrieval-quality`
+Active branch: `refactor/codebase-cleanup`
 
-This branch is focused on memory quality and coordinator reliability, not new product surface area.
+This branch is focused on Phase 1 agent-loop refactoring: shrinking coordinator complexity, centralizing duplicate recovery/session logic, and preserving existing reliability-first behavior.
 
 Implemented on this branch so far:
 
-- query-aware memory injection in prompt building
-- deterministic retrieval ranking improvements
-- history-window boundary repair for truncated session slices
-- prompt token estimation and retrieval budgeting
-- journaling scope cleanup to reduce raw tool and subagent noise
-- reflection validation hardening and duplicate/contradiction guards
-- suppression of blank progress updates and low-value background-task replies
-- deterministic reflection override for high-priority delegation/ownership corrections
+- shared tool-call recovery extracted from main/subagent loops
+- interactive turn execution extracted into `turn_runner.py`
+- background cognition, session lifecycle, message preparation, background messaging, and execution-state helpers split into focused modules
+- `AgentLoop` behavior kept compatible while internals move toward a thinner orchestrator shape
 
 Current branch test status:
 
 - full suite passing with `uv run pytest`
+- local-only refactor regression tests may exist during development, but tests should not be newly committed until the suite is trimmed and made more targeted
 
 ## Session Continuity
 Use this file to preserve high-value context across new chat sessions.
@@ -120,6 +117,7 @@ Do not use this file as a raw journal or a dumping ground. Prefer concise, durab
 Current continuity points to preserve:
 
 - The user expects new sessions to recover branch direction and recent progress from `AGENTS.md` rather than requiring the same re-explanation in chat.
+- Tests are intentionally local-only for now; do not newly commit test files until the suite is reviewed, reduced, and made more targeted.
 - Coordinator failures should be treated as product issues to fix at the root cause, not by stacking narrow prompt band-aids.
 - Broad tasks should stay owned by the main agent; subagents are for bounded execution work, not for handing off the whole deliverable.
 - Prompt/context changes should preserve strong recent-conversation awareness; avoid bloated or duplicated bootstrap prompt sections that drown out the live exchange.

@@ -49,12 +49,8 @@ from hermitcrab.agent.memory import MemoryStore
 from hermitcrab.agent.message_preparation import (
     build_delegation_hint,
     clean_snippet,
-    extract_subagent_task,
     is_empty_response,
     is_intent_only_response,
-    is_low_signal_journal_body,
-    is_subagent_completion_prompt,
-    is_transition_assistant_message,
     should_hint_subagent_delegation,
 )
 from hermitcrab.agent.reflection import ReflectionService
@@ -390,16 +386,6 @@ class AgentLoop:
 
         return ", ".join(_fmt(tc) for tc in tool_calls)
 
-    @staticmethod
-    def _is_intent_only_response(text: str | None) -> bool:
-        """Detect non-final assistant replies that only narrate the next step."""
-        return is_intent_only_response(text)
-
-    @staticmethod
-    def _is_empty_response(text: str | None) -> bool:
-        """Treat blank or whitespace-only replies as missing output."""
-        return is_empty_response(text)
-
     def _get_model_for_job(self, job_class: JobClass) -> str | None:
         """
         Get model for a job class.
@@ -421,28 +407,6 @@ class AgentLoop:
         if model is None and job_class != JobClass.DISTILLATION:
             return self.model
         return model
-
-    def _should_hint_subagent_delegation(self, user_message: str) -> bool:
-        """Return True when the request looks like substantial implementation grunt work."""
-        return should_hint_subagent_delegation(
-            user_message,
-            has_spawn_tool=self.tools.has("spawn"),
-            subagent_model=self._job_models.get(JobClass.SUBAGENT),
-        )
-
-    def _build_delegation_hint(self) -> str:
-        """Build a deterministic reminder to delegate substantial implementation work."""
-        return build_delegation_hint(self._job_models.get(JobClass.SUBAGENT) or self.model)
-
-    @staticmethod
-    def _fallback_system_task_summary(content: str) -> str:
-        """Create a deterministic fallback summary for background task results."""
-        return fallback_system_task_summary(content)
-
-    @staticmethod
-    def _is_low_value_system_reply(content: str | None) -> bool:
-        """Detect inner-loop failure text that should not be surfaced as a background-task answer."""
-        return is_low_value_system_reply(content)
 
     async def _chat_with_retry(
         self,
@@ -802,8 +766,8 @@ class AgentLoop:
             get_model_for_job=self._get_model_for_job,
             strip_think=self._strip_think,
             tool_hint=self._tool_hint,
-            is_empty_response=self._is_empty_response,
-            is_intent_only_response=self._is_intent_only_response,
+            is_empty_response=is_empty_response,
+            is_intent_only_response=is_intent_only_response,
         )
         return await runner.run(initial_messages, on_progress=on_progress, job_class=job_class)
 
@@ -947,15 +911,15 @@ class AgentLoop:
                     self._save_turn(session, all_msgs, 1 + len(history))
                     self.sessions.save(session)
                     safe_content = (
-                        self._fallback_system_task_summary(msg.content)
-                        if self._is_low_value_system_reply(final_content)
+                        fallback_system_task_summary(msg.content)
+                        if is_low_value_system_reply(final_content)
                         else final_content
                     )
                     self.execution_state.set(key, ExecutionPhase.COMPLETED, "system update ready")
                     return OutboundMessage(
                         channel=channel,
                         chat_id=chat_id,
-                        content=safe_content or self._fallback_system_task_summary(msg.content),
+                        content=safe_content or fallback_system_task_summary(msg.content),
                     )
                 finally:
                     self._session_active_turns[key] -= 1
@@ -1023,10 +987,19 @@ class AgentLoop:
                     chat_id=msg.chat_id,
                     scratchpad_path=str(scratchpad_path),
                 )
-                if self._should_hint_subagent_delegation(msg.content):
+                if should_hint_subagent_delegation(
+                    msg.content,
+                    has_spawn_tool=self.tools.has("spawn"),
+                    subagent_model=self._job_models.get(JobClass.SUBAGENT),
+                ):
                     initial_messages.insert(
                         len(initial_messages) - 1,
-                        {"role": "system", "content": self._build_delegation_hint()},
+                        {
+                            "role": "system",
+                            "content": build_delegation_hint(
+                                self._job_models.get(JobClass.SUBAGENT) or self.model
+                            ),
+                        },
                     )
 
                 async def _bus_progress(content: str, *, tool_hint: bool = False) -> None:
@@ -1085,75 +1058,6 @@ class AgentLoop:
                 if self._session_active_turns[key] <= 0:
                     self._session_active_turns.pop(key, None)
 
-    @staticmethod
-    def _derive_channel_chat(session_key: str) -> tuple[str, str]:
-        """Split a session key into channel/chat identifiers."""
-        return BackgroundJobManager.derive_channel_chat(session_key)
-
-    @staticmethod
-    def _safe_iso_timestamp(value: str | None) -> str:
-        """Return a best-effort ISO timestamp string."""
-        return BackgroundJobManager.safe_iso_timestamp(value)
-
-    @staticmethod
-    def _clean_snippet(value: Any, *, max_chars: int = 160) -> str:
-        """Normalize text snippets for prompts and logs."""
-        return clean_snippet(value, max_chars=max_chars)
-
-    @staticmethod
-    def _extract_tool_name(call: dict[str, Any]) -> str:
-        """Read a tool name from a stored tool-call payload."""
-        return BackgroundJobManager.extract_tool_name(call)
-
-    @staticmethod
-    def _extract_tool_arguments(call: dict[str, Any]) -> dict[str, Any]:
-        """Read normalized tool-call arguments from a stored payload."""
-        return BackgroundJobManager.extract_tool_arguments(call)
-
-    @staticmethod
-    def _is_subagent_completion_prompt(content: str) -> bool:
-        """Return True when a stored user message is a synthetic subagent completion prompt."""
-        return is_subagent_completion_prompt(content)
-
-    @staticmethod
-    def _extract_subagent_task(content: str) -> str:
-        """Extract delegated task text from a synthetic subagent completion prompt."""
-        return extract_subagent_task(content)
-
-    @staticmethod
-    def _is_transition_assistant_message(content: str, tool_calls: list[dict[str, Any]]) -> bool:
-        """Detect low-signal assistant scaffolding around tool usage."""
-        return is_transition_assistant_message(content, tool_calls)
-
-    @staticmethod
-    def _is_low_signal_journal_body(body: str) -> bool:
-        """Reject journal synthesis that parrots scaffolding or synthetic prompt text."""
-        return is_low_signal_journal_body(body)
-
-    @staticmethod
-    def _build_journal_event_trace(digest: SessionDigest) -> list[str]:
-        """Build a journal-safe event trace with raw tool mechanics filtered out."""
-        return BackgroundJobManager.build_journal_event_trace(digest)
-
-    def _build_session_digest(
-        self, messages: list[dict[str, Any]], session_key: str
-    ) -> SessionDigest:
-        """Build a deterministic digest of a session for weak-model jobs."""
-        return self._background_jobs.build_session_digest(messages, session_key)
-
-    @staticmethod
-    def _format_digest_timestamp(value: str) -> str:
-        """Render digest timestamp for journal headings."""
-        return BackgroundJobManager.format_digest_timestamp(value)
-
-    def _format_journal_entry(self, digest: SessionDigest, body: str) -> str:
-        """Wrap a journal body with deterministic per-entry metadata."""
-        return self._background_jobs.format_journal_entry(digest, body)
-
-    def _build_fallback_journal_body(self, digest: SessionDigest) -> str:
-        """Build a deterministic journal narrative when LLM synthesis fails."""
-        return self._background_jobs.build_fallback_journal_body(digest)
-
     def _save_turn(self, session: Session, messages: list[dict], skip: int) -> None:
         """
         Save new-turn messages into session, truncating large tool results.
@@ -1166,6 +1070,25 @@ class AgentLoop:
             skip: Number of messages to skip from the start.
         """
         self._background_jobs.save_turn(session, messages, skip, self._update_session_timer)
+
+    @staticmethod
+    def _build_journal_event_trace(digest: SessionDigest) -> list[str]:
+        """Build a journal-safe event trace with raw tool mechanics filtered out."""
+        return BackgroundJobManager.build_journal_event_trace(digest)
+
+    def _build_session_digest(
+        self, messages: list[dict[str, Any]], session_key: str
+    ) -> SessionDigest:
+        """Build a deterministic digest of a session for weak-model jobs."""
+        return self._background_jobs.build_session_digest(messages, session_key)
+
+    def _format_journal_entry(self, digest: SessionDigest, body: str) -> str:
+        """Wrap a journal body with deterministic per-entry metadata."""
+        return self._background_jobs.format_journal_entry(digest, body)
+
+    def _build_fallback_journal_body(self, digest: SessionDigest) -> str:
+        """Build a deterministic journal narrative when LLM synthesis fails."""
+        return self._background_jobs.build_fallback_journal_body(digest)
 
     async def process_direct(
         self,
