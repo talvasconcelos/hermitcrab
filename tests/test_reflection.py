@@ -24,6 +24,12 @@ def make_digest(**overrides):
         "outcomes": [],
         "failures": [],
         "wikilinks": [],
+        "user_goal": "Keep answers short.",
+        "artifacts_changed": [],
+        "decisions_made": [],
+        "open_loops": [],
+        "assistant_responses": [],
+        "signals": {},
     }
     base.update(overrides)
     return SimpleNamespace(**base)
@@ -81,7 +87,9 @@ class TestReflectionService:
         mock_provider.chat.assert_not_called()
 
     @pytest.mark.asyncio
-    async def test_reflect_on_session_skips_when_llm_returns_skip(self, memory_store, mock_provider):
+    async def test_reflect_on_session_skips_when_llm_returns_skip(
+        self, memory_store, mock_provider
+    ):
         """Test that sessions are skipped when LLM returns skip=true."""
         service = ReflectionService(
             memory=memory_store,
@@ -97,6 +105,7 @@ class TestReflectionService:
             response = MagicMock()
             response.content = '{"skip": true, "reason": "No new insights"}'
             return response
+
         mock_provider.chat.side_effect = skip_chat
 
         await service.reflect_on_session(
@@ -123,16 +132,21 @@ class TestReflectionService:
         # Mock LLM response with reflection
         async def reflection_chat(**kwargs):
             response = MagicMock()
-            response.content = '''
+            response.content = """
             {
                 "title": "User prefers concise answers",
-                "content": "I learned that the user prefers brief, direct answers rather than long explanations.",
-                "type": "preference",
+                "observation": "The user asked for a short answer.",
+                "impact": "Long replies would add noise.",
+                "lesson": "I learned that the user prefers brief, direct answers rather than long explanations.",
+                "recommended_behavior": "Keep future answers brief and direct unless the user asks for more detail.",
+                "scope": "user_preference",
+                "confidence": 0.9,
                 "evidence": "The user explicitly asked for a short answer and responded positively to a brief reply.",
                 "should_promote": false
             }
-            '''
+            """
             return response
+
         mock_provider.chat.side_effect = reflection_chat
 
         await service.reflect_on_session(
@@ -151,10 +165,12 @@ class TestReflectionService:
         reflections = memory_store.list_memories("reflections")
         assert len(reflections) == 1
         assert reflections[0].title == "User prefers concise answers"
-        assert "preference" in reflections[0].tags
+        assert "user_preference" in reflections[0].tags
 
     @pytest.mark.asyncio
-    async def test_reflect_on_session_promotes_when_flagged(self, memory_store, mock_provider, temp_workspace):
+    async def test_reflect_on_session_promotes_when_flagged(
+        self, memory_store, mock_provider, temp_workspace
+    ):
         """Test that reflections are promoted when should_promote=true."""
         service = ReflectionService(
             memory=memory_store,
@@ -168,18 +184,23 @@ class TestReflectionService:
         # Mock LLM response with promotion
         async def promote_chat(**kwargs):
             response = MagicMock()
-            response.content = '''
+            response.content = """
             {
                 "title": "Task status values",
-                "content": "I learned to use 'open' not 'pending' for task status.",
-                "type": "correction",
+                "observation": "The session used the valid task status value 'open'.",
+                "impact": "Using valid task statuses avoids broken task state handling.",
+                "lesson": "I learned to use 'open' not 'pending' for task status.",
+                "recommended_behavior": "When writing tasks, use only the valid status vocabulary.",
+                "scope": "tool_usage",
+                "confidence": 0.92,
                 "evidence": "During the session I used status open and avoided the invalid pending variant.",
                 "should_promote": true,
-                "promote_to": "TOOLS.md",
+                "promotion_target": "TOOLS.md",
                 "promote_content": "Task status values: use 'open', 'in_progress', 'done', 'deferred'"
             }
-            '''
+            """
             return response
+
         mock_provider.chat.side_effect = promote_chat
 
         await service.reflect_on_session(
@@ -202,7 +223,7 @@ class TestReflectionService:
         tools_file = temp_workspace / "TOOLS.md"
         assert tools_file.exists()
         content = tools_file.read_text()
-        assert "Task status values" in content
+        assert "use 'open', 'in_progress', 'done', 'deferred'" in content
 
     @pytest.mark.asyncio
     async def test_parse_response_handles_invalid_json(self, memory_store, mock_provider):
@@ -234,14 +255,14 @@ class TestReflectionService:
         )
 
         # Test parsing JSON embedded in text
-        text = '''
+        text = """
         Here's my reflection:
-        {"title": "Test", "content": "Test content", "type": "insight"}
+        {"title": "Test", "lesson": "Test content", "scope": "assistant_behavior"}
         Hope that helps!
-        '''
+        """
         result = service._parse_response(text)
         assert result["title"] == "Test"
-        assert result["content"] == "Test content"
+        assert result["lesson"] == "Test content"
 
     @pytest.mark.asyncio
     async def test_parse_response_handles_relaxed_json(self, memory_store, mock_provider):
@@ -259,14 +280,14 @@ class TestReflectionService:
         ```json
         {
           "title": "Test",
-          "content": "Test content",
-          "type": "insight",
+          "lesson": "Test content",
+          "scope": "assistant_behavior",
         }
         ```
         """
         result = service._parse_response(text)
         assert result["title"] == "Test"
-        assert result["content"] == "Test content"
+        assert result["lesson"] == "Test content"
 
     @pytest.mark.asyncio
     async def test_reflect_on_session_skips_duplicate_reflection(self, memory_store, mock_provider):
@@ -282,7 +303,7 @@ class TestReflectionService:
         memory_store.write_reflection(
             title="User prefers concise answers",
             content="I learned that the user prefers brief, direct answers rather than long explanations.",
-            tags=["preference", "reflection", "learning"],
+            tags=["user_preference", "reflection", "learning"],
             context="Evidence: The user explicitly asked for short answers in the previous session.",
         )
 
@@ -291,8 +312,12 @@ class TestReflectionService:
             response.content = """
             {
                 "title": "User prefers concise answers",
-                "content": "I learned that the user prefers brief, direct answers instead of long explanations.",
-                "type": "preference",
+                "observation": "The user again asked for a short answer.",
+                "impact": "Long responses would be less useful for this user.",
+                "lesson": "I learned that the user prefers brief, direct answers instead of long explanations.",
+                "recommended_behavior": "Default to concise answers unless the user asks for more detail.",
+                "scope": "user_preference",
+                "confidence": 0.86,
                 "evidence": "The user again asked for a short answer in this session.",
                 "should_promote": false
             }
@@ -314,7 +339,9 @@ class TestReflectionService:
         assert len(reflections) == 1
 
     @pytest.mark.asyncio
-    async def test_reflect_on_session_skips_contradictory_preference(self, memory_store, mock_provider):
+    async def test_reflect_on_session_allows_distinct_preference_update(
+        self, memory_store, mock_provider
+    ):
         service = ReflectionService(
             memory=memory_store,
             chat_callable=mock_provider.chat,
@@ -327,7 +354,7 @@ class TestReflectionService:
         memory_store.write_reflection(
             title="Answer length preference",
             content="I learned that the user prefers concise answers.",
-            tags=["preference", "reflection", "learning"],
+            tags=["user_preference", "reflection", "learning"],
             context="Evidence: The user asked me to keep replies brief.",
         )
 
@@ -335,9 +362,13 @@ class TestReflectionService:
             response = MagicMock()
             response.content = """
             {
-                "title": "Answer length preference",
-                "content": "I learned that the user prefers detailed, verbose answers.",
-                "type": "preference",
+                "title": "Ask-driven answer depth",
+                "observation": "The user asked for more detail this time.",
+                "impact": "I should expand answers when the user explicitly asks for depth.",
+                "lesson": "I learned that the user sometimes asks for detailed, verbose answers.",
+                "recommended_behavior": "Adapt answer length to the explicit request instead of assuming one fixed preference.",
+                "scope": "user_preference",
+                "confidence": 0.72,
                 "evidence": "The user asked for more detail this time.",
                 "should_promote": false
             }
@@ -356,10 +387,12 @@ class TestReflectionService:
         )
 
         reflections = memory_store.list_memories("reflections")
-        assert len(reflections) == 1
+        assert len(reflections) == 2
 
     @pytest.mark.asyncio
-    async def test_reflect_on_session_rejects_tool_failure_reflection(self, memory_store, mock_provider):
+    async def test_reflect_on_session_rejects_tool_failure_reflection(
+        self, memory_store, mock_provider
+    ):
         service = ReflectionService(
             memory=memory_store,
             chat_callable=mock_provider.chat,
@@ -374,8 +407,12 @@ class TestReflectionService:
             response.content = """
             {
                 "title": "Tool failure: read_file",
-                "content": "I learned that read_file failed and should be retried.",
-                "type": "insight",
+                "observation": "read_file failed.",
+                "impact": "The task could not continue.",
+                "lesson": "I learned that read_file failed and should be retried.",
+                "recommended_behavior": "Retry the tool call.",
+                "scope": "assistant_behavior",
+                "confidence": 0.9,
                 "evidence": "The session had a read_file tool error after a missing file.",
                 "should_promote": false
             }
@@ -398,7 +435,9 @@ class TestReflectionService:
         assert reflections == []
 
     @pytest.mark.asyncio
-    async def test_reflect_on_session_rejects_generic_placeholder_title(self, memory_store, mock_provider):
+    async def test_reflect_on_session_rejects_generic_placeholder_title(
+        self, memory_store, mock_provider
+    ):
         service = ReflectionService(
             memory=memory_store,
             chat_callable=mock_provider.chat,
@@ -413,8 +452,12 @@ class TestReflectionService:
             response.content = """
             {
                 "title": "Short, descriptive title",
-                "content": "I learned that the user prefers concise answers.",
-                "type": "preference",
+                "observation": "The user asked for concise answers.",
+                "impact": "Verbose answers would add noise.",
+                "lesson": "I learned that the user prefers concise answers.",
+                "recommended_behavior": "Prefer concise answers.",
+                "scope": "user_preference",
+                "confidence": 0.8,
                 "evidence": "The user asked me to keep the answer brief.",
                 "should_promote": false
             }
@@ -436,7 +479,9 @@ class TestReflectionService:
         assert reflections == []
 
     @pytest.mark.asyncio
-    async def test_reflect_on_session_accepts_missing_evidence_when_digest_supports_it(self, memory_store, mock_provider):
+    async def test_reflect_on_session_accepts_missing_evidence_when_digest_supports_it(
+        self, memory_store, mock_provider
+    ):
         service = ReflectionService(
             memory=memory_store,
             chat_callable=mock_provider.chat,
@@ -451,8 +496,12 @@ class TestReflectionService:
             response.content = """
             {
                 "title": "User prefers concise answers",
-                "content": "I learned that the user prefers concise answers and direct replies.",
-                "type": "preference",
+                "observation": "The user asked for concise answers.",
+                "impact": "Overly long replies would be less useful.",
+                "lesson": "I learned that the user prefers concise answers and direct replies.",
+                "recommended_behavior": "Prefer concise direct replies when the user asks for brevity.",
+                "scope": "user_preference",
+                "confidence": 0.85,
                 "should_promote": false
             }
             """
@@ -474,7 +523,7 @@ class TestReflectionService:
         assert "Please keep it concise" in reflections[0].metadata.get("context", "")
 
     @pytest.mark.asyncio
-    async def test_reflect_on_session_prioritizes_explicit_workflow_correction(
+    async def test_reflect_on_session_accepts_structural_workflow_learning(
         self, memory_store, mock_provider
     ):
         service = ReflectionService(
@@ -485,6 +534,27 @@ class TestReflectionService:
             allowed_targets=["AGENTS.md", "TOOLS.md", "SOUL.md", "IDENTITY.md"],
             max_file_lines=500,
         )
+
+        async def workflow_chat(**kwargs):
+            response = MagicMock()
+            response.content = """
+            {
+                "title": "Keep ownership of delegated work",
+                "observation": "The user pushed me to recover after delegation drift.",
+                "impact": "Broad tasks become frustrating when I delegate too much and lose ownership.",
+                "lesson": "I learned that for broad multi-step work I should keep ownership and delegate only bounded execution slices.",
+                "recommended_behavior": "Plan first, delegate only bounded subtasks, and recover subagent failures internally instead of pushing them back to the user.",
+                "scope": "global_product",
+                "confidence": 0.93,
+                "evidence": "The user corrected my coordination approach after a weak subagent handoff.",
+                "should_promote": true,
+                "promotion_target": "AGENTS.md",
+                "promote_content": "For broad work, keep main-agent ownership and use subagents only for bounded execution slices."
+            }
+            """
+            return response
+
+        mock_provider.chat.side_effect = workflow_chat
 
         await service.reflect_on_session(
             messages=[{"role": "user", "content": "Do the whole project report."}],
@@ -502,10 +572,10 @@ class TestReflectionService:
             ),
         )
 
-        mock_provider.chat.assert_not_called()
+        assert mock_provider.chat.called
         reflections = memory_store.list_memories("reflections")
         assert len(reflections) == 1
-        assert reflections[0].title == "Maintain ownership of delegated tasks"
+        assert reflections[0].title == "Keep ownership of delegated work"
         assert "delegate only bounded subtasks" in reflections[0].content
 
     @pytest.mark.asyncio
@@ -529,26 +599,14 @@ class TestReflectionService:
             )
         )
         assert "User requests:" in formatted
-        assert "User corrections / expectations:" in formatted
-        assert "Ignore these tool or provider failures:" in formatted
+        assert "Follow-up user turns / corrections:" in formatted
+        assert "Artifacts changed:" in formatted
+        assert "Failures or friction:" in formatted
 
     @pytest.mark.asyncio
-    async def test_format_recent_reflections_handles_empty(self, memory_store, mock_provider):
-        """Test that empty recent reflections are handled."""
-        service = ReflectionService(
-            memory=memory_store,
-            chat_callable=mock_provider.chat,
-            model="test-model",
-            auto_promote=False,
-            allowed_targets=["AGENTS.md", "TOOLS.md", "SOUL.md", "IDENTITY.md"],
-            max_file_lines=500,
-        )
-
-        formatted = service._format_recent_reflections([])
-        assert "No recent reflections" in formatted
-
-    @pytest.mark.asyncio
-    async def test_append_to_bootstrap_creates_new_file(self, memory_store, mock_provider, temp_workspace):
+    async def test_append_to_bootstrap_creates_new_file(
+        self, memory_store, mock_provider, temp_workspace
+    ):
         """Test appending to non-existent bootstrap file."""
         service = ReflectionService(
             memory=memory_store,
@@ -572,7 +630,9 @@ class TestReflectionService:
         assert "New content here" in content
 
     @pytest.mark.asyncio
-    async def test_append_to_bootstrap_appends_to_existing_section(self, memory_store, mock_provider, temp_workspace):
+    async def test_append_to_bootstrap_appends_to_existing_section(
+        self, memory_store, mock_provider, temp_workspace
+    ):
         """Test appending to existing bootstrap section."""
         service = ReflectionService(
             memory=memory_store,
@@ -600,7 +660,9 @@ class TestReflectionService:
         assert content.index("Old content") < content.index("New content")
 
     @pytest.mark.asyncio
-    async def test_append_to_bootstrap_creates_new_section(self, memory_store, mock_provider, temp_workspace):
+    async def test_append_to_bootstrap_creates_new_section(
+        self, memory_store, mock_provider, temp_workspace
+    ):
         """Test creating new section in existing file."""
         service = ReflectionService(
             memory=memory_store,

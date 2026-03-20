@@ -80,8 +80,8 @@ class JournalBackgroundManager:
         journal_event_trace = self.digest_builder.build_journal_event_trace(digest)
         return (
             "Write a short first-person journal entry about what happened in this session.\n"
-            "Sound like a useful human journal, not telemetry.\n"
-            "Focus on what the user wanted, what I tried, what changed, and the outcome.\n"
+            "Sound like a useful human journal entry that is still understandable days later, not telemetry.\n"
+            "Preserve concrete specifics: what the user wanted, what changed, the important artifacts, the outcome, and anything still open.\n"
             "Use Obsidian-style wikilinks when referencing tasks, goals, decisions, reflections, or named work items.\n"
             "Do not mention counts of messages, requests, or tool calls.\n\n"
             f"Session: {digest.session_key}\n"
@@ -89,9 +89,13 @@ class JournalBackgroundManager:
             f"Chat: {digest.chat_id}\n"
             f"Time range: {digest.first_timestamp} -> {digest.last_timestamp}\n"
             f"Candidate wikilinks: {candidate_links}\n\n"
+            f"User goal: {digest.user_goal or 'unknown'}\n"
+            f"Artifacts changed: {', '.join(digest.artifacts_changed) if digest.artifacts_changed else 'none'}\n"
+            f"Decisions made: {', '.join(digest.decisions_made) if digest.decisions_made else 'none'}\n"
+            f"Open loops: {', '.join(digest.open_loops) if digest.open_loops else 'none'}\n\n"
             "Event trace:\n"
             f"{chr(10).join(journal_event_trace[:18])}\n\n"
-            "Write 3-6 sentences only."
+            "Write 4-6 sentences. Avoid vague phrasing like 'worked on it' without specifics."
         )
 
     async def synthesize_journal_from_messages(
