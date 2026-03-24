@@ -182,7 +182,7 @@ class SessionDigestBuilder:
             outcomes=outcomes[-8:],
             failures=failures[-6:],
             wikilinks=unique_links[:10],
-            user_goal=user_requests[-1] if user_requests else "",
+            user_goal=self._select_user_goal(user_requests),
             artifacts_changed=unique_artifacts[:10],
             decisions_made=unique_decisions[:8],
             open_loops=self._build_open_loops(user_requests, outcomes, failures)[:6],
@@ -242,6 +242,14 @@ class SessionDigestBuilder:
         return open_loops
 
     @staticmethod
+    def _select_user_goal(user_requests: list[str]) -> str:
+        """Prefer the session's primary request over late status pings or corrections."""
+        for request in user_requests:
+            if request and request.strip():
+                return request
+        return ""
+
+    @staticmethod
     def _digest_tool_message(
         msg: dict[str, Any],
         content: str,
@@ -257,6 +265,17 @@ class SessionDigestBuilder:
             failure = f"{tool_name}: {content}"
             failures.append(failure)
             event_lines.append(f"- Tool failure ({tool_name}): {content}")
+        elif lowered.startswith(
+            (
+                "successfully wrote",
+                "successfully edited",
+                "successfully created",
+                "successfully updated",
+                "applied patch",
+            )
+        ):
+            outcomes.append(content)
+            event_lines.append(f"- Tool success ({tool_name}): {content}")
         elif lowered.startswith(("task saved:", "goal saved:", "decision saved:", "fact saved:")):
             outcomes.append(content)
 

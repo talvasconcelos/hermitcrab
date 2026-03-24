@@ -41,7 +41,7 @@ class ReflectionService:
     }
     VALID_PROMOTION_TARGETS = {"AGENTS.md", "TOOLS.md", "SOUL.md", "IDENTITY.md", "none"}
     TARGET_SCOPE_MAP = {
-        "AGENTS.md": {"global_product", "session_tactic"},
+        "AGENTS.md": {"global_product", "session_tactic", "assistant_behavior"},
         "TOOLS.md": {"tool_usage"},
         "SOUL.md": {"assistant_behavior"},
         "IDENTITY.md": {"assistant_behavior"},
@@ -302,6 +302,7 @@ Rules:
         scope = str(result.get("scope", "")).strip().lower()
         if scope not in self.VALID_SCOPES:
             return False
+        result["scope"] = scope
 
         confidence = self._parse_confidence(result.get("confidence"))
         if confidence is None or confidence < 0.55:
@@ -329,11 +330,8 @@ Rules:
             return False
 
         result["should_promote"] = self._coerce_bool(result.get("should_promote", False))
-        result["promotion_target"] = self._normalize_promotion_target(
-            result.get("promotion_target")
-        )
-        if result["should_promote"] and result["promotion_target"] == "none" and confidence >= 0.8:
-            result["promotion_target"] = self._default_promotion_target(scope)
+        result["scope"] = self._normalize_learning_scope(result, digest)
+        result["promotion_target"] = self._resolve_promotion_target(result, digest)
         if result["promotion_target"] not in self.VALID_PROMOTION_TARGETS:
             return False
         if not self._promotion_is_viable(result):
@@ -418,6 +416,143 @@ Rules:
             "session_tactic": "AGENTS.md",
         }
         return mapping.get(scope, "none")
+
+    def _resolve_promotion_target(self, result: dict[str, Any], digest: SessionDigest) -> str:
+        target = self._normalize_promotion_target(result.get("promotion_target"))
+        if not result.get("should_promote"):
+            return target
+
+        inferred = self._infer_bootstrap_target(result, digest)
+        if inferred != "none":
+            return inferred
+        if target == "none" and float(result.get("confidence", 0.0) or 0.0) >= 0.8:
+            return self._default_promotion_target(str(result.get("scope", "")))
+        return target
+
+    def _normalize_learning_scope(self, result: dict[str, Any], digest: SessionDigest) -> str:
+        scope = str(result.get("scope", "")).strip().lower()
+        if self._looks_like_tool_learning(result):
+            return "tool_usage"
+        if scope == "user_preference" and self._looks_like_operational_learning(result, digest):
+            return "session_tactic"
+        if scope == "assistant_behavior" and self._looks_like_operational_learning(result, digest):
+            return "session_tactic"
+        return scope
+
+    def _infer_bootstrap_target(self, result: dict[str, Any], digest: SessionDigest) -> str:
+        if self._looks_like_tool_learning(result):
+            return "TOOLS.md"
+        if self._looks_like_identity_learning(result):
+            return "IDENTITY.md"
+        if self._looks_like_operational_learning(result, digest):
+            return "AGENTS.md"
+        if self._looks_like_style_learning(result):
+            return "SOUL.md"
+        return "none"
+
+    @staticmethod
+    def _learning_text(result: dict[str, Any]) -> str:
+        return " ".join(
+            str(result.get(field, ""))
+            for field in (
+                "title",
+                "observation",
+                "impact",
+                "lesson",
+                "recommended_behavior",
+                "evidence",
+                "promote_content",
+            )
+        )
+
+    @classmethod
+    def _has_any_marker(cls, text: str, markers: set[str]) -> bool:
+        normalized_text = cls._normalize_text(text)
+        token_set = set(normalized_text.split())
+        for marker in markers:
+            normalized_marker = cls._normalize_text(marker)
+            if not normalized_marker:
+                continue
+            if " " in normalized_marker:
+                if normalized_marker in normalized_text:
+                    return True
+            elif normalized_marker in token_set:
+                return True
+        return False
+
+    def _looks_like_operational_learning(
+        self, result: dict[str, Any], digest: SessionDigest
+    ) -> bool:
+        text = self._learning_text(result)
+        if not text:
+            return False
+        operational_markers = {
+            "delegate",
+            "delegation",
+            "subagent",
+            "plan",
+            "planner",
+            "workflow",
+            "status",
+            "progress",
+            "coordinator",
+            "ownership",
+            "context window",
+            "bootstrap",
+            "journal",
+            "reflection",
+            "memory",
+            "prompt",
+            "session",
+            "background",
+        }
+        return bool(digest.user_corrections) and self._has_any_marker(text, operational_markers)
+
+    def _looks_like_tool_learning(self, result: dict[str, Any]) -> bool:
+        if str(result.get("scope", "")).strip().lower() == "tool_usage":
+            return True
+        text = self._learning_text(result)
+        tool_markers = {
+            "tool",
+            "read_file",
+            "write_file",
+            "edit_file",
+            "list_dir",
+            "search",
+            "bash",
+            "spawn",
+            "subagent tool",
+            "call the tool",
+            "task status",
+        }
+        return self._has_any_marker(text, tool_markers)
+
+    def _looks_like_style_learning(self, result: dict[str, Any]) -> bool:
+        text = self._learning_text(result)
+        style_markers = {
+            "tone",
+            "voice",
+            "concise",
+            "verbosity",
+            "brief",
+            "direct",
+            "personality",
+            "casual",
+            "filler",
+        }
+        return self._has_any_marker(text, style_markers)
+
+    def _looks_like_identity_learning(self, result: dict[str, Any]) -> bool:
+        text = self._learning_text(result)
+        identity_markers = {
+            "identity",
+            "self model",
+            "who i am",
+            "what i am",
+            "durable local ai",
+            "same crab",
+        }
+        return self._has_any_marker(text, identity_markers)
 
     def _promotion_audit_path(self) -> Path:
         """Return the audit log path for bootstrap promotions."""

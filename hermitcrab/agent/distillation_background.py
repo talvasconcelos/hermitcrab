@@ -171,6 +171,9 @@ class DistillationManager:
                 return False
             if self.looks_like_non_decision_artifact(candidate):
                 return False
+        elif candidate.type == CandidateType.FACT:
+            if self.looks_like_bootstrap_instruction(candidate):
+                return False
         elif candidate.type not in allowed_types:
             return False
 
@@ -213,6 +216,47 @@ class DistillationManager:
             "proposed",
         )
         return any(marker in normalized for marker in report_markers + proposal_markers)
+
+    @staticmethod
+    def looks_like_bootstrap_instruction(candidate: AtomicCandidate) -> bool:
+        normalized = " ".join(
+            re.sub(
+                r"[^a-z0-9\s]+",
+                " ",
+                " ".join(filter(None, [candidate.title, candidate.content])).lower(),
+            ).split()
+        )
+        if not normalized:
+            return True
+
+        agent_markers = (
+            "agent",
+            "assistant",
+            "subagent",
+            "tool",
+            "workflow",
+            "context",
+            "prompt",
+            "journal",
+            "reflection",
+            "memory",
+        )
+        instruction_markers = (
+            "should",
+            "must",
+            "always",
+            "never",
+            "prefer",
+            "do not",
+            "keep",
+            "plan",
+            "delegate",
+            "stay available",
+            "remain responsive",
+        )
+        return any(marker in normalized for marker in agent_markers) and any(
+            marker in normalized for marker in instruction_markers
+        )
 
     async def distill_session(self, session: Any, distillation_job_class: Any) -> None:
         try:
@@ -272,6 +316,7 @@ class DistillationManager:
             "Each candidate must have: type, title, content.\n"
             "Optional: confidence (0-1), tags, and type-specific fields.\n"
             "Allowed types by default: fact, goal, task. Use decision only for clear locked choices with rationale.\n"
+            "Do not convert corrections about agent behavior, delegation, tool discipline, journaling, reflection, or prompt handling into FACTS; those belong to reflection/bootstrap guidance and should be skipped here.\n"
             "For TASK type: task_assignee (required), task_status, task_deadline, task_priority\n"
             "For GOAL type: goal_status, goal_priority, goal_horizon\n"
             "For DECISION type: decision_status, decision_rationale, decision_supersedes\n"
