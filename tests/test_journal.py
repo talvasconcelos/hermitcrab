@@ -8,6 +8,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from hermitcrab.agent.journal import JournalStore
+from hermitcrab.agent.journal_background import JournalBackgroundManager
 from hermitcrab.agent.loop import AgentLoop
 
 
@@ -247,7 +248,9 @@ class TestJournalFormatting:
             wikilinks=["[[Release Notes]]", "[[Ship v0.4]]"],
         )
 
-        rendered = agent._format_journal_entry(digest, "I revised [[Release Notes]] for [[Ship v0.4]].")
+        rendered = agent._format_journal_entry(
+            digest, "I revised [[Release Notes]] for [[Ship v0.4]]."
+        )
 
         assert "10:05 UTC" in rendered
         assert "nostr" in rendered
@@ -265,7 +268,13 @@ class TestJournalFormatting:
 
         agent = AgentLoop(bus=bus, provider=provider, workspace=temp_workspace)
         digest = agent._build_session_digest(
-            [{"role": "user", "content": "Please summarize yesterday's work.", "timestamp": "2026-03-11T10:00:00+00:00"}],
+            [
+                {
+                    "role": "user",
+                    "content": "Please summarize yesterday's work.",
+                    "timestamp": "2026-03-11T10:00:00+00:00",
+                }
+            ],
             "cli:direct",
         )
 
@@ -305,7 +314,9 @@ class TestJournalFormatting:
         assert digest.user_requests == ["Pull the open tasks with a subagent."]
         assert any("Subagent reported back for task" in line for line in digest.event_lines)
 
-    def test_fallback_journal_uses_real_user_request_not_subagent_prompt(self, temp_workspace: Path):
+    def test_fallback_journal_uses_real_user_request_not_subagent_prompt(
+        self, temp_workspace: Path
+    ):
         bus = MagicMock()
         bus.consume_inbound = AsyncMock()
         bus.publish_outbound = AsyncMock()
@@ -324,7 +335,9 @@ class TestJournalFormatting:
                 {
                     "role": "assistant",
                     "content": "The subagent completed but didn't return useful output. Let me just check directly:",
-                    "tool_calls": [{"function": {"name": "read_memory", "arguments": "{\"category\": \"tasks\"}"}}],
+                    "tool_calls": [
+                        {"function": {"name": "read_memory", "arguments": '{"category": "tasks"}'}}
+                    ],
                     "timestamp": "2026-03-18T11:58:20+00:00",
                 },
             ],
@@ -335,6 +348,89 @@ class TestJournalFormatting:
 
         assert "Pull the open tasks with a subagent." in body
         assert "didn't return useful output" not in body
+
+    def test_digest_keeps_primary_goal_when_user_pings_for_status(self, temp_workspace: Path):
+        bus = MagicMock()
+        bus.consume_inbound = AsyncMock()
+        bus.publish_outbound = AsyncMock()
+        provider = MagicMock()
+        provider.chat = AsyncMock()
+        provider.get_default_model = MagicMock(return_value="test-model")
+
+        agent = AgentLoop(bus=bus, provider=provider, workspace=temp_workspace)
+        digest = agent._build_session_digest(
+            [
+                {
+                    "role": "user",
+                    "content": "Draft the accountant implementation flow and save it in the project folder.",
+                    "timestamp": "2026-03-21T11:33:34+00:00",
+                },
+                {
+                    "role": "assistant",
+                    "content": "I'll pull the details and write it.",
+                    "timestamp": "2026-03-21T11:34:00+00:00",
+                },
+                {
+                    "role": "user",
+                    "content": "what's the status on that research? any blockers?",
+                    "timestamp": "2026-03-21T11:42:27+00:00",
+                },
+            ],
+            "cli:direct",
+        )
+
+        assert (
+            digest.user_goal
+            == "Draft the accountant implementation flow and save it in the project folder."
+        )
+        assert digest.user_corrections == ["what's the status on that research? any blockers?"]
+
+    def test_successful_write_tool_counts_as_outcome(self, temp_workspace: Path):
+        bus = MagicMock()
+        bus.consume_inbound = AsyncMock()
+        bus.publish_outbound = AsyncMock()
+        provider = MagicMock()
+        provider.chat = AsyncMock()
+        provider.get_default_model = MagicMock(return_value="test-model")
+
+        agent = AgentLoop(bus=bus, provider=provider, workspace=temp_workspace)
+        digest = agent._build_session_digest(
+            [
+                {
+                    "role": "user",
+                    "content": "Write the accountant implementation flow in the project folder.",
+                    "timestamp": "2026-03-21T11:33:34+00:00",
+                },
+                {
+                    "role": "assistant",
+                    "content": "Let me write the doc now.",
+                    "tool_calls": [
+                        {
+                            "function": {
+                                "name": "write_file",
+                                "arguments": '{"path": "/tmp/accountant-implementation-flow.md"}',
+                            }
+                        }
+                    ],
+                    "timestamp": "2026-03-21T11:42:27+00:00",
+                },
+                {
+                    "role": "tool",
+                    "name": "write_file",
+                    "content": "Successfully wrote 14631 bytes to /tmp/accountant-implementation-flow.md",
+                    "timestamp": "2026-03-21T11:42:28+00:00",
+                },
+                {
+                    "role": "user",
+                    "content": "did you just died on me?",
+                    "timestamp": "2026-03-21T11:43:10+00:00",
+                },
+            ],
+            "cli:direct",
+        )
+
+        assert any("Successfully wrote 14631 bytes" in outcome for outcome in digest.outcomes)
+        assert digest.open_loops == []
 
     def test_journal_event_trace_filters_raw_tool_mechanics(self, temp_workspace: Path):
         bus = MagicMock()
@@ -401,3 +497,20 @@ class TestJournalFormatting:
 
         assert digest.user_requests == ["Help me organize this product idea."]
         assert not any("helpful assistant" in line.lower() for line in digest.event_lines)
+
+    def test_truncated_journal_body_is_rejected(self):
+        digest = SimpleNamespace(
+            user_goal="Write the implementation flow.",
+            artifacts_changed=["law-firm-implementation-flow.md"],
+            outcomes=[],
+            open_loops=[],
+        )
+
+        assert not JournalBackgroundManager._is_usable_journal_body(
+            (
+                "I wrote the implementation flow after the original delegation path failed. "
+                "The main artifact was [[law-firm-implementation-flow.md]] and I kept the work moving. "
+                "The [[real-estate-im"
+            ),
+            digest,
+        )

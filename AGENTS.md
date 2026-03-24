@@ -85,9 +85,9 @@ These points reflect the current state of the codebase and should override older
 - Interactive CLI input supports multiline entry with `Ctrl+J`.
 
 ## Current Branch Focus
-Active branch: `feat/memory-retrieval-quality`
+Active branch: `feat/learning-quality`
 
-This branch is focused on memory quality and coordinator reliability, not new product surface area.
+This branch is focused on journal durability, reflection quality, and promotion of durable learnings into persistent context files without adding a heavy subsystem.
 
 Implemented on this branch so far:
 
@@ -99,6 +99,21 @@ Implemented on this branch so far:
 - reflection validation hardening and duplicate/contradiction guards
 - suppression of blank progress updates and low-value background-task replies
 - deterministic reflection override for high-priority delegation/ownership corrections
+- session digests now preserve user goal, artifacts changed, decisions made, assistant responses, open loops, and structural signals for journal/reflection work
+- journal prompts and fallback entries are more concrete and should stay understandable days later instead of collapsing into vague narration
+- reflection output now uses observation, impact, lesson, recommended behavior, scope, confidence, evidence, and promotion target
+- reflection promotion is stricter: user-specific preferences stay in memory, target/scope compatibility is enforced, duplicate/conflicting bootstrap bullets are rejected, and promotions are logged in `bootstrap_promotion_log.md`
+- session digests now keep the primary user goal instead of letting late status pings overwrite journal/reflection framing, and successful file/tool writes count as outcomes
+- journal synthesis now gets a stronger grounded prompt plus one repair pass before falling back, reducing empty or scaffold-parroting entries
+- distillation no longer commits operational correction directives as facts; those are reserved for reflection/bootstrap routing instead
+- corrective operational learnings are now rerouted deterministically toward `AGENTS.md` rather than drifting into `SOUL.md` or memory facts
+
+Planned on this branch:
+
+- manual dogfooding of real sessions to judge journal usefulness and promotion quality from actual outputs, not only tests
+- refine promotion semantics between `SOUL.md` and `IDENTITY.md` if real sessions show muddled routing
+- keep shrinking brittle English-specific heuristics where structural grounding or model judgment can replace them cleanly
+- trim low-signal tests when they are clearly implementation bloat rather than behavior protection
 
 Current branch test status:
 
@@ -120,10 +135,18 @@ Do not use this file as a raw journal or a dumping ground. Prefer concise, durab
 Current continuity points to preserve:
 
 - The user expects new sessions to recover branch direction and recent progress from `AGENTS.md` rather than requiring the same re-explanation in chat.
+- Reflections are not just summaries; they should become real learning material, and high-confidence durable lessons should be promoted into the correct persistent context file when viable.
+- Promotion should stay conservative and auditable: bootstrap files should not accumulate duplicate or conflicting bullets, and every promotion should be inspectable afterward.
 - Coordinator failures should be treated as product issues to fix at the root cause, not by stacking narrow prompt band-aids.
 - Broad tasks should stay owned by the main agent; subagents are for bounded execution work, not for handing off the whole deliverable.
+- The next Nostr milestone should include direct-message support for NIP-17; group handling can wait until later.
+- Dogfooding should include materially different user profiles, not only the repository owner; validate day-to-day assistant behavior for family scheduling, kid activities, and household coordination use cases.
+- Add a built-in `here.now` skill as a near-term product task.
+- These goals are urgent and should be treated as next-milestone work, not as distant backlog items.
 - Prompt/context changes should preserve strong recent-conversation awareness; avoid bloated or duplicated bootstrap prompt sections that drown out the live exchange.
 - The user wants the main agent to behave as a visible coordinator for substantial work: plan first, delegate bounded research/execution where appropriate, stay responsive, and avoid filler or repeated apology loops.
+- The user wants hardcoded English-specific marker heuristics reduced where structural evidence or model judgment can do the job more cleanly.
+- Tests are still local-only for now; do not newly commit ignored test files even when they are useful for local validation.
 
 ## Coordinator And Subagent Policy
 Broad or strategic tasks must remain owned by the main agent.
@@ -145,7 +168,7 @@ Expected behavior:
 Do not offload an entire strategic deliverable to a weaker subagent just because delegation is available.
 
 ## Memory, Journal, And Reflection Direction
-The current milestone is memory retrieval quality and better learning extraction.
+The current milestone is learning quality: better journals, better reflections, and cleaner promotion of durable learnings.
 
 What has already improved:
 
@@ -156,16 +179,17 @@ What has already improved:
 
 What still needs improvement:
 
-- journal synthesis should rely less on brittle phrase markers
-- reflection priority should become more structural and less English-specific
-- coordinator progress and recovery behavior should become more deterministic
-- memory retrieval should keep improving without turning into a heavy subsystem
+- real-session journal output still needs dogfooding to verify that the new structure stays useful outside synthetic tests
+- reflection promotion semantics between `SOUL.md` and `IDENTITY.md` may still need refinement after manual review
+- English-specific marker logic should keep shrinking when structural grounding can replace it
 
 Near-term direction:
 
-1. Replace narrow hardcoded marker logic with broader structural scoring where feasible.
-2. Make correction severity and recovery impact matter more than exact wording.
-3. Keep user-specific preferences in memory, but keep general coordinator policy in product logic.
+1. Dogfood the new journal/reflection flow on real sessions and inspect `journal/`, `memory/reflections/`, and `bootstrap_promotion_log.md` directly.
+2. Refine promotion routing between `SOUL.md` and `IDENTITY.md` if manual testing shows overlap or confusion.
+3. Keep user-specific preferences in memory unless they are truly durable assistant-wide context.
+4. Continue replacing brittle wording heuristics with structural grounding where possible.
+5. Trim clearly low-signal local tests when they stop protecting real behavior.
 
 ## Provider And Tooling Takeaways
 Recent implementation and debugging takeaways:
@@ -195,15 +219,32 @@ This is especially useful for:
 - channel reliability patterns
 - lightweight memory and orchestration safeguards
 
-## Next Targets
-After stabilizing the current memory-quality branch, the next likely targets are:
+Immediate external research to capture when relevant:
 
-1. Better coordinator/task handoff clarity between main agent and subagents
-2. Smarter journal and reflection prioritization based on session structure
-3. NIP-17 and thread-aware messaging improvements for Nostr workflows
-4. Test-suite rationalization: keep high-value regressions, merge overlapping cases, and remove low-signal implementation-specific tests
-5. Further memory retrieval gains only if they stay lightweight and testable
-6. Add deterministic coordinator execution-state handling for plan/delegate/wait/fallback/complete so progress updates and recovery stay consistent
+- inspect how OpenCode creates and internally uses subagents
+- extract ideas that improve HermitCrab's coordinator/subagent boundaries without importing OpenCode's architecture wholesale
+
+Recent nearby-project takeaways worth preserving:
+
+- `NanoBot` recently replaced a global processing lock with per-session locks plus an optional global concurrency cap; this is a strong fit for HermitCrab when coordinator/session concurrency needs tightening without losing per-session ordering.
+- `NanoBot` also rebinds tool routing context immediately before each execution round so concurrent sessions do not clobber channel/session metadata; reuse that idea if HermitCrab shows cross-session tool-context bleed.
+- `NanoBot` reserves completion headroom before memory consolidation; keep that in mind for HermitCrab prompt budgeting, journal synthesis, and reflection passes.
+- `OpenClaw` centralizes provider/model quirks in a capability registry instead of scattering ad-hoc conditionals; HermitCrab should move in that direction as provider edge-case handling grows.
+- `OpenClaw`'s compaction safeguards use explicit structural sections, recent-turn preservation, exact-identifier preservation, and tool-failure harvesting; adapt those ideas to improve HermitCrab journal/digest quality without importing the whole subsystem.
+- `OpenClaw` also uses strong dependency-injection seams around stateful runtime code; prefer that style when making HermitCrab coordinator, provider, or session-state code more testable.
+
+## Next Targets
+The next milestone should prioritize the following urgent targets:
+
+1. Implement Nostr NIP-17 direct messages; group handling can follow in a later milestone.
+2. Dogfood HermitCrab with distinct user profiles, including household/schedule-heavy usage patterns, and capture adaptation gaps.
+3. Investigate OpenCode's subagent creation/internal-usage patterns and adapt only the parts that improve HermitCrab reliability and clarity.
+4. Add a built-in `here.now` skill with clear operational scope.
+5. Better coordinator/task handoff clarity between main agent and subagents, especially around delegated progress and recovery.
+6. Smarter journal and reflection prioritization based on session structure instead of brittle markers.
+7. Deterministic coordinator execution-state handling for plan/delegate/wait/fallback/complete across more surfaces.
+8. Test-suite rationalization: keep high-value regressions, merge overlaps, and remove low-signal implementation-specific tests.
+9. Further memory retrieval gains only if they stay lightweight and easy to validate.
 
 ## Working Style
 When deciding what to do next:

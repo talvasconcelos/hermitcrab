@@ -60,6 +60,7 @@ class SubagentManager:
         self.model_aliases = model_aliases or {}
         self.named_models = named_models or {}
         self._running_tasks: dict[str, asyncio.Task[None]] = {}
+        self._task_origins: dict[str, tuple[str, str]] = {}
 
     async def spawn(
         self,
@@ -114,7 +115,7 @@ class SubagentManager:
                 resolved_reasoning_effort,
             )
         )
-        self._track_task(task_id, bg_task)
+        self._track_task(task_id, bg_task, origin_channel, origin_chat_id)
 
         logger.info("Spawned subagent [{}]: {} (model: {})", task_id, display_label, resolved_model)
         return f"Subagent [{display_label}] started (id: {task_id}). I'll notify you when it completes."
@@ -141,10 +142,37 @@ class SubagentManager:
         """Treat blank or whitespace-only replies as missing output."""
         return is_empty_response(text)
 
-    def _track_task(self, task_id: str, task: asyncio.Task[None]) -> None:
+    def _track_task(
+        self,
+        task_id: str,
+        task: asyncio.Task[None],
+        origin_channel: str,
+        origin_chat_id: str,
+    ) -> None:
         """Track a running subagent task until it completes."""
         self._running_tasks[task_id] = task
-        task.add_done_callback(lambda _: self._running_tasks.pop(task_id, None))
+        self._task_origins[task_id] = (origin_channel, origin_chat_id)
+
+        def _cleanup(_: asyncio.Task[None]) -> None:
+            self._running_tasks.pop(task_id, None)
+            self._task_origins.pop(task_id, None)
+
+        task.add_done_callback(_cleanup)
+
+    async def cancel_for_origin(self, origin_channel: str, origin_chat_id: str) -> int:
+        """Cancel all running subagents for one originating conversation."""
+        matching = [
+            task
+            for task_id, task in self._running_tasks.items()
+            if self._task_origins.get(task_id) == (origin_channel, origin_chat_id)
+        ]
+        if not matching:
+            return 0
+
+        for task in matching:
+            task.cancel()
+        await asyncio.gather(*matching, return_exceptions=True)
+        return len(matching)
 
     def _build_tools(self) -> ToolRegistry:
         """Build the restricted toolset available to subagents."""
@@ -313,6 +341,9 @@ class SubagentManager:
             logger.info("Subagent [{}] completed successfully", task_id)
             await self._announce_result(task_id, label, task, final_result, origin, "ok")
 
+        except asyncio.CancelledError:
+            logger.info("Subagent [{}] cancelled", task_id)
+            raise
         except Exception as e:
             error_msg = f"Error: {str(e)}"
             logger.error("Subagent [{}] failed: {}", task_id, e)
