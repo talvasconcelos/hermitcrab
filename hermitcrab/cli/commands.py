@@ -73,7 +73,9 @@ def _build_job_models_from_config(config: Config) -> dict | None:
     primary_model = config.agents.defaults.model
 
     return {
-        JobClass.INTERACTIVE_RESPONSE: job_models_config.get_model("interactive_response", primary_model),
+        JobClass.INTERACTIVE_RESPONSE: job_models_config.get_model(
+            "interactive_response", primary_model
+        ),
         JobClass.JOURNAL_SYNTHESIS: job_models_config.get_model("journal_synthesis", primary_model),
         JobClass.DISTILLATION: job_models_config.get_model("distillation", primary_model),
         JobClass.REFLECTION: job_models_config.get_model("reflection", primary_model),
@@ -95,7 +97,9 @@ def _build_runtime_model_aliases(config: Config) -> dict[str, str | ModelAliasCo
             )
             continue
 
-        resolved_aliases[alias] = value if value in config.models else (config.resolve_model_config(value).model or value)
+        resolved_aliases[alias] = (
+            value if value in config.models else (config.resolve_model_config(value).model or value)
+        )
 
     return resolved_aliases
 
@@ -180,12 +184,57 @@ def _build_prompt_key_bindings() -> KeyBindings:
     return bindings
 
 
+async def _watch_for_escape(on_escape) -> None:
+    """Watch stdin for Esc while the agent is busy and trigger cancellation."""
+    try:
+        fd = sys.stdin.fileno()
+        if not os.isatty(fd):
+            return
+    except Exception:
+        return
+
+    try:
+        import termios
+        import tty
+
+        saved = termios.tcgetattr(fd)
+        tty.setcbreak(fd)
+    except Exception:
+        return
+
+    loop = asyncio.get_running_loop()
+    escape_pressed = asyncio.Event()
+
+    def _on_stdin_ready() -> None:
+        try:
+            data = os.read(fd, 32)
+        except Exception:
+            return
+        if b"\x1b" in data:
+            escape_pressed.set()
+
+    loop.add_reader(fd, _on_stdin_ready)
+    try:
+        await escape_pressed.wait()
+        await on_escape()
+    except asyncio.CancelledError:
+        raise
+    finally:
+        loop.remove_reader(fd)
+        try:
+            termios.tcsetattr(fd, termios.TCSADRAIN, saved)
+        except Exception:
+            pass
+
+
 def _strip_ansi(text: str) -> str:
     """Remove terminal escape sequences from model output before plain rendering."""
     return _ANSI_ESCAPE_RE.sub("", text)
 
 
-def _print_agent_response(response: str, render_markdown: bool, *, prompt_safe: bool = False) -> None:
+def _print_agent_response(
+    response: str, render_markdown: bool, *, prompt_safe: bool = False
+) -> None:
     """Render assistant response with consistent terminal styling."""
     content = response or ""
     if prompt_safe:
@@ -345,6 +394,38 @@ def _make_provider(config: Config):
     provider_name = config.get_provider_name(model)
     p = config.get_provider(model)
 
+    def _uses_ollama_anywhere() -> bool:
+        candidates: set[str] = set()
+
+        if model:
+            candidates.add(model)
+
+        job_models = config.agents.defaults.job_models
+        for value in (
+            job_models.interactive_response,
+            job_models.journal_synthesis,
+            job_models.distillation,
+            job_models.reflection,
+            job_models.summarisation,
+            job_models.subagent,
+        ):
+            if isinstance(value, str) and value.strip():
+                candidates.add(value.strip())
+
+        for name, named_model in config.models.items():
+            candidates.add(name)
+            if named_model.model:
+                candidates.add(named_model.model)
+
+        for alias_name, alias_value in config.agents.model_aliases.items():
+            candidates.add(alias_name)
+            if isinstance(alias_value, str) and alias_value.strip():
+                candidates.add(alias_value.strip())
+            elif getattr(alias_value, "model", None):
+                candidates.add(alias_value.model)
+
+        return any(config.get_provider_name(candidate) == "ollama" for candidate in candidates)
+
     # OpenAI Codex (OAuth)
     if provider_name == "openai_codex" or model.startswith("openai-codex/"):
         return OpenAICodexProvider(default_model=resolved_model.model or model)
@@ -380,7 +461,7 @@ def _make_provider(config: Config):
 
     if provider_name == "ollama" or "ollama" in resolved_model_name.lower():
         # Check if api_base is explicitly set to None/empty (not using default)
-        ollama_config = config.providers.ollama if hasattr(config.providers, 'ollama') else None
+        ollama_config = config.providers.ollama if hasattr(config.providers, "ollama") else None
         api_base = config.get_api_base(model)
 
         # If user explicitly configured ollama provider but with null/empty api_base
@@ -423,7 +504,7 @@ def _make_provider(config: Config):
         request_config_resolver=_request_config_resolver,
     )
 
-    if provider_name == "ollama":
+    if provider_name == "ollama" or _uses_ollama_anywhere():
         return OllamaProvider(
             api_key=p.api_key if p else None,
             api_base=config.get_api_base(model),
@@ -911,7 +992,7 @@ def agent(
 
         _init_prompt_session()
         console.print(
-            f"{__logo__} Interactive mode (type [bold]exit[/bold] or [bold]Ctrl+C[/bold] to quit)\n"
+            f"{__logo__} Interactive mode (type [bold]exit[/bold] or [bold]Ctrl+C[/bold] to quit; press [bold]Esc[/bold] while working to stop the current task)\n"
         )
 
         if ":" in session_id:
@@ -1013,8 +1094,30 @@ def agent(
                             )
                         )
 
-                        with _thinking_ctx():
-                            await turn_done.wait()
+                        stop_requested = False
+
+                        async def _stop_active_turn() -> None:
+                            nonlocal stop_requested
+                            if stop_requested:
+                                return
+                            stop_requested = True
+                            console.print(
+                                "  [yellow]Esc pressed - stopping active work...[/yellow]"
+                            )
+                            cancelled = await agent_loop.cancel_active_work(
+                                f"{cli_channel}:{cli_chat_id}",
+                                cancel_background=True,
+                            )
+                            if not cancelled:
+                                console.print("  [dim]No active work to stop.[/dim]")
+
+                        escape_task = asyncio.create_task(_watch_for_escape(_stop_active_turn))
+                        try:
+                            with _thinking_ctx():
+                                await turn_done.wait()
+                        finally:
+                            escape_task.cancel()
+                            await asyncio.gather(escape_task, return_exceptions=True)
 
                         if turn_response:
                             _print_agent_response(turn_response[0], render_markdown=markdown)

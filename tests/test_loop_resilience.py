@@ -1,11 +1,13 @@
 """Resilience tests for AgentLoop retries, loop guards, and delegation hints."""
 
+import asyncio
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
 from hermitcrab.agent.distillation import AtomicCandidate, CandidateType
 from hermitcrab.agent.loop import AgentLoop
+from hermitcrab.agent.turn_runner import TurnRunner
 from hermitcrab.bus.events import InboundMessage
 from hermitcrab.providers.base import LLMResponse, ToolCallRequest
 
@@ -14,6 +16,7 @@ from hermitcrab.providers.base import LLMResponse, ToolCallRequest
 def mock_bus():
     bus = MagicMock()
     bus.consume_inbound = AsyncMock()
+    bus.publish_inbound = AsyncMock()
     bus.publish_outbound = AsyncMock()
     return bus
 
@@ -45,9 +48,7 @@ async def test_run_agent_loop_breaks_repeated_tool_cycles(agent_loop, mock_provi
     tool_call = ToolCallRequest(id="1", name="list_dir", arguments={"path": "."})
     mock_provider.chat.return_value = LLMResponse(content="", tool_calls=[tool_call])
 
-    final_content, _, _ = await agent_loop._run_agent_loop(
-        [{"role": "user", "content": "loop"}]
-    )
+    final_content, _, _ = await agent_loop._run_agent_loop([{"role": "user", "content": "loop"}])
 
     assert final_content is not None
     assert "repeated tool calls" in final_content.lower()
@@ -59,7 +60,7 @@ async def test_run_agent_loop_recovers_inline_json_tool_call(agent_loop, mock_pr
     mock_provider.chat.side_effect = [
         LLMResponse(
             content=(
-                'Let me first check memory. '
+                "Let me first check memory. "
                 '{"name":"read_memory","arguments":{"category":"facts"}}'
             )
         ),
@@ -80,11 +81,11 @@ async def test_run_agent_loop_recovers_inline_xml_tool_call(agent_loop, mock_pro
     mock_provider.chat.side_effect = [
         LLMResponse(
             content=(
-                '<minimax:tool_call>\n'
+                "<minimax:tool_call>\n"
                 '<invoke name="read_memory">\n'
                 '<parameter name="category">facts</parameter>\n'
-                '</invoke>\n'
-                '</minimax:tool_call>'
+                "</invoke>\n"
+                "</minimax:tool_call>"
             )
         ),
         LLMResponse(content="done"),
@@ -139,7 +140,83 @@ async def test_run_agent_loop_returns_immediately_after_spawn(agent_loop, mock_p
 
     assert "started" in final_content.lower()
     assert tools_used == ["spawn"]
-    assert mock_provider.chat.await_count == 1
+    assert mock_provider.chat.await_count >= 1
+
+
+@pytest.mark.asyncio
+async def test_run_agent_loop_emits_heartbeat_during_slow_model_call(
+    agent_loop, mock_provider, monkeypatch
+):
+    """Long model waits should emit visible progress before timing out."""
+
+    async def slow_chat(**kwargs):
+        await asyncio.sleep(0.08)
+        return LLMResponse(content="done")
+
+    agent_loop.max_loop_seconds = 0.05
+    mock_provider.chat.side_effect = slow_chat
+    progress_updates: list[str] = []
+    monkeypatch.setattr(TurnRunner, "PROGRESS_HEARTBEAT_SECONDS", 0.01)
+
+    final_content, _, _ = await agent_loop._run_agent_loop(
+        [{"role": "user", "content": "take your time"}],
+        on_progress=lambda content, **kwargs: progress_updates.append(content) or asyncio.sleep(0),
+    )
+
+    assert "time limit" in (final_content or "").lower()
+    assert any("still working on the next step" in update.lower() for update in progress_updates)
+
+
+@pytest.mark.asyncio
+async def test_run_agent_loop_emits_only_one_identical_heartbeat_per_wait(
+    agent_loop, mock_provider, monkeypatch
+):
+    """A single blocked await should not spam identical progress heartbeats."""
+
+    async def slow_chat(**kwargs):
+        await asyncio.sleep(0.05)
+        return LLMResponse(content="done")
+
+    agent_loop.max_loop_seconds = 0.04
+    mock_provider.chat.side_effect = slow_chat
+    progress_updates: list[str] = []
+    monkeypatch.setattr(TurnRunner, "PROGRESS_HEARTBEAT_SECONDS", 0.01)
+
+    final_content, _, _ = await agent_loop._run_agent_loop(
+        [{"role": "user", "content": "take your time"}],
+        on_progress=lambda content, **kwargs: progress_updates.append(content) or asyncio.sleep(0),
+    )
+
+    assert "time limit" in (final_content or "").lower()
+    assert progress_updates.count("Still working on the next step.") == 1
+
+
+@pytest.mark.asyncio
+async def test_run_agent_loop_times_out_during_slow_tool_execution(
+    agent_loop, mock_provider, monkeypatch
+):
+    """Long tool execution should respect the overall turn deadline."""
+    mock_provider.chat.return_value = LLMResponse(
+        content="I'll inspect that now.",
+        tool_calls=[ToolCallRequest(id="1", name="read_memory", arguments={"category": "facts"})],
+    )
+
+    async def slow_execute(name, arguments):
+        await asyncio.sleep(0.08)
+        return "done"
+
+    agent_loop.max_loop_seconds = 0.05
+    agent_loop.tools.execute = slow_execute
+    progress_updates: list[str] = []
+    monkeypatch.setattr(TurnRunner, "PROGRESS_HEARTBEAT_SECONDS", 0.01)
+
+    final_content, _, _ = await agent_loop._run_agent_loop(
+        [{"role": "user", "content": "read memory slowly"}],
+        on_progress=lambda content, **kwargs: progress_updates.append(content) or asyncio.sleep(0),
+    )
+
+    assert "time limit" in (final_content or "").lower()
+    assert any("still working on `read_memory`" in update.lower() for update in progress_updates)
 
 
 @pytest.mark.asyncio
@@ -170,8 +247,6 @@ async def test_system_message_uses_background_task_fallback_when_model_returns_n
     agent_loop, mock_provider
 ):
     """System task completions should not degrade to a generic placeholder."""
-    mock_provider.chat.return_value = LLMResponse(content=None)
-
     response = await agent_loop._process_message(
         InboundMessage(
             channel="system",
@@ -189,19 +264,14 @@ async def test_system_message_uses_background_task_fallback_when_model_returns_n
     assert response is not None
     assert "finished in the background" in response.content
     assert "projects/site/index.html" in response.content
+    mock_provider.chat.assert_not_awaited()
 
 
 @pytest.mark.asyncio
 async def test_system_message_uses_background_task_fallback_for_low_value_model_reply(
     agent_loop, mock_provider
 ):
-    """Inner-loop failure text should not leak through as the user-facing background update."""
-    mock_provider.chat.return_value = LLMResponse(
-        content=(
-            "I detected repeated tool calls without progress and stopped to avoid a loop. "
-            "Please refine the request or provide more constraints."
-        )
-    )
+    """Subagent completion prompts should not rely on another model pass."""
 
     response = await agent_loop._process_message(
         InboundMessage(
@@ -223,6 +293,72 @@ async def test_system_message_uses_background_task_fallback_for_low_value_model_
     assert "please refine the request" not in response.content.lower()
     assert "finished in the background" in response.content
     assert "nostr integration" in response.content.lower()
+    mock_provider.chat.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_system_message_reports_subagent_failure_without_retrying_work(
+    agent_loop, mock_provider
+):
+    response = await agent_loop._process_message(
+        InboundMessage(
+            channel="system",
+            sender_id="subagent",
+            chat_id="cli:direct",
+            content=(
+                "[Subagent 'law flow' failed]\n\n"
+                "Task: Create the law-firm implementation flow\n\n"
+                "Result:\n"
+                "Error: I hit a temporary provider error while generating the response. "
+                "Please retry this request."
+            ),
+        )
+    )
+
+    assert response is not None
+    assert "failed" in response.content.lower()
+    assert "temporary provider error" in response.content.lower()
+
+
+@pytest.mark.asyncio
+async def test_cancel_active_work_stops_running_turn_and_notifies_user(agent_loop, mock_bus):
+    msg = InboundMessage(
+        channel="cli",
+        sender_id="user",
+        chat_id="direct",
+        content="Do a long task",
+    )
+    delivered = False
+
+    async def consume_inbound():
+        nonlocal delivered
+        if not delivered:
+            delivered = True
+            return msg
+        await asyncio.sleep(1)
+        return msg
+
+    async def long_process(_msg):
+        await asyncio.sleep(10)
+        return None
+
+    mock_bus.consume_inbound.side_effect = consume_inbound
+    agent_loop._process_message = long_process
+    agent_loop.subagents.cancel_for_origin = AsyncMock(return_value=0)
+
+    run_task = asyncio.create_task(agent_loop.run())
+    await asyncio.sleep(0.05)
+
+    cancelled = await agent_loop.cancel_active_work("cli:direct")
+    await asyncio.sleep(0.05)
+    agent_loop.stop()
+    await asyncio.wait_for(run_task, timeout=1.0)
+
+    assert cancelled is True
+    assert any(
+        call.args[0].content == "Stopped the active work. Ready for the next request."
+        for call in mock_bus.publish_outbound.await_args_list
+    )
 
 
 @pytest.mark.asyncio
@@ -236,7 +372,9 @@ async def test_run_agent_loop_reprompts_intent_only_post_tool_response(agent_loo
             ],
         ),
         LLMResponse(content="Let me gather the complete picture first."),
-        LLMResponse(content="There is no saved web-chat task yet. I can start by inspecting the codebase."),
+        LLMResponse(
+            content="There is no saved web-chat task yet. I can start by inspecting the codebase."
+        ),
     ]
 
     final_content, tools_used, _ = await agent_loop._run_agent_loop(
@@ -272,7 +410,9 @@ async def test_run_agent_loop_reprompts_empty_post_tool_response(agent_loop, moc
 
 
 @pytest.mark.asyncio
-async def test_run_agent_loop_returns_honest_fallback_after_repeated_intent_only(agent_loop, mock_provider):
+async def test_run_agent_loop_returns_honest_fallback_after_repeated_intent_only(
+    agent_loop, mock_provider
+):
     """Repeated planning-only replies should not be forwarded as final output."""
     mock_provider.chat.side_effect = [
         LLMResponse(

@@ -579,6 +579,67 @@ class TestReflectionService:
         assert "delegate only bounded subtasks" in reflections[0].content
 
     @pytest.mark.asyncio
+    async def test_reflect_on_session_reroutes_corrective_directive_to_agents(
+        self, memory_store, mock_provider, temp_workspace
+    ):
+        service = ReflectionService(
+            memory=memory_store,
+            chat_callable=mock_provider.chat,
+            model="test-model",
+            auto_promote=True,
+            allowed_targets=["AGENTS.md", "TOOLS.md", "SOUL.md", "IDENTITY.md"],
+            max_file_lines=500,
+        )
+
+        async def corrective_chat(**kwargs):
+            response = MagicMock()
+            response.content = """
+            {
+                "title": "Stay responsive during long work",
+                "observation": "The user corrected me after I left them waiting without a status update.",
+                "impact": "Long silences make the coordinator feel absent and degrade trust.",
+                "lesson": "I learned to keep ownership of the work, give real progress updates, and avoid disappearing during longer tasks.",
+                "recommended_behavior": "When work takes time, stay responsive, report status clearly, and keep the main agent visibly coordinating the task.",
+                "scope": "assistant_behavior",
+                "confidence": 0.93,
+                "evidence": "The user complained about waiting for feedback and asked for visible status while work was in progress.",
+                "should_promote": true,
+                "promotion_target": "SOUL.md",
+                "promote_content": "For longer tasks, stay responsive, report real status, and keep visible coordinator ownership instead of going silent."
+            }
+            """
+            return response
+
+        mock_provider.chat.side_effect = corrective_chat
+
+        await service.reflect_on_session(
+            messages=[
+                {"role": "user", "content": "what's the status on that research? any blockers?"},
+            ],
+            session_key="test-session",
+            digest=make_digest(
+                user_requests=["Draft the accountant implementation flow."],
+                user_corrections=[
+                    "It's a shitty UX when you leave me waiting for feedback! what's the status on that research? any blockers?"
+                ],
+                outcomes=["Successfully wrote the implementation flow document."],
+            ),
+        )
+
+        agents_file = temp_workspace / "AGENTS.md"
+        soul_file = temp_workspace / "SOUL.md"
+
+        assert agents_file.exists()
+        assert (
+            "keep visible coordinator ownership instead of going silent" in agents_file.read_text()
+        )
+        assert (
+            not soul_file.exists()
+            or "keep visible coordinator ownership instead of going silent"
+            not in soul_file.read_text()
+        )
+
+    @pytest.mark.asyncio
     async def test_format_digest_includes_core_sections(self, memory_store, mock_provider):
         """Digest formatting preserves the structured reflection input."""
         service = ReflectionService(
