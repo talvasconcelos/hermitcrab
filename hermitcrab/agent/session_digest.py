@@ -32,6 +32,12 @@ class SessionDigest:
     outcomes: list[str]
     failures: list[str]
     wikilinks: list[str]
+    user_goal: str
+    artifacts_changed: list[str]
+    decisions_made: list[str]
+    open_loops: list[str]
+    assistant_responses: list[str]
+    signals: dict[str, int]
 
 
 class SessionDigestBuilder:
@@ -115,6 +121,11 @@ class SessionDigestBuilder:
         outcomes: list[str] = []
         failures: list[str] = []
         wikilinks: list[str] = []
+        artifacts_changed: list[str] = []
+        decisions_made: list[str] = []
+        assistant_responses: list[str] = []
+        seen_assistant_or_tool = False
+        tool_turn_count = 0
 
         for msg in messages[-40:]:
             role = msg.get("role")
@@ -127,25 +138,38 @@ class SessionDigestBuilder:
                     task = extract_subagent_task(raw_content)
                     if task:
                         event_lines.append(f"- Subagent reported back for task: {task}")
+                        artifacts_changed.append(task)
                     continue
                 event_lines.append(f"- User: {content}")
                 user_requests.append(content)
-                lowered = content.lower()
-                if any(
-                    marker in lowered
-                    for marker in ("don't", "do not", "stop", "instead", "should", "not ")
-                ):
+                if seen_assistant_or_tool:
                     user_corrections.append(content)
                 continue
 
             if role == "assistant":
-                self._digest_assistant_message(msg, content, event_lines, wikilinks)
+                seen_assistant_or_tool = True
+                tool_calls = (
+                    msg.get("tool_calls") if isinstance(msg.get("tool_calls"), list) else []
+                )
+                if content and not is_transition_assistant_message(content, tool_calls):
+                    assistant_responses.append(content)
+                tool_turn_count += self._digest_assistant_message(
+                    msg,
+                    content,
+                    event_lines,
+                    wikilinks,
+                    artifacts_changed,
+                    decisions_made,
+                )
                 continue
 
             if role == "tool":
+                seen_assistant_or_tool = True
                 self._digest_tool_message(msg, content, event_lines, outcomes, failures)
 
         unique_links = list(dict.fromkeys(wikilinks))
+        unique_artifacts = [item for item in dict.fromkeys(artifacts_changed) if item]
+        unique_decisions = [item for item in dict.fromkeys(decisions_made) if item]
         return SessionDigest(
             session_key=session_key,
             channel=channel,
@@ -158,6 +182,18 @@ class SessionDigestBuilder:
             outcomes=outcomes[-8:],
             failures=failures[-6:],
             wikilinks=unique_links[:10],
+            user_goal=self._select_user_goal(user_requests),
+            artifacts_changed=unique_artifacts[:10],
+            decisions_made=unique_decisions[:8],
+            open_loops=self._build_open_loops(user_requests, outcomes, failures)[:6],
+            assistant_responses=assistant_responses[-6:],
+            signals={
+                "user_turn_count": len(user_requests),
+                "followup_user_turn_count": max(0, len(user_requests) - 1),
+                "assistant_tool_turn_count": tool_turn_count,
+                "failure_count": len(failures),
+                "outcome_count": len(outcomes),
+            },
         )
 
     def _digest_assistant_message(
@@ -166,7 +202,9 @@ class SessionDigestBuilder:
         content: str,
         event_lines: list[str],
         wikilinks: list[str],
-    ) -> None:
+        artifacts_changed: list[str],
+        decisions_made: list[str],
+    ) -> int:
         tool_calls = msg.get("tool_calls") if isinstance(msg.get("tool_calls"), list) else []
         if content and not is_transition_assistant_message(content, tool_calls):
             event_lines.append(f"- Assistant: {content}")
@@ -176,14 +214,40 @@ class SessionDigestBuilder:
             tool_name = self.extract_tool_name(call)
             arguments = self.extract_tool_arguments(call)
             title = clean_snippet(arguments.get("title"), max_chars=80)
+            path = clean_snippet(arguments.get("path"), max_chars=120)
             if title and tool_name.startswith("write_"):
                 wikilinks.append(f"[[{title}]]")
+                artifacts_changed.append(f"[[{title}]]")
             if title and tool_name in {"write_task", "write_goal", "write_decision", "write_fact"}:
                 event_lines.append(f"- Assistant saved {tool_name[6:]} [[{title}]].")
+                if tool_name == "write_decision":
+                    decisions_made.append(f"[[{title}]]")
                 continue
+            if path and tool_name in {"write_file", "edit_file", "read_file"}:
+                artifacts_changed.append(path)
             focus = title or clean_snippet(arguments.get("query") or arguments.get("path"))
             if focus:
                 event_lines.append(f"- Assistant used {tool_name}: {focus}")
+        return len(tool_calls)
+
+    @staticmethod
+    def _build_open_loops(
+        user_requests: list[str], outcomes: list[str], failures: list[str]
+    ) -> list[str]:
+        open_loops: list[str] = []
+        if failures:
+            open_loops.append(failures[-1])
+        if user_requests and not outcomes:
+            open_loops.append(user_requests[-1])
+        return open_loops
+
+    @staticmethod
+    def _select_user_goal(user_requests: list[str]) -> str:
+        """Prefer the session's primary request over late status pings or corrections."""
+        for request in user_requests:
+            if request and request.strip():
+                return request
+        return ""
 
     @staticmethod
     def _digest_tool_message(
@@ -201,6 +265,17 @@ class SessionDigestBuilder:
             failure = f"{tool_name}: {content}"
             failures.append(failure)
             event_lines.append(f"- Tool failure ({tool_name}): {content}")
+        elif lowered.startswith(
+            (
+                "successfully wrote",
+                "successfully edited",
+                "successfully created",
+                "successfully updated",
+                "applied patch",
+            )
+        ):
+            outcomes.append(content)
+            event_lines.append(f"- Tool success ({tool_name}): {content}")
         elif lowered.startswith(("task saved:", "goal saved:", "decision saved:", "fact saved:")):
             outcomes.append(content)
 
@@ -224,16 +299,33 @@ class SessionDigestBuilder:
 
     @staticmethod
     def build_fallback_journal_body(digest: SessionDigest) -> str:
-        request = (
-            digest.user_requests[-1]
-            if digest.user_requests
-            else "The user continued the conversation."
+        request = SessionDigestBuilder._sentence_fragment(
+            digest.user_goal or "the user's latest request"
         )
-        parts = [f"I worked on {request}"]
+        lines = [f"I worked on {request}."]
         if digest.outcomes:
-            parts.append(f"The clearest outcome was {digest.outcomes[-1]}")
-        if digest.failures:
-            parts.append(f"A notable snag was {digest.failures[-1]}")
-        if digest.wikilinks:
-            parts.append(f"Related notes: {' '.join(digest.wikilinks[:4])}")
-        return " ".join(parts)
+            lines.append(
+                f"Main outcome: {SessionDigestBuilder._sentence_fragment(digest.outcomes[-1])}."
+            )
+        elif digest.assistant_responses:
+            lines.append(
+                f"Main response: {SessionDigestBuilder._sentence_fragment(digest.assistant_responses[-1])}."
+            )
+        if digest.artifacts_changed:
+            lines.append(
+                f"Key artifacts: {SessionDigestBuilder._sentence_fragment(', '.join(digest.artifacts_changed[:4]))}."
+            )
+        if digest.decisions_made:
+            lines.append(
+                f"Decisions recorded: {SessionDigestBuilder._sentence_fragment(', '.join(digest.decisions_made[:3]))}."
+            )
+        if digest.open_loops:
+            lines.append(
+                f"Still open: {SessionDigestBuilder._sentence_fragment(digest.open_loops[-1])}."
+            )
+        return " ".join(lines)
+
+    @staticmethod
+    def _sentence_fragment(text: str) -> str:
+        """Trim trailing punctuation so fallback sentences stay readable."""
+        return text.strip().rstrip(".!")

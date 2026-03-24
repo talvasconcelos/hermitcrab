@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import time
 from dataclasses import dataclass
@@ -29,6 +30,9 @@ class TurnRunnerConfig:
 class TurnRunner:
     """Run one assistant turn from prompt assembly through tool execution."""
 
+    PROGRESS_HEARTBEAT_SECONDS = 15.0
+    MAX_IDENTICAL_HEARTBEATS_PER_WAIT = 1
+
     def __init__(
         self,
         *,
@@ -51,6 +55,45 @@ class TurnRunner:
         self.tool_hint = tool_hint
         self.is_empty_response = is_empty_response
         self.is_intent_only_response = is_intent_only_response
+
+    def _remaining_seconds(self, started_at: float) -> float:
+        return self.config.max_loop_seconds - (time.monotonic() - started_at)
+
+    async def _await_with_progress(
+        self,
+        awaitable: Awaitable[Any],
+        *,
+        started_at: float,
+        on_progress: Callable[..., Awaitable[None]] | None,
+        waiting_message: str,
+    ) -> Any:
+        """Await a long-running step with periodic progress heartbeats and a hard deadline."""
+        task = asyncio.create_task(awaitable)
+        heartbeats_sent = 0
+
+        while True:
+            remaining = self._remaining_seconds(started_at)
+            if remaining <= 0:
+                task.cancel()
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
+                raise TimeoutError(
+                    "turn exceeded max_loop_seconds while waiting for work to finish"
+                )
+
+            try:
+                return await asyncio.wait_for(
+                    asyncio.shield(task),
+                    timeout=min(self.PROGRESS_HEARTBEAT_SECONDS, max(0.01, remaining)),
+                )
+            except asyncio.TimeoutError:
+                if task.done():
+                    return await task
+                if on_progress and heartbeats_sent < self.MAX_IDENTICAL_HEARTBEATS_PER_WAIT:
+                    await on_progress(waiting_message)
+                    heartbeats_sent += 1
 
     @staticmethod
     def _tool_cycle_signature(tool_calls: list[Any]) -> str:
@@ -97,15 +140,28 @@ class TurnRunner:
                 model,
             )
 
-            response = await self.chat_callable(
-                messages=messages,
-                tools=self.tools.get_definitions(),
-                model=model,
-                temperature=self.config.temperature,
-                max_tokens=self.config.max_tokens,
-                job_class=job_class,
-                reasoning_effort=self.config.reasoning_effort,
-            )
+            try:
+                response = await self._await_with_progress(
+                    self.chat_callable(
+                        messages=messages,
+                        tools=self.tools.get_definitions(),
+                        model=model,
+                        temperature=self.config.temperature,
+                        max_tokens=self.config.max_tokens,
+                        job_class=job_class,
+                        reasoning_effort=self.config.reasoning_effort,
+                    ),
+                    started_at=started_at,
+                    on_progress=on_progress,
+                    waiting_message="Still working on the next step.",
+                )
+            except TimeoutError:
+                logger.warning("Max loop time reached ({}s)", self.config.max_loop_seconds)
+                final_content = (
+                    f"I hit the time limit for this response ({self.config.max_loop_seconds}s) "
+                    "before completing all tool calls. Try a smaller step."
+                )
+                break
             response.tool_calls = normalize_tool_calls(response.tool_calls)
             logger.info(
                 "LLM response received (job={}, finish_reason={}, content_chars={}, tool_calls={})",
@@ -182,12 +238,32 @@ class TurnRunner:
                     args_str = json.dumps(tool_call.arguments, ensure_ascii=False)
                     logger.info("Tool call: {}({})", tool_call.name, args_str[:200])
                     try:
-                        result = await self.tools.execute(tool_call.name, tool_call.arguments)
+                        result = await self._await_with_progress(
+                            self.tools.execute(tool_call.name, tool_call.arguments),
+                            started_at=started_at,
+                            on_progress=on_progress,
+                            waiting_message=(
+                                f"Still working on `{tool_call.name}`."
+                                if tool_call.name != "spawn"
+                                else "Still coordinating the delegated task."
+                            ),
+                        )
                         logger.info(
                             "Tool completed: {} -> {} chars",
                             tool_call.name,
                             len(result) if isinstance(result, str) else 0,
                         )
+                    except TimeoutError:
+                        logger.warning(
+                            "Max loop time reached ({}s) while executing {}",
+                            self.config.max_loop_seconds,
+                            tool_call.name,
+                        )
+                        final_content = (
+                            f"I hit the time limit for this response ({self.config.max_loop_seconds}s) "
+                            "before completing all tool calls. Try a smaller step."
+                        )
+                        break
                     except Exception as exc:
                         logger.error("Tool execution failed: {}: {}", tool_call.name, exc)
                         result = f"Tool error: {type(exc).__name__}: {exc}"
@@ -200,6 +276,8 @@ class TurnRunner:
                 if spawned_result is not None:
                     final_content = spawned_result
                     logger.info("Returning immediately after spawn to keep main agent responsive")
+                    break
+                if final_content is not None:
                     break
                 continue
 

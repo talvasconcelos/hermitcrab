@@ -39,6 +39,7 @@ from hermitcrab.agent.background_jobs import BackgroundJobManager, SessionDigest
 from hermitcrab.agent.background_messages import (
     fallback_system_task_summary,
     is_low_value_system_reply,
+    summarize_subagent_completion,
 )
 from hermitcrab.agent.context import ContextBuilder
 from hermitcrab.agent.distillation import AtomicCandidate
@@ -51,6 +52,7 @@ from hermitcrab.agent.message_preparation import (
     clean_snippet,
     is_empty_response,
     is_intent_only_response,
+    is_subagent_completion_prompt,
     should_hint_subagent_delegation,
 )
 from hermitcrab.agent.reflection import ReflectionService
@@ -253,6 +255,7 @@ class AgentLoop:
             auto_promote=bool(reflection_promotion.get("auto_promote", False)),
             allowed_targets=reflection_promotion.get("target_files") or [],
             max_file_lines=int(reflection_promotion.get("max_file_lines", 500) or 500),
+            notify_user=bool(reflection_promotion.get("notify_user", True)),
         )
 
         self._running = False
@@ -280,6 +283,7 @@ class AgentLoop:
         self._session_active_turns = self._session_lifecycle.session_active_turns
         self._session_end_in_progress = self._session_lifecycle.session_end_in_progress
         self._session_locks = self._session_lifecycle.session_locks
+        self._active_turn_tasks: dict[str, asyncio.Task[OutboundMessage | None]] = {}
         self._register_default_tools()
 
     def _register_default_tools(self) -> None:
@@ -706,8 +710,11 @@ class AgentLoop:
             while self._running:
                 try:
                     msg = await asyncio.wait_for(self.bus.consume_inbound(), timeout=1.0)
+                    session_key = msg.session_key
+                    process_task = asyncio.create_task(self._process_message(msg))
+                    self._active_turn_tasks[session_key] = process_task
                     try:
-                        response = await self._process_message(msg)
+                        response = await process_task
                         if response is not None:
                             await self.bus.publish_outbound(response)
                         elif msg.channel == "cli":
@@ -719,6 +726,17 @@ class AgentLoop:
                                     metadata=msg.metadata or {},
                                 )
                             )
+                    except asyncio.CancelledError:
+                        logger.info("Cancelled active work for session {}", session_key)
+                        self.execution_state.clear(session_key)
+                        await self.bus.publish_outbound(
+                            OutboundMessage(
+                                channel=msg.channel,
+                                chat_id=msg.chat_id,
+                                content="Stopped the active work. Ready for the next request.",
+                                metadata=msg.metadata or {},
+                            )
+                        )
                     except Exception as e:
                         logger.error("Error processing message: {}", e)
                         self.execution_state.set(msg.session_key, ExecutionPhase.FAILED, str(e))
@@ -729,12 +747,38 @@ class AgentLoop:
                                 content=f"Sorry, I encountered an error: {str(e)}",
                             )
                         )
+                    finally:
+                        current = self._active_turn_tasks.get(session_key)
+                        if current is process_task:
+                            self._active_turn_tasks.pop(session_key, None)
                 except asyncio.TimeoutError:
                     continue
         finally:
             await self._shutdown_background_tasks()
             await self.close_mcp()
             logger.info("Agent loop stopped")
+
+    async def cancel_active_work(
+        self, session_key: str, *, cancel_background: bool = False
+    ) -> bool:
+        """Cancel active turn and delegated work for a session."""
+        cancelled = False
+        task = self._active_turn_tasks.get(session_key)
+        if task is not None and not task.done():
+            task.cancel()
+            cancelled = True
+
+        channel, chat_id = BackgroundJobManager.derive_channel_chat(session_key)
+        cancelled_subagents = await self.subagents.cancel_for_origin(channel, chat_id)
+        cancelled = cancelled or cancelled_subagents > 0
+
+        if cancel_background and self._background_tasks:
+            await self._shutdown_background_tasks()
+            cancelled = True
+
+        if cancelled:
+            self.execution_state.clear(session_key)
+        return cancelled
 
     async def _shutdown_background_tasks(self) -> None:
         """Cancel and await all tracked background tasks."""
@@ -816,9 +860,26 @@ class AgentLoop:
         self.execution_state.set(key, ExecutionPhase.WAITING_BACKGROUND, "processing system update")
         async with self._session_scope(key):
             session = self.sessions.get_or_create(key)
+            history = session.get_history(max_messages=self.memory_window)
+
+            if msg.sender_id == "subagent" and (
+                is_subagent_completion_prompt(msg.content)
+                or msg.content.lstrip().startswith("[Subagent '")
+            ):
+                safe_content = summarize_subagent_completion(msg.content)
+                all_msgs = [
+                    {"role": "system", "content": "deterministic background update"},
+                    *history,
+                    {"role": "user", "content": msg.content},
+                    {"role": "assistant", "content": safe_content},
+                ]
+                self._save_turn(session, all_msgs, 1 + len(history))
+                self.sessions.save(session)
+                self.execution_state.set(key, ExecutionPhase.COMPLETED, "system update ready")
+                return OutboundMessage(channel=channel, chat_id=chat_id, content=safe_content)
+
             scratchpad_path = self._ensure_scratchpad(key)
             self._set_tool_context(channel, chat_id, msg.metadata.get("message_id"))
-            history = session.get_history(max_messages=self.memory_window)
             messages = self.context.build_messages(
                 history=history,
                 current_message=msg.content,
