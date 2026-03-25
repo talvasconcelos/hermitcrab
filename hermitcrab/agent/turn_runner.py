@@ -6,13 +6,14 @@ import asyncio
 import json
 import time
 from dataclasses import dataclass
-from typing import Any, Awaitable, Callable
+from typing import Any, AsyncIterator, Awaitable, Callable
 
 from loguru import logger
 
 from hermitcrab.agent.context import ContextBuilder
 from hermitcrab.agent.tool_call_recovery import coerce_inline_tool_calls, normalize_tool_calls
 from hermitcrab.agent.tools.registry import ToolRegistry
+from hermitcrab.providers.base import LLMResponse, ResponseDoneEvent, TextDeltaEvent, ToolCallEvent
 
 
 @dataclass(slots=True)
@@ -40,6 +41,7 @@ class TurnRunner:
         tools: ToolRegistry,
         config: TurnRunnerConfig,
         chat_callable: Callable[..., Awaitable[Any]],
+        stream_chat_callable: Callable[..., AsyncIterator[Any]] | None,
         get_model_for_job: Callable[[Any], str | None],
         strip_think: Callable[[str | None], str | None],
         tool_hint: Callable[[list[Any]], str],
@@ -50,6 +52,7 @@ class TurnRunner:
         self.tools = tools
         self.config = config
         self.chat_callable = chat_callable
+        self.stream_chat_callable = stream_chat_callable
         self.get_model_for_job = get_model_for_job
         self.strip_think = strip_think
         self.tool_hint = tool_hint
@@ -100,6 +103,74 @@ class TurnRunner:
         payload = [{"name": tc.name, "arguments": tc.arguments} for tc in tool_calls]
         return json.dumps(payload, sort_keys=True, ensure_ascii=False, default=str)
 
+    async def _consume_streaming_response(
+        self,
+        *,
+        messages: list[dict[str, Any]],
+        model: str,
+        started_at: float,
+        on_progress: Callable[..., Awaitable[None]] | None,
+        job_class: Any,
+    ) -> LLMResponse:
+        """Consume typed provider events into a normalized LLMResponse."""
+        assert self.stream_chat_callable is not None
+
+        stream = self.stream_chat_callable(
+            messages=messages,
+            tools=self.tools.get_definitions(),
+            model=model,
+            temperature=self.config.temperature,
+            max_tokens=self.config.max_tokens,
+            job_class=job_class,
+            reasoning_effort=self.config.reasoning_effort,
+        )
+        response_text_parts: list[str] = []
+        tool_calls: list[Any] = []
+        usage: dict[str, int] = {}
+        reasoning_content: str | None = None
+        finish_reason = "stop"
+        heartbeats_sent = 0
+
+        while True:
+            remaining = self._remaining_seconds(started_at)
+            if remaining <= 0:
+                await stream.aclose()
+                raise TimeoutError("turn exceeded max_loop_seconds while streaming provider output")
+
+            try:
+                event = await asyncio.wait_for(
+                    stream.__anext__(),
+                    timeout=min(self.PROGRESS_HEARTBEAT_SECONDS, max(0.01, remaining)),
+                )
+            except StopAsyncIteration:
+                break
+            except asyncio.TimeoutError:
+                if on_progress and heartbeats_sent < self.MAX_IDENTICAL_HEARTBEATS_PER_WAIT:
+                    await on_progress("Still working on the next step.")
+                    heartbeats_sent += 1
+                continue
+
+            heartbeats_sent = 0
+            if isinstance(event, TextDeltaEvent):
+                if event.delta:
+                    response_text_parts.append(event.delta)
+                continue
+            if isinstance(event, ToolCallEvent):
+                tool_calls.append(event.tool_call)
+                continue
+            if isinstance(event, ResponseDoneEvent):
+                finish_reason = event.finish_reason or finish_reason
+                usage = event.usage or usage
+                reasoning_content = event.reasoning_content or reasoning_content
+
+        return LLMResponse(
+            content="".join(response_text_parts) or None,
+            tool_calls=tool_calls,
+            finish_reason=finish_reason,
+            usage=usage,
+            reasoning_content=reasoning_content,
+        )
+
     async def run(
         self,
         initial_messages: list[dict[str, Any]],
@@ -141,20 +212,51 @@ class TurnRunner:
             )
 
             try:
-                response = await self._await_with_progress(
-                    self.chat_callable(
-                        messages=messages,
-                        tools=self.tools.get_definitions(),
-                        model=model,
-                        temperature=self.config.temperature,
-                        max_tokens=self.config.max_tokens,
-                        job_class=job_class,
-                        reasoning_effort=self.config.reasoning_effort,
-                    ),
-                    started_at=started_at,
-                    on_progress=on_progress,
-                    waiting_message="Still working on the next step.",
-                )
+                if self.stream_chat_callable is not None:
+                    try:
+                        response = await self._consume_streaming_response(
+                            messages=messages,
+                            model=model,
+                            started_at=started_at,
+                            on_progress=on_progress,
+                            job_class=job_class,
+                        )
+                    except TimeoutError:
+                        raise
+                    except Exception as exc:
+                        logger.warning(
+                            "Provider streaming failed; falling back to non-streaming chat: {}",
+                            exc,
+                        )
+                        response = await self._await_with_progress(
+                            self.chat_callable(
+                                messages=messages,
+                                tools=self.tools.get_definitions(),
+                                model=model,
+                                temperature=self.config.temperature,
+                                max_tokens=self.config.max_tokens,
+                                job_class=job_class,
+                                reasoning_effort=self.config.reasoning_effort,
+                            ),
+                            started_at=started_at,
+                            on_progress=on_progress,
+                            waiting_message="Still working on the next step.",
+                        )
+                else:
+                    response = await self._await_with_progress(
+                        self.chat_callable(
+                            messages=messages,
+                            tools=self.tools.get_definitions(),
+                            model=model,
+                            temperature=self.config.temperature,
+                            max_tokens=self.config.max_tokens,
+                            job_class=job_class,
+                            reasoning_effort=self.config.reasoning_effort,
+                        ),
+                        started_at=started_at,
+                        on_progress=on_progress,
+                        waiting_message="Still working on the next step.",
+                    )
             except TimeoutError:
                 logger.warning("Max loop time reached ({}s)", self.config.max_loop_seconds)
                 final_content = (

@@ -2,6 +2,7 @@
 
 import asyncio
 from abc import ABC, abstractmethod
+from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -11,6 +12,7 @@ from loguru import logger
 @dataclass
 class ToolCallRequest:
     """A tool call request from the LLM."""
+
     id: str
     name: str
     arguments: dict[str, Any]
@@ -19,6 +21,7 @@ class ToolCallRequest:
 @dataclass
 class LLMResponse:
     """Response from an LLM provider."""
+
     content: str | None
     tool_calls: list[ToolCallRequest] = field(default_factory=list)
     finish_reason: str = "stop"
@@ -29,6 +32,29 @@ class LLMResponse:
     def has_tool_calls(self) -> bool:
         """Check if response contains tool calls."""
         return len(self.tool_calls) > 0
+
+
+@dataclass
+class TextDeltaEvent:
+    """Streaming text delta emitted by a provider."""
+
+    delta: str
+
+
+@dataclass
+class ToolCallEvent:
+    """Streaming tool-call event emitted by a provider."""
+
+    tool_call: ToolCallRequest
+
+
+@dataclass
+class ResponseDoneEvent:
+    """Terminal streaming event with final metadata."""
+
+    finish_reason: str = "stop"
+    usage: dict[str, int] = field(default_factory=dict)
+    reasoning_content: str | None = None
 
 
 class LLMProvider(ABC):
@@ -72,13 +98,18 @@ class LLMProvider(ABC):
 
             if isinstance(content, str) and not content:
                 clean = dict(msg)
-                clean["content"] = None if (msg.get("role") == "assistant" and msg.get("tool_calls")) else "(empty)"
+                clean["content"] = (
+                    None
+                    if (msg.get("role") == "assistant" and msg.get("tool_calls"))
+                    else "(empty)"
+                )
                 result.append(clean)
                 continue
 
             if isinstance(content, list):
                 filtered = [
-                    item for item in content
+                    item
+                    for item in content
                     if not (
                         isinstance(item, dict)
                         and item.get("type") in ("text", "input_text", "output_text")
@@ -147,6 +178,39 @@ class LLMProvider(ABC):
     async def close(self) -> None:
         """Release provider-owned resources."""
         return None
+
+    async def stream_chat(
+        self,
+        messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]] | None = None,
+        model: str | None = None,
+        max_tokens: int = 4096,
+        temperature: float = 0.7,
+        reasoning_effort: str | None = None,
+    ) -> AsyncIterator[TextDeltaEvent | ToolCallEvent | ResponseDoneEvent]:
+        """Yield typed streaming events for one model call.
+
+        Providers that do not support native streaming can inherit this fallback,
+        which converts the final chat response into a single streamed sequence.
+        """
+
+        response = await self.chat(
+            messages=messages,
+            tools=tools,
+            model=model,
+            max_tokens=max_tokens,
+            temperature=temperature,
+            reasoning_effort=reasoning_effort,
+        )
+        if response.content:
+            yield TextDeltaEvent(delta=response.content)
+        for tool_call in response.tool_calls:
+            yield ToolCallEvent(tool_call=tool_call)
+        yield ResponseDoneEvent(
+            finish_reason=response.finish_reason,
+            usage=response.usage,
+            reasoning_content=response.reasoning_content,
+        )
 
     @classmethod
     def _is_transient_error(cls, content: str | None) -> bool:

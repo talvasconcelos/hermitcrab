@@ -4,7 +4,13 @@ from unittest.mock import AsyncMock, patch
 import httpx
 import pytest
 
-from hermitcrab.providers.base import LLMProvider, LLMResponse
+from hermitcrab.providers.base import (
+    LLMProvider,
+    LLMResponse,
+    ResponseDoneEvent,
+    TextDeltaEvent,
+    ToolCallEvent,
+)
 from hermitcrab.providers.custom_provider import CustomProvider
 from hermitcrab.providers.litellm_provider import LiteLLMProvider
 from hermitcrab.providers.ollama_provider import OllamaProvider
@@ -16,7 +22,15 @@ class StubProvider(LLMProvider):
         self.responses = list(responses)
         self.calls = 0
 
-    async def chat(self, messages, tools=None, model=None, max_tokens=4096, temperature=0.7, reasoning_effort=None):
+    async def chat(
+        self,
+        messages,
+        tools=None,
+        model=None,
+        max_tokens=4096,
+        temperature=0.7,
+        reasoning_effort=None,
+    ):
         response = self.responses[self.calls]
         self.calls += 1
         if isinstance(response, Exception):
@@ -225,6 +239,98 @@ def test_litellm_parse_response_supports_dict_shaped_tool_calls() -> None:
 
 
 @pytest.mark.asyncio
+async def test_litellm_stream_chat_accumulates_partial_tool_calls() -> None:
+    provider = LiteLLMProvider(default_model="openai/gpt-4.1")
+
+    class _Stream:
+        def __init__(self, chunks):
+            self._chunks = iter(chunks)
+
+        def __aiter__(self):
+            return self
+
+        async def __anext__(self):
+            try:
+                return next(self._chunks)
+            except StopIteration as exc:
+                raise StopAsyncIteration from exc
+
+    chunks = [
+        SimpleNamespace(
+            usage=None,
+            choices=[
+                SimpleNamespace(
+                    finish_reason=None,
+                    delta=SimpleNamespace(
+                        content="Checking ", tool_calls=None, reasoning_content=None
+                    ),
+                )
+            ],
+        ),
+        SimpleNamespace(
+            usage=None,
+            choices=[
+                SimpleNamespace(
+                    finish_reason=None,
+                    delta=SimpleNamespace(
+                        content=None,
+                        tool_calls=[
+                            SimpleNamespace(
+                                index=0,
+                                id="call_1",
+                                function=SimpleNamespace(
+                                    name="read_memory",
+                                    arguments='{"category"',
+                                ),
+                            )
+                        ],
+                        reasoning_content=None,
+                    ),
+                )
+            ],
+        ),
+        SimpleNamespace(
+            usage=SimpleNamespace(prompt_tokens=10, completion_tokens=3, total_tokens=13),
+            choices=[
+                SimpleNamespace(
+                    finish_reason="tool_calls",
+                    delta=SimpleNamespace(
+                        content=None,
+                        tool_calls=[
+                            SimpleNamespace(
+                                index=0,
+                                id=None,
+                                function=SimpleNamespace(name=None, arguments=':"facts"}'),
+                            )
+                        ],
+                        reasoning_content="step",
+                    ),
+                )
+            ],
+        ),
+    ]
+
+    with patch(
+        "hermitcrab.providers.litellm_provider.acompletion",
+        AsyncMock(return_value=_Stream(chunks)),
+    ):
+        events = [
+            event
+            async for event in provider.stream_chat(messages=[{"role": "user", "content": "hello"}])
+        ]
+
+    assert isinstance(events[0], TextDeltaEvent)
+    assert events[0].delta == "Checking "
+    assert isinstance(events[1], ToolCallEvent)
+    assert events[1].tool_call.name == "read_memory"
+    assert events[1].tool_call.arguments == {"category": "facts"}
+    assert isinstance(events[2], ResponseDoneEvent)
+    assert events[2].finish_reason == "tool_calls"
+    assert events[2].usage == {"prompt_tokens": 10, "completion_tokens": 3, "total_tokens": 13}
+    assert events[2].reasoning_content == "step"
+
+
+@pytest.mark.asyncio
 async def test_provider_chat_with_retry_retries_transient_exception() -> None:
     provider = StubProvider(
         [
@@ -257,11 +363,11 @@ async def test_provider_chat_with_retry_retries_transient_error_response() -> No
     assert provider.calls == 2
 
 
-
-
 @pytest.mark.asyncio
 async def test_custom_provider_passes_reasoning_effort() -> None:
-    provider = CustomProvider(api_key="stub", api_base="http://localhost:11434/v1", default_model="kimi")
+    provider = CustomProvider(
+        api_key="stub", api_base="http://localhost:11434/v1", default_model="kimi"
+    )
     provider._client.chat.completions.create = AsyncMock(
         return_value=SimpleNamespace(
             choices=[
@@ -283,7 +389,9 @@ async def test_custom_provider_passes_reasoning_effort() -> None:
 
 
 @pytest.mark.asyncio
-async def test_litellm_provider_uses_request_specific_config_for_cross_provider_job_models() -> None:
+async def test_litellm_provider_uses_request_specific_config_for_cross_provider_job_models() -> (
+    None
+):
     provider = LiteLLMProvider(
         api_key="ollama",
         api_base="http://localhost:11434/v1",
@@ -314,13 +422,18 @@ async def test_litellm_provider_uses_request_specific_config_for_cross_provider_
         usage=None,
     )
 
-    with patch("hermitcrab.providers.litellm_provider.acompletion", AsyncMock(return_value=response)) as mock_completion:
+    with patch(
+        "hermitcrab.providers.litellm_provider.acompletion", AsyncMock(return_value=response)
+    ) as mock_completion:
         await provider.chat(
             messages=[{"role": "user", "content": "hello"}],
             model="openrouter/nvidia/nemotron-3-nano-30b-a3b:free",
         )
 
-    assert mock_completion.await_args.kwargs["model"] == "openrouter/nvidia/nemotron-3-nano-30b-a3b:free"
+    assert (
+        mock_completion.await_args.kwargs["model"]
+        == "openrouter/nvidia/nemotron-3-nano-30b-a3b:free"
+    )
     assert mock_completion.await_args.kwargs["api_key"] == "sk-or-test"
     assert mock_completion.await_args.kwargs["api_base"] == "https://openrouter.ai/api/v1"
 
@@ -363,7 +476,9 @@ async def test_litellm_provider_applies_named_model_provider_options() -> None:
         usage=None,
     )
 
-    with patch("hermitcrab.providers.litellm_provider.acompletion", AsyncMock(return_value=response)) as mock_completion:
+    with patch(
+        "hermitcrab.providers.litellm_provider.acompletion", AsyncMock(return_value=response)
+    ) as mock_completion:
         await provider.chat(messages=[{"role": "user", "content": "hello"}], model="local_coder")
 
     assert mock_completion.await_args.kwargs["model"] == "ollama/qwen2.5-coder:7b"
@@ -372,8 +487,12 @@ async def test_litellm_provider_applies_named_model_provider_options() -> None:
 
 
 def test_ollama_provider_normalizes_native_api_base() -> None:
-    assert OllamaProvider.normalize_api_base("http://localhost:11434/v1/") == "http://localhost:11434"
-    assert OllamaProvider.normalize_api_base("http://localhost:11434///") == "http://localhost:11434"
+    assert (
+        OllamaProvider.normalize_api_base("http://localhost:11434/v1/") == "http://localhost:11434"
+    )
+    assert (
+        OllamaProvider.normalize_api_base("http://localhost:11434///") == "http://localhost:11434"
+    )
 
 
 def test_ollama_provider_preserves_large_integer_tool_arguments() -> None:
@@ -394,7 +513,9 @@ def test_ollama_provider_preserves_large_integer_tool_arguments() -> None:
 
 @pytest.mark.asyncio
 async def test_ollama_provider_formats_timeout_errors() -> None:
-    provider = OllamaProvider(api_base="http://localhost:11434", default_model="ollama/qwen0.8:latest")
+    provider = OllamaProvider(
+        api_base="http://localhost:11434", default_model="ollama/qwen0.8:latest"
+    )
 
     class _TimeoutStream:
         async def __aenter__(self):
@@ -413,7 +534,9 @@ async def test_ollama_provider_formats_timeout_errors() -> None:
         def stream(self, *args, **kwargs):
             return _TimeoutStream()
 
-    with patch("hermitcrab.providers.ollama_provider.httpx.AsyncClient", return_value=_StreamClient()):
+    with patch(
+        "hermitcrab.providers.ollama_provider.httpx.AsyncClient", return_value=_StreamClient()
+    ):
         response = await provider.chat(messages=[{"role": "user", "content": "hello"}])
 
     assert response.finish_reason == "error"
@@ -469,7 +592,9 @@ async def test_ollama_provider_forwards_provider_options_into_ollama_options() -
     )
 
     with patch("hermitcrab.providers.ollama_provider.httpx.AsyncClient", _Client):
-        response = await provider.chat(messages=[{"role": "user", "content": "hello"}], model="fast_local")
+        response = await provider.chat(
+            messages=[{"role": "user", "content": "hello"}], model="fast_local"
+        )
 
     assert response.content == "ok"
     assert captured_json["body"]["options"]["num_ctx"] == 8192
@@ -477,7 +602,9 @@ async def test_ollama_provider_forwards_provider_options_into_ollama_options() -
 
 
 def test_custom_provider_supports_legacy_function_call() -> None:
-    provider = CustomProvider(api_key="stub", api_base="http://localhost:11434/v1", default_model="kimi")
+    provider = CustomProvider(
+        api_key="stub", api_base="http://localhost:11434/v1", default_model="kimi"
+    )
 
     response = SimpleNamespace(
         choices=[
@@ -506,7 +633,9 @@ def test_custom_provider_supports_legacy_function_call() -> None:
 
 
 def test_custom_provider_supports_dict_shaped_tool_calls() -> None:
-    provider = CustomProvider(api_key="stub", api_base="http://localhost:11434/v1", default_model="kimi")
+    provider = CustomProvider(
+        api_key="stub", api_base="http://localhost:11434/v1", default_model="kimi"
+    )
 
     response = SimpleNamespace(
         choices=[

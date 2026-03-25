@@ -11,7 +11,14 @@ import httpx
 import json_repair
 from loguru import logger
 
-from hermitcrab.providers.base import LLMProvider, LLMResponse, ToolCallRequest
+from hermitcrab.providers.base import (
+    LLMProvider,
+    LLMResponse,
+    ResponseDoneEvent,
+    TextDeltaEvent,
+    ToolCallEvent,
+    ToolCallRequest,
+)
 
 _OLLAMA_ALLOWED_ROLES = frozenset({"system", "user", "assistant", "tool"})
 
@@ -152,7 +159,9 @@ def _format_ollama_error(exc: Exception) -> str:
     return exc.__class__.__name__
 
 
-def _consume_ndjson_bytes(chunks: list[bytes]) -> tuple[str, list[ToolCallRequest], str, dict[str, int], str | None]:
+def _consume_ndjson_bytes(
+    chunks: list[bytes],
+) -> tuple[str, list[ToolCallRequest], str, dict[str, int], str | None]:
     content_parts: list[str] = []
     reasoning_parts: list[str] = []
     tool_calls: list[ToolCallRequest] = []
@@ -197,10 +206,18 @@ def _consume_ndjson_bytes(chunks: list[bytes]) -> tuple[str, list[ToolCallReques
             usage = {
                 "prompt_tokens": int(event.get("prompt_eval_count") or 0),
                 "completion_tokens": int(event.get("eval_count") or 0),
-                "total_tokens": int((event.get("prompt_eval_count") or 0) + (event.get("eval_count") or 0)),
+                "total_tokens": int(
+                    (event.get("prompt_eval_count") or 0) + (event.get("eval_count") or 0)
+                ),
             }
 
-    return "".join(content_parts) or None, tool_calls, finish_reason, usage, "".join(reasoning_parts) or None
+    return (
+        "".join(content_parts) or None,
+        tool_calls,
+        finish_reason,
+        usage,
+        "".join(reasoning_parts) or None,
+    )
 
 
 @dataclass
@@ -254,7 +271,9 @@ class OllamaProvider(LLMProvider):
         return _normalize_ollama_api_base(api_base)
 
     @staticmethod
-    def parse_ndjson_events(chunks: list[bytes]) -> tuple[str | None, list[ToolCallRequest], str, dict[str, int], str | None]:
+    def parse_ndjson_events(
+        chunks: list[bytes],
+    ) -> tuple[str | None, list[ToolCallRequest], str, dict[str, int], str | None]:
         return _consume_ndjson_bytes(chunks)
 
     @staticmethod
@@ -295,39 +314,27 @@ class OllamaProvider(LLMProvider):
                 return value
         return None
 
-    async def chat(
+    def _prepare_request(
         self,
+        *,
         messages: list[dict[str, Any]],
-        tools: list[dict[str, Any]] | None = None,
-        model: str | None = None,
-        max_tokens: int = 4096,
-        temperature: float = 0.7,
-        reasoning_effort: str | None = None,
-    ) -> LLMResponse:
+        tools: list[dict[str, Any]] | None,
+        model: str | None,
+        max_tokens: int,
+        temperature: float,
+        reasoning_effort: str | None,
+    ) -> tuple[dict[str, Any], dict[str, str], dict[str, Any]]:
         requested_model = model or self.default_model
         request_config = self._get_request_config(requested_model)
         resolved_model = request_config.get("model") or requested_model
         provider_name = request_config.get("provider_name")
         effective_reasoning_effort = reasoning_effort or request_config.get("reasoning_effort")
 
+        fallback = False
         if provider_name and provider_name != "ollama" and self._fallback_provider:
-            return await self._fallback_provider.chat(
-                messages=messages,
-                tools=tools,
-                model=model,
-                max_tokens=max_tokens,
-                temperature=temperature,
-                reasoning_effort=effective_reasoning_effort,
-            )
+            fallback = True
         if not provider_name and not _is_ollama_model(resolved_model) and self._fallback_provider:
-            return await self._fallback_provider.chat(
-                messages=messages,
-                tools=tools,
-                model=model,
-                max_tokens=max_tokens,
-                temperature=temperature,
-                reasoning_effort=effective_reasoning_effort,
-            )
+            fallback = True
 
         provider_options = dict(request_config.get("provider_options") or {})
         options: dict[str, Any] = {
@@ -345,9 +352,52 @@ class OllamaProvider(LLMProvider):
         if tools:
             body["tools"] = _convert_tools(tools)
 
-        headers = {"Content-Type": "application/json", **(request_config.get("extra_headers") or {})}
+        headers = {
+            "Content-Type": "application/json",
+            **(request_config.get("extra_headers") or {}),
+        }
         if request_config.get("api_key"):
             headers.setdefault("Authorization", f"Bearer {request_config['api_key']}")
+
+        return (
+            body,
+            headers,
+            {
+                "fallback": fallback,
+                "request_config": request_config,
+                "effective_reasoning_effort": effective_reasoning_effort,
+            },
+        )
+
+    async def chat(
+        self,
+        messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]] | None = None,
+        model: str | None = None,
+        max_tokens: int = 4096,
+        temperature: float = 0.7,
+        reasoning_effort: str | None = None,
+    ) -> LLMResponse:
+        body, headers, metadata = self._prepare_request(
+            messages=messages,
+            tools=tools,
+            model=model,
+            max_tokens=max_tokens,
+            temperature=temperature,
+            reasoning_effort=reasoning_effort,
+        )
+        request_config = metadata["request_config"]
+        effective_reasoning_effort = metadata["effective_reasoning_effort"]
+
+        if metadata["fallback"] and self._fallback_provider:
+            return await self._fallback_provider.chat(
+                messages=messages,
+                tools=tools,
+                model=model,
+                max_tokens=max_tokens,
+                temperature=temperature,
+                reasoning_effort=effective_reasoning_effort,
+            )
 
         try:
             logger.debug(
@@ -386,6 +436,114 @@ class OllamaProvider(LLMProvider):
             finish_reason=finish_reason,
             usage=usage,
             reasoning_content=reasoning,
+        )
+
+    async def stream_chat(
+        self,
+        messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]] | None = None,
+        model: str | None = None,
+        max_tokens: int = 4096,
+        temperature: float = 0.7,
+        reasoning_effort: str | None = None,
+    ):
+        body, headers, metadata = self._prepare_request(
+            messages=messages,
+            tools=tools,
+            model=model,
+            max_tokens=max_tokens,
+            temperature=temperature,
+            reasoning_effort=reasoning_effort,
+        )
+        request_config = metadata["request_config"]
+        effective_reasoning_effort = metadata["effective_reasoning_effort"]
+
+        if metadata["fallback"] and self._fallback_provider:
+            async for event in self._fallback_provider.stream_chat(
+                messages=messages,
+                tools=tools,
+                model=model,
+                max_tokens=max_tokens,
+                temperature=temperature,
+                reasoning_effort=effective_reasoning_effort,
+            ):
+                yield event
+            return
+
+        reasoning_parts: list[str] = []
+        usage: dict[str, int] = {}
+        finish_reason = "stop"
+        next_tool_index = 0
+
+        try:
+            timeout = httpx.Timeout(connect=10.0, read=300.0, write=60.0, pool=60.0)
+            async with httpx.AsyncClient(timeout=timeout) as client:
+                async with client.stream(
+                    "POST",
+                    f"{request_config['api_base']}/api/chat",
+                    headers=headers,
+                    json=body,
+                ) as response:
+                    if response.status_code != 200:
+                        text = (await response.aread()).decode("utf-8", "ignore")
+                        yield TextDeltaEvent(
+                            delta=f"Error calling Ollama: {text or response.reason_phrase}"
+                        )
+                        yield ResponseDoneEvent(finish_reason="error")
+                        return
+
+                    async for line in response.aiter_lines():
+                        if not line:
+                            continue
+                        event = json.loads(line)
+                        message = event.get("message") or {}
+
+                        text = message.get("content")
+                        if isinstance(text, str) and text:
+                            yield TextDeltaEvent(delta=text)
+
+                        reasoning = message.get("thinking") or message.get("reasoning")
+                        if isinstance(reasoning, str) and reasoning:
+                            reasoning_parts.append(reasoning)
+
+                        raw_tool_calls = message.get("tool_calls") or []
+                        for tc in raw_tool_calls:
+                            fn = tc.get("function") if isinstance(tc, dict) else None
+                            if not isinstance(fn, dict):
+                                continue
+                            name = fn.get("name")
+                            if not name:
+                                continue
+                            yield ToolCallEvent(
+                                tool_call=ToolCallRequest(
+                                    id=f"call_{next_tool_index}",
+                                    name=name,
+                                    arguments=_parse_tool_arguments(fn.get("arguments")),
+                                )
+                            )
+                            next_tool_index += 1
+
+                        if event.get("done"):
+                            finish_reason = event.get("done_reason") or (
+                                "tool_calls" if next_tool_index else "stop"
+                            )
+                            usage = {
+                                "prompt_tokens": int(event.get("prompt_eval_count") or 0),
+                                "completion_tokens": int(event.get("eval_count") or 0),
+                                "total_tokens": int(
+                                    (event.get("prompt_eval_count") or 0)
+                                    + (event.get("eval_count") or 0)
+                                ),
+                            }
+        except Exception as exc:
+            yield TextDeltaEvent(delta=f"Error calling Ollama: {_format_ollama_error(exc)}")
+            yield ResponseDoneEvent(finish_reason="error")
+            return
+
+        yield ResponseDoneEvent(
+            finish_reason=finish_reason,
+            usage=usage,
+            reasoning_content="".join(reasoning_parts) or None,
         )
 
     def get_default_model(self) -> str:

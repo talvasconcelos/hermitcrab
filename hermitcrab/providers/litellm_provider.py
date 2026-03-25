@@ -14,6 +14,7 @@ import re
 import secrets
 import string
 from collections.abc import Callable
+from dataclasses import dataclass, field
 from typing import Any, Literal
 
 import json_repair
@@ -21,7 +22,14 @@ import litellm
 from litellm import acompletion
 from loguru import logger
 
-from hermitcrab.providers.base import LLMProvider, LLMResponse, ToolCallRequest
+from hermitcrab.providers.base import (
+    LLMProvider,
+    LLMResponse,
+    ResponseDoneEvent,
+    TextDeltaEvent,
+    ToolCallEvent,
+    ToolCallRequest,
+)
 from hermitcrab.providers.registry import find_by_model, find_gateway
 
 # Standard OpenAI chat-completion message keys; extras (e.g. reasoning_content) are stripped for strict providers.
@@ -32,7 +40,16 @@ _ALNUM = string.ascii_letters + string.digits
 
 # Image marker pattern for multimodal support
 # Matches: [IMAGE:data:image/png;base64,abcd==] or [IMAGE:base64data]
-_IMAGE_MARKER_PATTERN = re.compile(r'\[IMAGE:([^\]]+)\]')
+_IMAGE_MARKER_PATTERN = re.compile(r"\[IMAGE:([^\]]+)\]")
+
+
+@dataclass(slots=True)
+class _StreamingToolCallState:
+    """In-progress streamed tool call assembled across SSE deltas."""
+
+    id: str | None = None
+    name: str = ""
+    argument_parts: list[str] = field(default_factory=list)
 
 
 def _short_tool_id() -> str:
@@ -125,9 +142,9 @@ class LiteLLMProvider(LLMProvider):
         """
         model_lower = model.lower()
         return (
-            model_lower.startswith("ollama/") or
-            model_lower.startswith("ollama:") or
-            model_lower.endswith(":ollama")
+            model_lower.startswith("ollama/")
+            or model_lower.startswith("ollama:")
+            or model_lower.endswith(":ollama")
         )
 
     def _resolve_ollama_cloud_routing(self, model: str) -> tuple[str, bool]:
@@ -157,9 +174,8 @@ class LiteLLMProvider(LLMProvider):
             return normalized_model, False
 
         # :cloud suffix: prefer local Ollama, fallback to API key
-        is_local_ollama = (
-            self.api_base and
-            any(host in self.api_base.lower() for host in ['localhost', '127.0.0.1', '::1'])
+        is_local_ollama = self.api_base and any(
+            host in self.api_base.lower() for host in ["localhost", "127.0.0.1", "::1"]
         )
 
         # If local Ollama is available, keep :cloud suffix for Ollama to route
@@ -197,9 +213,9 @@ class LiteLLMProvider(LLMProvider):
         images = []
         for match in matches:
             # Handle both full data URIs and raw base64
-            if match.startswith('data:image/'):
+            if match.startswith("data:image/"):
                 # data:image/png;base64,abcd==
-                parts = match.split(',', 1)
+                parts = match.split(",", 1)
                 if len(parts) == 2:
                     images.append(parts[1])
             else:
@@ -207,7 +223,7 @@ class LiteLLMProvider(LLMProvider):
                 images.append(match)
 
         # Remove markers from text
-        cleaned = _IMAGE_MARKER_PATTERN.sub('', content).strip()
+        cleaned = _IMAGE_MARKER_PATTERN.sub("", content).strip()
 
         return cleaned if cleaned else None, images
 
@@ -298,11 +314,13 @@ class LiteLLMProvider(LLMProvider):
             # Ensure arguments are serialized as JSON string for internal parser
             args_str = json.dumps(clean_args) if isinstance(clean_args, dict) else str(clean_args)
 
-            tool_calls.append(ToolCallRequest(
-                id=getattr(tc, "id", None) or f"call_{len(tool_calls)}",
-                name=clean_name,
-                arguments=args_str,
-            ))
+            tool_calls.append(
+                ToolCallRequest(
+                    id=getattr(tc, "id", None) or f"call_{len(tool_calls)}",
+                    name=clean_name,
+                    arguments=args_str,
+                )
+            )
 
         return tool_calls
 
@@ -391,7 +409,9 @@ class LiteLLMProvider(LLMProvider):
             if msg.get("role") == "system":
                 content = msg["content"]
                 if isinstance(content, str):
-                    new_content = [{"type": "text", "text": content, "cache_control": {"type": "ephemeral"}}]
+                    new_content = [
+                        {"type": "text", "text": content, "cache_control": {"type": "ephemeral"}}
+                    ]
                 else:
                     new_content = list(content)
                     new_content[-1] = {**new_content[-1], "cache_control": {"type": "ephemeral"}}
@@ -417,7 +437,9 @@ class LiteLLMProvider(LLMProvider):
                     return
 
     @staticmethod
-    def _sanitize_messages(messages: list[dict[str, Any]], is_ollama: bool = False) -> list[dict[str, Any]]:
+    def _sanitize_messages(
+        messages: list[dict[str, Any]], is_ollama: bool = False
+    ) -> list[dict[str, Any]]:
         """Strip non-standard keys and ensure assistant messages have a content key.
 
         Args:
@@ -456,9 +478,13 @@ class LiteLLMProvider(LLMProvider):
                                         function_clean.get("name", "<unknown>"),
                                     )
                                     repaired = {}
-                                function_clean["arguments"] = json.dumps(repaired, ensure_ascii=False)
+                                function_clean["arguments"] = json.dumps(
+                                    repaired, ensure_ascii=False
+                                )
                             else:
-                                function_clean["arguments"] = json.dumps(arguments, ensure_ascii=False)
+                                function_clean["arguments"] = json.dumps(
+                                    arguments, ensure_ascii=False
+                                )
                         tc_clean["function"] = function_clean
                     normalized_tool_calls.append(tc_clean)
                 clean["tool_calls"] = normalized_tool_calls
@@ -475,6 +501,207 @@ class LiteLLMProvider(LLMProvider):
         if len(tool_call_id) == 9 and tool_call_id.isalnum():
             return tool_call_id
         return hashlib.sha1(tool_call_id.encode()).hexdigest()[:9]
+
+    def _build_completion_kwargs(
+        self,
+        *,
+        messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]] | None,
+        model: str | None,
+        max_tokens: int,
+        temperature: float,
+        reasoning_effort: Literal["none", "low", "medium", "high"] | None,
+    ) -> tuple[dict[str, Any], str]:
+        """Build normalized LiteLLM request kwargs and return resolved model."""
+        original_model = model or self.default_model
+        request_config = self._get_request_config(original_model)
+        resolved_model = request_config.get("model") or original_model
+        request_provider_name = request_config.get("provider_name")
+        request_gateway = find_gateway(
+            request_provider_name,
+            request_config.get("api_key"),
+            request_config.get("api_base"),
+        )
+
+        original_gateway = self._gateway
+        self._gateway = request_gateway
+        try:
+            api_model = self._resolve_model(resolved_model)
+        finally:
+            self._gateway = original_gateway
+
+        use_ollama_cloud = False
+        ollama_model = api_model
+        if self._is_ollama_model(api_model):
+            ollama_model, use_ollama_cloud = self._resolve_ollama_cloud_routing(ollama_model)
+
+        if self._supports_cache_control(resolved_model):
+            messages, tools = self._apply_cache_control(messages, tools)
+
+        is_ollama = self._is_ollama_model(api_model)
+        if is_ollama:
+            messages = self._apply_ollama_multimodal(messages)
+
+        max_tokens = max(1, max_tokens)
+        kwargs: dict[str, Any] = {
+            "model": ollama_model,
+            "messages": self._sanitize_messages(
+                self._sanitize_empty_content(messages),
+                is_ollama=is_ollama,
+            ),
+            "max_tokens": max_tokens,
+            "temperature": temperature,
+        }
+
+        self._apply_model_overrides(ollama_model, kwargs)
+
+        provider_options = request_config.get("provider_options") or {}
+        reserved_option_keys = {
+            "model",
+            "messages",
+            "tools",
+            "tool_choice",
+            "api_key",
+            "api_base",
+            "extra_headers",
+        }
+        for key, value in provider_options.items():
+            if key not in reserved_option_keys:
+                kwargs[key] = value
+
+        request_api_key = request_config.get("api_key")
+        if request_api_key:
+            kwargs["api_key"] = request_api_key
+
+        request_api_base = request_config.get("api_base")
+        if request_api_base:
+            kwargs["api_base"] = request_api_base
+
+        request_extra_headers = request_config.get("extra_headers")
+        if request_extra_headers:
+            kwargs["extra_headers"] = request_extra_headers
+
+        if tools:
+            kwargs["tools"] = tools
+            kwargs["tool_choice"] = "auto"
+
+        effective_reasoning_effort = reasoning_effort or request_config.get("reasoning_effort")
+        if effective_reasoning_effort:
+            kwargs["reasoning_effort"] = effective_reasoning_effort
+
+        if self._is_ollama_model(api_model) and self._ollama_reasoning_enabled:
+            kwargs["think"] = True
+
+        return kwargs, ollama_model
+
+    @staticmethod
+    def _iter_stream_choices(chunk: Any) -> list[Any]:
+        choices = getattr(chunk, "choices", None)
+        if isinstance(choices, list):
+            return choices
+        return []
+
+    @staticmethod
+    def _extract_delta_text(delta: Any) -> str:
+        content = (
+            delta.get("content") if isinstance(delta, dict) else getattr(delta, "content", None)
+        )
+        if isinstance(content, str):
+            return content
+        if isinstance(content, list):
+            parts: list[str] = []
+            for item in content:
+                if isinstance(item, str):
+                    parts.append(item)
+                elif isinstance(item, dict) and isinstance(item.get("text"), str):
+                    parts.append(item["text"])
+                else:
+                    text = getattr(item, "text", None)
+                    if isinstance(text, str):
+                        parts.append(text)
+            return "".join(parts)
+        return ""
+
+    @staticmethod
+    def _iter_stream_tool_call_fragments(delta: Any) -> list[tuple[int, str | None, str, str]]:
+        raw_tool_calls = (
+            delta.get("tool_calls")
+            if isinstance(delta, dict)
+            else getattr(delta, "tool_calls", None)
+        )
+        if not isinstance(raw_tool_calls, list):
+            raw_tool_calls = []
+
+        fragments: list[tuple[int, str | None, str, str]] = []
+        for idx, tc in enumerate(raw_tool_calls):
+            if isinstance(tc, dict):
+                index = tc.get("index", idx)
+                function = tc.get("function") or {}
+                identifier = tc.get("id")
+                name = function.get("name") or ""
+                arguments = function.get("arguments") or ""
+            else:
+                index = getattr(tc, "index", idx)
+                function = getattr(tc, "function", None)
+                identifier = getattr(tc, "id", None)
+                name = getattr(function, "name", "") if function is not None else ""
+                arguments = getattr(function, "arguments", "") if function is not None else ""
+            fragments.append((int(index), identifier, str(name or ""), str(arguments or "")))
+
+        legacy = (
+            delta.get("function_call")
+            if isinstance(delta, dict)
+            else getattr(delta, "function_call", None)
+        )
+        if legacy:
+            name, arguments = _tool_function_parts(legacy)
+            fragments.append((0, None, str(name or ""), str(arguments or "")))
+        return fragments
+
+    @staticmethod
+    def _update_stream_tool_states(
+        states: dict[int, _StreamingToolCallState],
+        fragments: list[tuple[int, str | None, str, str]],
+    ) -> None:
+        for index, identifier, name, arguments in fragments:
+            state = states.setdefault(index, _StreamingToolCallState())
+            if identifier:
+                state.id = identifier
+            if name:
+                state.name = name
+            if arguments:
+                state.argument_parts.append(arguments)
+
+    @staticmethod
+    def _finalize_stream_tool_states(
+        states: dict[int, _StreamingToolCallState],
+    ) -> list[ToolCallRequest]:
+        tool_calls: list[ToolCallRequest] = []
+        for index in sorted(states):
+            state = states[index]
+            if not state.name:
+                continue
+            argument_text = "".join(state.argument_parts).strip()
+            parsed_arguments: Any = {}
+            if argument_text:
+                try:
+                    parsed_arguments = json_repair.loads(argument_text)
+                except Exception:
+                    logger.warning(
+                        "Failed to repair streamed tool-call arguments for {}",
+                        state.name,
+                    )
+                    parsed_arguments = {}
+            if not isinstance(parsed_arguments, dict):
+                parsed_arguments = {}
+            tool_calls.append(
+                ToolCallRequest(
+                    id=state.id or _short_tool_id(),
+                    name=state.name,
+                    arguments=parsed_arguments,
+                )
+            )
+        return tool_calls
 
     async def chat(
         self,
@@ -500,93 +727,14 @@ class LiteLLMProvider(LLMProvider):
         Returns:
             LLMResponse with content and/or tool calls.
         """
-        original_model = model or self.default_model
-        request_config = self._get_request_config(original_model)
-        resolved_model = request_config.get("model") or original_model
-        request_provider_name = request_config.get("provider_name")
-        request_gateway = find_gateway(
-            request_provider_name,
-            request_config.get("api_key"),
-            request_config.get("api_base"),
+        kwargs, ollama_model = self._build_completion_kwargs(
+            messages=messages,
+            tools=tools,
+            model=model,
+            max_tokens=max_tokens,
+            temperature=temperature,
+            reasoning_effort=reasoning_effort,
         )
-
-        original_gateway = self._gateway
-        self._gateway = request_gateway
-        try:
-            model = self._resolve_model(resolved_model)
-        finally:
-            self._gateway = original_gateway
-
-        # Check for Ollama :cloud routing
-        use_ollama_cloud = False
-        ollama_model = model
-        if self._is_ollama_model(model):
-            ollama_model, use_ollama_cloud = self._resolve_ollama_cloud_routing(ollama_model)
-
-        if self._supports_cache_control(resolved_model):
-            messages, tools = self._apply_cache_control(messages, tools)
-
-        # Apply Ollama multimodal support (image markers → images array)
-        is_ollama = self._is_ollama_model(model)
-        if is_ollama:
-            messages = self._apply_ollama_multimodal(messages)
-
-        # Clamp max_tokens to at least 1 — negative or zero values cause
-        # LiteLLM to reject the request with "max_tokens must be at least 1".
-        max_tokens = max(1, max_tokens)
-
-        kwargs: dict[str, Any] = {
-            "model": ollama_model,
-            "messages": self._sanitize_messages(self._sanitize_empty_content(messages), is_ollama=is_ollama),
-            "max_tokens": max_tokens,
-            "temperature": temperature,
-        }
-
-        # Apply model-specific overrides (e.g. kimi-k2.5 temperature)
-        self._apply_model_overrides(ollama_model, kwargs)
-
-        provider_options = request_config.get("provider_options") or {}
-        reserved_option_keys = {
-            "model",
-            "messages",
-            "tools",
-            "tool_choice",
-            "api_key",
-            "api_base",
-            "extra_headers",
-        }
-        for key, value in provider_options.items():
-            if key not in reserved_option_keys:
-                kwargs[key] = value
-
-        # Pass api_key directly — more reliable than env vars alone
-        request_api_key = request_config.get("api_key")
-        if request_api_key:
-            kwargs["api_key"] = request_api_key
-
-        # Pass api_base for custom endpoints
-        request_api_base = request_config.get("api_base")
-        if request_api_base:
-            kwargs["api_base"] = request_api_base
-
-        # Pass extra headers (e.g. APP-Code for AiHubMix)
-        request_extra_headers = request_config.get("extra_headers")
-        if request_extra_headers:
-            kwargs["extra_headers"] = request_extra_headers
-
-        if tools:
-            kwargs["tools"] = tools
-            kwargs["tool_choice"] = "auto"
-
-        # Add reasoning effort if specified (LiteLLM silently ignores if unsupported)
-        effective_reasoning_effort = reasoning_effort or request_config.get("reasoning_effort")
-        if effective_reasoning_effort:
-            kwargs["reasoning_effort"] = effective_reasoning_effort
-
-        # Ollama reasoning model support (think parameter)
-        # Some Ollama models (DeepSeek, etc.) support internal reasoning
-        if self._is_ollama_model(model) and self._ollama_reasoning_enabled:
-            kwargs["think"] = True
 
         try:
             response = await acompletion(**kwargs)
@@ -597,6 +745,71 @@ class LiteLLMProvider(LLMProvider):
                 content=f"Error calling LLM: {str(e)}",
                 finish_reason="error",
             )
+
+    async def stream_chat(
+        self,
+        messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]] | None = None,
+        model: str | None = None,
+        max_tokens: int = 4096,
+        temperature: float = 0.7,
+        reasoning_effort: Literal["none", "low", "medium", "high"] | None = None,
+    ):
+        """Yield typed streaming events from LiteLLM when supported."""
+        kwargs, _ = self._build_completion_kwargs(
+            messages=messages,
+            tools=tools,
+            model=model,
+            max_tokens=max_tokens,
+            temperature=temperature,
+            reasoning_effort=reasoning_effort,
+        )
+        kwargs["stream"] = True
+
+        finish_reason = "stop"
+        usage: dict[str, int] = {}
+        reasoning_parts: list[str] = []
+        tool_states: dict[int, _StreamingToolCallState] = {}
+
+        stream = await acompletion(**kwargs)
+        async for chunk in stream:
+            chunk_usage = getattr(chunk, "usage", None)
+            if chunk_usage:
+                usage = {
+                    "prompt_tokens": getattr(chunk_usage, "prompt_tokens", 0),
+                    "completion_tokens": getattr(chunk_usage, "completion_tokens", 0),
+                    "total_tokens": getattr(chunk_usage, "total_tokens", 0),
+                }
+
+            for choice in self._iter_stream_choices(chunk):
+                finish_reason = getattr(choice, "finish_reason", None) or finish_reason
+                delta = getattr(choice, "delta", None)
+                if delta is None:
+                    continue
+
+                text = self._extract_delta_text(delta)
+                if text:
+                    yield TextDeltaEvent(delta=text)
+
+                reasoning = (
+                    delta.get("reasoning_content")
+                    if isinstance(delta, dict)
+                    else getattr(delta, "reasoning_content", None)
+                )
+                if isinstance(reasoning, str) and reasoning:
+                    reasoning_parts.append(reasoning)
+
+                fragments = self._iter_stream_tool_call_fragments(delta)
+                if fragments:
+                    self._update_stream_tool_states(tool_states, fragments)
+
+        for tool_call in self._finalize_stream_tool_states(tool_states):
+            yield ToolCallEvent(tool_call=tool_call)
+        yield ResponseDoneEvent(
+            finish_reason=finish_reason,
+            usage=usage,
+            reasoning_content="".join(reasoning_parts) or None,
+        )
 
     def _parse_response(self, response: Any, model: str | None = None) -> LLMResponse:
         """Parse LiteLLM response into our standard format.
@@ -638,7 +851,9 @@ class LiteLLMProvider(LLMProvider):
         else:
             tool_calls = []
             for tc in raw_tool_calls:
-                function = tc.get("function") if isinstance(tc, dict) else getattr(tc, "function", None)
+                function = (
+                    tc.get("function") if isinstance(tc, dict) else getattr(tc, "function", None)
+                )
                 name, args = _tool_function_parts(function)
 
                 if not name:
@@ -650,27 +865,37 @@ class LiteLLMProvider(LLMProvider):
                 if isinstance(args, str):
                     args = json_repair.loads(args)
 
-                tool_calls.append(ToolCallRequest(
-                    id=(tc.get("id") if isinstance(tc, dict) else getattr(tc, "id", None)) or _short_tool_id(),
-                    name=name,
-                    arguments=args,
-                ))
+                tool_calls.append(
+                    ToolCallRequest(
+                        id=(tc.get("id") if isinstance(tc, dict) else getattr(tc, "id", None))
+                        or _short_tool_id(),
+                        name=name,
+                        arguments=args,
+                    )
+                )
 
             if not raw_tool_calls and hasattr(message, "tool_calls") and message.tool_calls:
                 for tc in message.tool_calls:
                     # Parse arguments from JSON string if needed
-                    function = tc.get("function") if isinstance(tc, dict) else getattr(tc, "function", None)
+                    function = (
+                        tc.get("function")
+                        if isinstance(tc, dict)
+                        else getattr(tc, "function", None)
+                    )
                     name, args = _tool_function_parts(function)
                     if not name:
                         continue
                     if isinstance(args, str):
                         args = json_repair.loads(args)
 
-                    tool_calls.append(ToolCallRequest(
-                        id=(tc.get("id") if isinstance(tc, dict) else getattr(tc, "id", None)) or _short_tool_id(),
-                        name=name,
-                        arguments=args,
-                    ))
+                    tool_calls.append(
+                        ToolCallRequest(
+                            id=(tc.get("id") if isinstance(tc, dict) else getattr(tc, "id", None))
+                            or _short_tool_id(),
+                            name=name,
+                            arguments=args,
+                        )
+                    )
 
         usage = {}
         if hasattr(response, "usage") and response.usage:

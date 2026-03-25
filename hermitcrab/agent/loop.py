@@ -441,6 +441,29 @@ class AgentLoop:
             reasoning_effort=reasoning_effort,
         )
 
+    async def _stream_chat(
+        self,
+        *,
+        messages: list[dict[str, Any]],
+        model: str,
+        temperature: float,
+        max_tokens: int,
+        tools: list[dict[str, Any]] | None = None,
+        job_class: JobClass | None = None,
+        reasoning_effort: str | None = None,
+    ):
+        """Yield typed provider stream events when the provider supports them."""
+        del job_class
+        async for event in self.provider.stream_chat(
+            messages=messages,
+            tools=tools,
+            model=model,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            reasoning_effort=reasoning_effort,
+        ):
+            yield event
+
     def _schedule_background(
         self,
         coro: Awaitable,
@@ -1074,6 +1097,9 @@ class AgentLoop:
                 reasoning_effort=self._reasoning_effort,
             ),
             chat_callable=self._chat_with_retry,
+            stream_chat_callable=(
+                self._stream_chat if isinstance(self.provider, LLMProvider) else None
+            ),
             get_model_for_job=self._get_model_for_job,
             strip_think=self._strip_think,
             tool_hint=self._tool_hint,
