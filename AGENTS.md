@@ -196,6 +196,8 @@ Recent implementation and debugging takeaways:
 
 - HermitCrab's biggest reliability risk remains the provider/tool-call boundary.
 - Empty replies after tool use, raw JSON tool calls, and XML-like inline tool calls are real failure modes and must be handled in Python.
+- Typed provider streaming events now exist for text deltas, tool calls, and terminal metadata; prefer consuming those over recovering tool intent from streamed text when a provider can supply them.
+- Provider-side accumulation of partial streamed tool-call arguments is now the preferred fix for SSE fragmentation; keep inline JSON/XML recovery as a fallback path, not the primary mechanism.
 - Native Ollama transport should remain narrow, explicit, and protocol-aware.
 - Provider-safe message construction should stay centralized so loops, subagents, and providers do not drift.
 - Deterministic delegation hints are useful for substantial implementation grunt work, but policy should not rely only on prompt wording.
@@ -232,6 +234,9 @@ Recent nearby-project takeaways worth preserving:
 - `OpenClaw` centralizes provider/model quirks in a capability registry instead of scattering ad-hoc conditionals; HermitCrab should move in that direction as provider edge-case handling grows.
 - `OpenClaw`'s compaction safeguards use explicit structural sections, recent-turn preservation, exact-identifier preservation, and tool-failure harvesting; adapt those ideas to improve HermitCrab journal/digest quality without importing the whole subsystem.
 - `OpenClaw` also uses strong dependency-injection seams around stateful runtime code; prefer that style when making HermitCrab coordinator, provider, or session-state code more testable.
+- `ZeroClaw`'s recent releases added typed streaming tool events and provider-side SSE tool-call accumulation; adapt that style to reduce raw JSON/XML leakage and make the provider/tool boundary more deterministic in HermitCrab.
+- `ZeroClaw` also added boundary-aware context compression with provider-error limit parsing and tool-pair repair; borrow those ideas when HermitCrab needs stronger long-session history compaction beyond prompt-budget trimming.
+- `ZeroClaw`'s delegation path sharpens subagent boundaries with per-agent tool allowlists and enriched subagent prompts; reuse the bounded-tool-surface idea when tightening HermitCrab coordinator/subagent behavior, without importing the full delegate subsystem.
 
 ## Next Targets
 The next milestone should prioritize the following urgent targets:
