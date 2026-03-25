@@ -9,7 +9,14 @@ from hermitcrab.agent.distillation import AtomicCandidate, CandidateType
 from hermitcrab.agent.loop import AgentLoop
 from hermitcrab.agent.turn_runner import TurnRunner
 from hermitcrab.bus.events import InboundMessage
-from hermitcrab.providers.base import LLMResponse, ToolCallRequest
+from hermitcrab.providers.base import (
+    LLMProvider,
+    LLMResponse,
+    ResponseDoneEvent,
+    TextDeltaEvent,
+    ToolCallEvent,
+    ToolCallRequest,
+)
 
 
 @pytest.fixture
@@ -118,6 +125,89 @@ async def test_run_agent_loop_normalizes_string_tool_arguments(agent_loop, mock_
 
     assert final_content == "done"
     assert tools_used == ["read_memory"]
+
+
+@pytest.mark.asyncio
+async def test_run_agent_loop_executes_streamed_tool_calls_without_chat_fallback(
+    mock_bus, tmp_path
+):
+    """Typed provider tool events should drive the loop without raw-text recovery."""
+    batches = [
+        [
+            ToolCallEvent(
+                tool_call=ToolCallRequest(
+                    id="1", name="read_memory", arguments={"category": "facts"}
+                )
+            ),
+            ResponseDoneEvent(finish_reason="tool_calls"),
+        ],
+        [TextDeltaEvent(delta="done"), ResponseDoneEvent(finish_reason="stop")],
+    ]
+
+    class StreamingProvider(LLMProvider):
+        async def chat(self, *args, **kwargs):
+            raise AssertionError("chat fallback should not run")
+
+        async def stream_chat(self, *args, **kwargs):
+            for event in batches.pop(0):
+                yield event
+
+        def get_default_model(self) -> str:
+            return "test-model"
+
+    agent_loop = AgentLoop(
+        bus=mock_bus,
+        provider=StreamingProvider(),
+        workspace=tmp_path,
+        llm_max_retries=1,
+        llm_retry_base_delay_s=0.0,
+        max_identical_tool_cycles=2,
+    )
+
+    final_content, tools_used, _ = await agent_loop._run_agent_loop(
+        [{"role": "user", "content": "check memory"}]
+    )
+
+    assert final_content == "done"
+    assert tools_used == ["read_memory"]
+
+
+@pytest.mark.asyncio
+async def test_run_agent_loop_falls_back_to_chat_when_streaming_fails(mock_bus, tmp_path):
+    """Streaming failures should degrade to the existing non-streaming path."""
+
+    class FallbackProvider(LLMProvider):
+        def __init__(self):
+            super().__init__()
+            self.chat_mock = AsyncMock(return_value=LLMResponse(content="done"))
+
+        async def chat(self, *args, **kwargs):
+            return await self.chat_mock(*args, **kwargs)
+
+        async def stream_chat(self, *args, **kwargs):
+            raise RuntimeError("stream broke")
+            yield  # pragma: no cover
+
+        def get_default_model(self) -> str:
+            return "test-model"
+
+    provider = FallbackProvider()
+    agent_loop = AgentLoop(
+        bus=mock_bus,
+        provider=provider,
+        workspace=tmp_path,
+        llm_max_retries=1,
+        llm_retry_base_delay_s=0.0,
+        max_identical_tool_cycles=2,
+    )
+
+    final_content, tools_used, _ = await agent_loop._run_agent_loop(
+        [{"role": "user", "content": "check memory"}]
+    )
+
+    assert final_content == "done"
+    assert tools_used == []
+    provider.chat_mock.assert_awaited_once()
 
 
 @pytest.mark.asyncio
