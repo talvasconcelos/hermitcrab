@@ -158,6 +158,7 @@ def test_onboard_bootstrap_templates_include_continuity_and_delegation_guidance(
     assert "Check the recent conversation before answering" in agents_text
     assert "Broad, strategic, or ambiguous work stays owned by the main agent." in agents_text
     assert "Check the recent conversation first" in tools_text
+    assert "Use `session_search` when the user references a past conversation" in tools_text
     assert "If the same fix fails three times in a row" in tools_text
     assert "Shopping lists, reusable checklists, reference notes" in tools_text
 

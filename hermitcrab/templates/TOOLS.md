@@ -6,6 +6,7 @@ Tool signatures provided via function calling. Non-obvious constraints below.
 
 - Check the recent conversation first when the user seems to be replying to your own prior message.
 - Use memory search for durable facts, decisions, workflows, and preferences.
+- Use `session_search` when the user references a past conversation and recent chat context is not enough.
 - Do not say you lack context until you have checked both recent conversation and memory when relevant.
 
 ## Memory vs Knowledge

@@ -617,6 +617,26 @@ async def test_process_message_uses_recent_archived_history_for_same_chat_follow
 
 
 @pytest.mark.asyncio
+async def test_session_search_tool_finds_archived_transcript(agent_loop):
+    session = agent_loop.sessions.get_or_create("nostr:chat")
+    session.messages = [
+        {"role": "user", "content": "Please store the groceries list as a knowledge note."},
+        {"role": "assistant", "content": "Done, I saved it in knowledge/notes/Groceries list.md."},
+    ]
+    agent_loop.sessions.save(session)
+    agent_loop.sessions.archive(session, "timeout")
+
+    tool = agent_loop.tools.get("session_search")
+    assert tool is not None
+
+    result = await tool.execute(query="groceries list", max_results=3)
+
+    assert "Found 1 matching session" in result
+    assert "nostr:chat" in result
+    assert "knowledge/notes/Groceries list.md" in result
+
+
+@pytest.mark.asyncio
 async def test_distillation_skips_null_candidates(agent_loop, mock_provider):
     session = agent_loop.sessions.get_or_create("cli:test-distill")
     session.messages = [

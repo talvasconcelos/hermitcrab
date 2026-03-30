@@ -76,6 +76,7 @@ from hermitcrab.agent.tools.memory import (
 )
 from hermitcrab.agent.tools.message import MessageTool
 from hermitcrab.agent.tools.registry import ToolRegistry
+from hermitcrab.agent.tools.session_search import SessionSearchTool
 from hermitcrab.agent.tools.shell import ExecTool
 from hermitcrab.agent.tools.spawn import SpawnTool
 from hermitcrab.agent.tools.web import WebFetchTool, WebSearchTool
@@ -302,6 +303,7 @@ class AgentLoop:
 
         self.tools.register(ReadMemoryTool(self.memory))
         self.tools.register(SearchMemoryTool(self.memory))
+        self.tools.register(SessionSearchTool(self.sessions))
         self.tools.register(WriteFactTool(self.memory))
         self.tools.register(WriteDecisionTool(self.memory))
         self.tools.register(WriteGoalTool(self.memory))

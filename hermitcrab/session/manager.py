@@ -144,6 +144,11 @@ class SessionManager:
             reverse=True,
         )
 
+    def _all_session_paths(self) -> list[Path]:
+        """Return active and archived session files, newest first."""
+        paths = list(self.sessions_dir.glob("*.jsonl")) + list(self.archive_dir.glob("*.jsonl"))
+        return sorted(paths, key=lambda path: path.stat().st_mtime, reverse=True)
+
     def get_or_create(self, key: str) -> Session:
         """
         Get an existing session or create a new one.
@@ -187,6 +192,7 @@ class SessionManager:
 
     def _load_from_path(self, path: Path, *, key: str) -> Session:
         """Load a session object from a specific JSONL path."""
+        session_key = key
         messages = []
         metadata = {}
         created_at = None
@@ -201,6 +207,7 @@ class SessionManager:
                 data = json.loads(line)
 
                 if data.get("_type") == "metadata":
+                    session_key = str(data.get("key") or session_key)
                     metadata = data.get("metadata", {})
                     created_at = (
                         datetime.fromisoformat(data["created_at"])
@@ -216,7 +223,7 @@ class SessionManager:
                     messages.append(data)
 
         return Session(
-            key=key,
+            key=session_key,
             messages=messages,
             created_at=created_at or datetime.now(),
             updated_at=updated_at or datetime.now(),
@@ -289,6 +296,89 @@ class SessionManager:
             if history:
                 return history
         return []
+
+    def search_history(
+        self,
+        query: str,
+        *,
+        max_results: int = 3,
+        max_messages: int = 6,
+    ) -> list[dict[str, Any]]:
+        """Search current and archived sessions for matching conversation history."""
+        normalized_query = " ".join(query.lower().split())
+        if not normalized_query:
+            return []
+
+        results: list[dict[str, Any]] = []
+        seen_keys: set[str] = set()
+
+        for path in self._all_session_paths():
+            try:
+                session = self._load_from_path(path, key=path.stem.replace("_", ":", 1))
+            except Exception:
+                logger.exception("Failed to search session path {}", path)
+                continue
+
+            excerpts = self._matching_excerpts(
+                session.messages,
+                normalized_query,
+                max_messages=max_messages,
+            )
+            if not excerpts:
+                continue
+
+            result_key = f"{session.key}:{path.name}"
+            if result_key in seen_keys:
+                continue
+            seen_keys.add(result_key)
+            results.append(
+                {
+                    "session_key": session.key,
+                    "updated_at": session.updated_at.isoformat(),
+                    "archived": path.parent == self.archive_dir,
+                    "path": str(path),
+                    "excerpts": excerpts,
+                }
+            )
+            if len(results) >= max_results:
+                break
+
+        return results
+
+    @staticmethod
+    def _matching_excerpts(
+        messages: list[dict[str, Any]],
+        normalized_query: str,
+        *,
+        max_messages: int,
+    ) -> list[str]:
+        """Extract compact matched windows from session messages."""
+        excerpts: list[str] = []
+        for index, message in enumerate(messages):
+            content = message.get("content")
+            if not isinstance(content, str):
+                continue
+            normalized_content = " ".join(content.lower().split())
+            if normalized_query not in normalized_content:
+                continue
+
+            start = max(0, index - 1)
+            end = min(len(messages), index + max_messages - 1)
+            lines: list[str] = []
+            for excerpt_message in messages[start:end]:
+                role = str(excerpt_message.get("role") or "unknown")
+                excerpt_content = str(excerpt_message.get("content") or "").strip()
+                if not excerpt_content:
+                    continue
+                excerpt_content = excerpt_content[:220]
+                if len(str(excerpt_message.get("content") or "").strip()) > 220:
+                    excerpt_content += "..."
+                lines.append(f"{role}: {excerpt_content}")
+            if lines:
+                excerpts.append("\n".join(lines))
+            if len(excerpts) >= 2:
+                break
+        return excerpts
 
     def list_sessions(self) -> list[dict[str, Any]]:
         """
