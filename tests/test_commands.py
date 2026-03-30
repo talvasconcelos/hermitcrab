@@ -1,5 +1,7 @@
 import asyncio
+import os
 import shutil
+import stat
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -10,11 +12,13 @@ from typer.testing import CliRunner
 from hermitcrab.cli.commands import (
     _atomic_write_text,
     _build_job_models_from_config,
+    _build_onboard_next_steps,
     _build_runtime_model_aliases,
     _get_tty_stdin_fd,
     _should_render_progress,
     app,
 )
+from hermitcrab.config.loader import save_config
 from hermitcrab.config.schema import Config, ModelAliasConfig
 from hermitcrab.providers.litellm_provider import LiteLLMProvider
 from hermitcrab.providers.openai_codex_provider import _strip_model_prefix
@@ -155,6 +159,37 @@ def test_onboard_bootstrap_templates_include_continuity_and_delegation_guidance(
     assert "Broad, strategic, or ambiguous work stays owned by the main agent." in agents_text
     assert "Check the recent conversation first" in tools_text
     assert "If the same fix fails three times in a row" in tools_text
+
+
+def test_build_onboard_next_steps_prefers_local_ollama_when_installed():
+    with patch("hermitcrab.cli.commands.shutil.which", return_value="/usr/bin/ollama"):
+        steps = _build_onboard_next_steps()
+
+    rendered = "\n".join(steps)
+    assert "ollama" in rendered.lower()
+    assert "openrouter" not in rendered.lower()
+
+
+def test_build_onboard_next_steps_shows_local_and_cloud_options_without_ollama():
+    with patch("hermitcrab.cli.commands.shutil.which", return_value=None):
+        steps = _build_onboard_next_steps()
+
+    rendered = "\n".join(steps)
+    assert "ollama" in rendered.lower()
+    assert "openrouter" in rendered.lower()
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX permissions only")
+def test_save_config_hardens_file_and_directory_permissions(tmp_path):
+    config_path = tmp_path / ".hermitcrab" / "config.json"
+
+    save_config(Config(), config_path=config_path)
+
+    dir_mode = stat.S_IMODE(config_path.parent.stat().st_mode)
+    file_mode = stat.S_IMODE(config_path.stat().st_mode)
+
+    assert dir_mode == 0o700
+    assert file_mode == 0o600
 
 
 def test_config_matches_github_copilot_codex_with_hyphen_prefix():
@@ -359,7 +394,10 @@ def test_agent_interactive_exit_closes_loop_resources(tmp_path):
         patch("hermitcrab.cli.commands._init_prompt_session"),
         patch("hermitcrab.cli.commands._flush_pending_tty_input"),
         patch("hermitcrab.cli.commands._restore_terminal"),
-        patch("hermitcrab.cli.commands._read_interactive_input_async", fake_read_interactive_input_async),
+        patch(
+            "hermitcrab.cli.commands._read_interactive_input_async",
+            fake_read_interactive_input_async,
+        ),
         patch("hermitcrab.cli.commands.signal.signal"),
     ):
         result = runner.invoke(app, ["agent"])

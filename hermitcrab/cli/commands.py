@@ -4,6 +4,7 @@ import asyncio
 import os
 import re
 import select
+import shutil
 import signal
 import sys
 import tempfile
@@ -370,10 +371,8 @@ def onboard():
     _create_workspace_templates(workspace)
 
     console.print(f"\n{__logo__} hermitcrab is ready!")
-    console.print("\nNext steps:")
-    console.print("  1. Add your API key to [cyan]~/.hermitcrab/config.json[/cyan]")
-    console.print("     Get one at: https://openrouter.ai/keys")
-    console.print('  2. Chat: [cyan]hermitcrab agent -m "Hello!"[/cyan]')
+    for line in _build_onboard_next_steps():
+        console.print(line)
 
 
 def _create_workspace_templates(workspace: Path):
@@ -414,6 +413,32 @@ def _create_workspace_templates(workspace: Path):
     console.print("  [dim]Created scratchpads/ and scratchpads/archive/[/dim]")
 
     (workspace / "skills").mkdir(exist_ok=True)
+
+
+def _build_onboard_next_steps() -> list[str]:
+    """Build concise first-run guidance based on the local environment."""
+    lines = ["\nNext steps:"]
+
+    if shutil.which("ollama"):
+        lines.extend(
+            [
+                "  1. Recommended local setup detected: [cyan]ollama[/cyan] is installed",
+                "     Start it with [cyan]ollama serve[/cyan] and pull a model like [cyan]ollama pull qwen3.5:4b[/cyan]",
+                "  2. Review [cyan]~/.hermitcrab/config.json[/cyan] and point your main model at Ollama or your preferred provider",
+                '  3. Start chatting: [cyan]hermitcrab agent[/cyan] or [cyan]hermitcrab agent -m "Hello!"[/cyan]',
+            ]
+        )
+        return lines
+
+    lines.extend(
+        [
+            "  1. Choose a provider in [cyan]~/.hermitcrab/config.json[/cyan]",
+            "     - Local: install [cyan]Ollama[/cyan] from https://ollama.com and use its local OpenAI-compatible endpoint",
+            "     - Cloud: add an API key such as OpenRouter from https://openrouter.ai/keys",
+            '  2. Start chatting: [cyan]hermitcrab agent[/cyan] or [cyan]hermitcrab agent -m "Hello!"[/cyan]',
+        ]
+    )
+    return lines
 
 
 def _make_provider(config: Config):

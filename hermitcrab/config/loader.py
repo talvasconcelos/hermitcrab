@@ -1,6 +1,8 @@
 """Configuration loading utilities."""
 
 import json
+import os
+import tempfile
 from pathlib import Path
 
 from hermitcrab.config.schema import Config
@@ -14,6 +16,7 @@ def get_config_path() -> Path:
 def get_data_dir() -> Path:
     """Get the hermitcrab data directory."""
     from hermitcrab.utils.helpers import get_data_path
+
     return get_data_path()
 
 
@@ -52,11 +55,34 @@ def save_config(config: Config, config_path: Path | None = None) -> None:
     """
     path = config_path or get_config_path()
     path.parent.mkdir(parents=True, exist_ok=True)
+    _tighten_permissions(path.parent, 0o700)
 
     data = config.model_dump(by_alias=True)
+    tmp_path: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            "w",
+            encoding="utf-8",
+            dir=path.parent,
+            delete=False,
+        ) as tmp:
+            json.dump(data, tmp, indent=2, ensure_ascii=False)
+            tmp.write("\n")
+            tmp_path = Path(tmp.name)
+        _tighten_permissions(tmp_path, 0o600)
+        tmp_path.replace(path)
+        _tighten_permissions(path, 0o600)
+    except OSError:
+        if tmp_path is not None:
+            tmp_path.unlink(missing_ok=True)
+        raise
 
-    with open(path, "w", encoding="utf-8") as f:
-        json.dump(data, f, indent=2, ensure_ascii=False)
+
+def _tighten_permissions(path: Path, mode: int) -> None:
+    """Best-effort permission hardening for local config files and directories."""
+    if os.name == "nt":
+        return
+    path.chmod(mode)
 
 
 def _migrate_config(data: dict) -> dict:
