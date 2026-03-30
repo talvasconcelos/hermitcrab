@@ -192,29 +192,23 @@ class WriteFactTool(Tool):
         return {
             "type": "object",
             "properties": {
-                "title": {
-                    "type": "string",
-                    "description": "Short descriptive title for this fact"
-                },
+                "title": {"type": "string", "description": "Short descriptive title for this fact"},
                 "content": {
                     "type": "string",
-                    "description": "The fact content. Use wikilinks [[Like This]] to connect related memories."
+                    "description": "The fact content. Use wikilinks [[Like This]] to connect related memories.",
                 },
                 "tags": {
                     "type": "array",
                     "items": {"type": "string"},
-                    "description": "Optional tags for categorization"
+                    "description": "Optional tags for categorization",
                 },
-                "confidence": {
-                    "type": "number",
-                    "description": "Confidence level (0.0-1.0)"
-                },
+                "confidence": {"type": "number", "description": "Confidence level (0.0-1.0)"},
                 "source": {
                     "type": "string",
-                    "description": "Source of the fact (e.g., 'user statement', 'web search')"
-                }
+                    "description": "Source of the fact (e.g., 'user statement', 'web search')",
+                },
             },
-            "required": ["title", "content"]
+            "required": ["title", "content"],
         }
 
     async def execute(
@@ -224,7 +218,7 @@ class WriteFactTool(Tool):
         tags: list[str] | None = None,
         confidence: float | None = None,
         source: str | None = None,
-        **kwargs: Any
+        **kwargs: Any,
     ) -> str:
         try:
             item = self.memory.write_fact(
@@ -262,38 +256,32 @@ class WriteDecisionTool(Tool):
         return {
             "type": "object",
             "properties": {
-                "title": {
-                    "type": "string",
-                    "description": "Short descriptive title"
-                },
+                "title": {"type": "string", "description": "Short descriptive title"},
                 "content": {
                     "type": "string",
                     "description": (
                         "Decision content describing the committed choice. "
                         "Do not store recommendations or reports here. "
                         "Use wikilinks [[Like This]] to connect related memories."
-                    )
+                    ),
                 },
                 "tags": {
                     "type": "array",
                     "items": {"type": "string"},
-                    "description": "Optional tags"
+                    "description": "Optional tags",
                 },
                 "status": {
                     "type": "string",
                     "enum": ["active", "superseded"],
-                    "description": "Decision status"
+                    "description": "Decision status",
                 },
                 "rationale": {
                     "type": "string",
-                    "description": "Reasoning behind the committed decision"
+                    "description": "Reasoning behind the committed decision",
                 },
-                "supersedes": {
-                    "type": "string",
-                    "description": "ID of decision this supersedes"
-                }
+                "supersedes": {"type": "string", "description": "ID of decision this supersedes"},
             },
-            "required": ["title", "content"]
+            "required": ["title", "content"],
         }
 
     async def execute(
@@ -304,7 +292,7 @@ class WriteDecisionTool(Tool):
         status: str = "active",
         rationale: str | None = None,
         supersedes: str | None = None,
-        **kwargs: Any
+        **kwargs: Any,
     ) -> str:
         try:
             item = self.memory.write_decision(
@@ -342,31 +330,28 @@ class WriteGoalTool(Tool):
         return {
             "type": "object",
             "properties": {
-                "title": {
-                    "type": "string",
-                    "description": "Short descriptive title"
-                },
+                "title": {"type": "string", "description": "Short descriptive title"},
                 "content": {
                     "type": "string",
-                    "description": "Goal content. Use wikilinks [[Like This]] to connect related memories."
+                    "description": "Goal content. Use wikilinks [[Like This]] to connect related memories.",
                 },
                 "tags": {
                     "type": "array",
                     "items": {"type": "string"},
-                    "description": "Optional tags"
+                    "description": "Optional tags",
                 },
                 "status": {
                     "type": "string",
                     "enum": ["active", "achieved", "abandoned"],
-                    "description": "Goal status"
+                    "description": "Goal status",
                 },
                 "priority": {
                     "type": "string",
                     "enum": ["low", "medium", "high"],
-                    "description": "Goal priority"
-                }
+                    "description": "Goal priority",
+                },
             },
-            "required": ["title", "content"]
+            "required": ["title", "content"],
         }
 
     async def execute(
@@ -376,7 +361,7 @@ class WriteGoalTool(Tool):
         tags: list[str] | None = None,
         status: str = "active",
         priority: str | None = None,
-        **kwargs: Any
+        **kwargs: Any,
     ) -> str:
         try:
             item = self.memory.write_goal(
@@ -405,6 +390,8 @@ class WriteTaskTool(Tool):
     def description(self) -> str:
         return (
             "Save a task to memory (action items, todos, things to do). "
+            "Use only when someone should actually do or track the item. "
+            "Do not use for reference lists, shopping lists, checklists, or notes that should live in knowledge. "
             "Use wikilinks [[Like This]] to connect to related [[Goals]], [[Decisions]], or other [[Tasks]]. "
             "Example: 'Implement feature X for [[Project Alpha]] to achieve [[Q2 Goals]].'"
         )
@@ -414,39 +401,33 @@ class WriteTaskTool(Tool):
         return {
             "type": "object",
             "properties": {
-                "title": {
-                    "type": "string",
-                    "description": "Short descriptive title"
-                },
+                "title": {"type": "string", "description": "Short descriptive title"},
                 "content": {
                     "type": "string",
-                    "description": "Task content. Use wikilinks [[Like This]] to connect related memories."
+                    "description": "Task content. Use wikilinks [[Like This]] to connect related memories.",
                 },
-                "assignee": {
-                    "type": "string",
-                    "description": "Who is responsible for this task"
-                },
+                "assignee": {"type": "string", "description": "Who is responsible for this task"},
                 "tags": {
                     "type": "array",
                     "items": {"type": "string"},
-                    "description": "Optional tags"
+                    "description": "Optional tags",
                 },
                 "status": {
                     "type": "string",
                     "enum": ["open", "in_progress", "done", "deferred"],
-                    "description": "Task status"
+                    "description": "Task status",
                 },
                 "deadline": {
                     "type": "string",
-                    "description": "Task deadline (e.g., '2026-03-01', 'next week')"
+                    "description": "Task deadline (e.g., '2026-03-01', 'next week')",
                 },
                 "priority": {
                     "type": "string",
                     "enum": ["low", "medium", "high"],
-                    "description": "Task priority"
-                }
+                    "description": "Task priority",
+                },
             },
-            "required": ["title", "content", "assignee"]
+            "required": ["title", "content", "assignee"],
         }
 
     async def execute(
@@ -458,7 +439,7 @@ class WriteTaskTool(Tool):
         status: str = "open",
         deadline: str | None = None,
         priority: str | None = None,
-        **kwargs: Any
+        **kwargs: Any,
     ) -> str:
         try:
             item = self.memory.write_task(
@@ -497,25 +478,22 @@ class WriteReflectionTool(Tool):
         return {
             "type": "object",
             "properties": {
-                "title": {
-                    "type": "string",
-                    "description": "Short descriptive title"
-                },
+                "title": {"type": "string", "description": "Short descriptive title"},
                 "content": {
                     "type": "string",
-                    "description": "Reflection content. Use wikilinks [[Like This]] to connect related memories."
+                    "description": "Reflection content. Use wikilinks [[Like This]] to connect related memories.",
                 },
                 "tags": {
                     "type": "array",
                     "items": {"type": "string"},
-                    "description": "Optional tags"
+                    "description": "Optional tags",
                 },
                 "context": {
                     "type": "string",
-                    "description": "Context or situation that prompted this reflection"
-                }
+                    "description": "Context or situation that prompted this reflection",
+                },
             },
-            "required": ["title", "content"]
+            "required": ["title", "content"],
         }
 
     async def execute(
@@ -524,7 +502,7 @@ class WriteReflectionTool(Tool):
         content: str,
         tags: list[str] | None = None,
         context: str | None = None,
-        **kwargs: Any
+        **kwargs: Any,
     ) -> str:
         try:
             item = self.memory.write_reflection(

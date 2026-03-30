@@ -496,6 +496,40 @@ async def test_run_agent_loop_returns_honest_fallback_after_repeated_empty_post_
 
 
 @pytest.mark.asyncio
+async def test_run_agent_loop_returns_user_facing_fallback_for_successful_write_task(
+    agent_loop, mock_provider
+):
+    """Successful write-style tool results should degrade to user-facing confirmations."""
+    mock_provider.chat.side_effect = [
+        LLMResponse(
+            content=None,
+            tool_calls=[
+                ToolCallRequest(
+                    id="1",
+                    name="write_task",
+                    arguments={
+                        "title": "Groceries list",
+                        "content": "Buy snacks and water.",
+                        "assignee": "tal",
+                    },
+                )
+            ],
+        ),
+        LLMResponse(content=""),
+        LLMResponse(content="   "),
+    ]
+
+    final_content, tools_used, _ = await agent_loop._run_agent_loop(
+        [{"role": "user", "content": "make a groceries list"}]
+    )
+
+    assert final_content == "Done — Task saved: Groceries list (assigned to tal)"
+    assert "model stopped before writing the final answer" not in final_content.lower()
+    assert tools_used == ["write_task"]
+    assert mock_provider.chat.await_count == 3
+
+
+@pytest.mark.asyncio
 async def test_process_message_persists_final_assistant_reply(agent_loop, mock_provider):
     """The saved session should include the exact assistant reply shown to the user."""
     mock_provider.chat.return_value = LLMResponse(content="done")

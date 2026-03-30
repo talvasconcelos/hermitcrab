@@ -159,6 +159,7 @@ def test_onboard_bootstrap_templates_include_continuity_and_delegation_guidance(
     assert "Broad, strategic, or ambiguous work stays owned by the main agent." in agents_text
     assert "Check the recent conversation first" in tools_text
     assert "If the same fix fails three times in a row" in tools_text
+    assert "Shopping lists, reusable checklists, reference notes" in tools_text
 
 
 def test_build_onboard_next_steps_prefers_local_ollama_when_installed():

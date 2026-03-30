@@ -31,31 +31,24 @@ class KnowledgeSearchTool(Tool):
             "properties": {
                 "query": {
                     "type": "string",
-                    "description": "Search query - keywords, topics, or concepts to find"
+                    "description": "Search query - keywords, topics, or concepts to find",
                 },
                 "categories": {
                     "type": "array",
-                    "items": {
-                        "type": "string",
-                        "enum": ["articles", "books", "docs", "notes"]
-                    },
-                    "description": "Limit search to specific categories (optional)"
+                    "items": {"type": "string", "enum": ["articles", "books", "docs", "notes"]},
+                    "description": "Limit search to specific categories (optional)",
                 },
                 "max_results": {
                     "type": "integer",
                     "description": "Maximum results to return (default: 5)",
-                    "default": 5
-                }
+                    "default": 5,
+                },
             },
-            "required": ["query"]
+            "required": ["query"],
         }
 
     async def execute(
-        self,
-        query: str,
-        categories: list[str] | None = None,
-        max_results: int = 5,
-        **kwargs: Any
+        self, query: str, categories: list[str] | None = None, max_results: int = 5, **kwargs: Any
     ) -> str:
         try:
             results = self.knowledge.search(
@@ -108,7 +101,7 @@ class KnowledgeIngestTool(Tool):
     def description(self) -> str:
         return (
             "Ingest new content into the knowledge base. "
-            "Use to save articles, documentation, notes, or reference material for future retrieval. "
+            "Use to save articles, documentation, notes, reference material, reusable checklists, or shopping lists for future retrieval. "
             "Content is stored as markdown files with optional metadata. "
             "This does NOT create memory items - it only adds to the reference library."
         )
@@ -118,34 +111,28 @@ class KnowledgeIngestTool(Tool):
         return {
             "type": "object",
             "properties": {
-                "title": {
-                    "type": "string",
-                    "description": "Title for the knowledge item"
-                },
+                "title": {"type": "string", "description": "Title for the knowledge item"},
                 "content": {
                     "type": "string",
-                    "description": "Content to ingest (summary, notes, or full text)"
+                    "description": "Content to ingest (summary, notes, or full text)",
                 },
                 "category": {
                     "type": "string",
                     "enum": ["articles", "books", "docs", "notes"],
-                    "description": "Category for organization (default: notes)"
+                    "description": "Category for organization (default: notes)",
                 },
                 "item_type": {
                     "type": "string",
-                    "description": "Type metadata (e.g., 'article', 'tutorial', 'reference')"
+                    "description": "Type metadata (e.g., 'article', 'tutorial', 'reference')",
                 },
-                "source": {
-                    "type": "string",
-                    "description": "Source URL or reference (optional)"
-                },
+                "source": {"type": "string", "description": "Source URL or reference (optional)"},
                 "tags": {
                     "type": "array",
                     "items": {"type": "string"},
-                    "description": "Tags for organization (optional)"
-                }
+                    "description": "Tags for organization (optional)",
+                },
             },
-            "required": ["title", "content"]
+            "required": ["title", "content"],
         }
 
     async def execute(
@@ -156,7 +143,7 @@ class KnowledgeIngestTool(Tool):
         item_type: str = "note",
         source: str = "",
         tags: list[str] | None = None,
-        **kwargs: Any
+        **kwargs: Any,
     ) -> str:
         try:
             item = self.knowledge.ingest(
@@ -201,30 +188,23 @@ class KnowledgeIngestURLTool(Tool):
         return {
             "type": "object",
             "properties": {
-                "url": {
-                    "type": "string",
-                    "description": "URL to ingest"
-                },
+                "url": {"type": "string", "description": "URL to ingest"},
                 "category": {
                     "type": "string",
                     "enum": ["articles", "books", "docs", "notes"],
-                    "description": "Category for organization (default: articles)"
+                    "description": "Category for organization (default: articles)",
                 },
                 "tags": {
                     "type": "array",
                     "items": {"type": "string"},
-                    "description": "Tags for organization (optional)"
-                }
+                    "description": "Tags for organization (optional)",
+                },
             },
-            "required": ["url"]
+            "required": ["url"],
         }
 
     async def execute(
-        self,
-        url: str,
-        category: str = "articles",
-        tags: list[str] | None = None,
-        **kwargs: Any
+        self, url: str, category: str = "articles", tags: list[str] | None = None, **kwargs: Any
     ) -> str:
         try:
             item = self.knowledge.ingest_from_url(
@@ -268,18 +248,15 @@ class KnowledgeListTool(Tool):
                 "category": {
                     "type": "string",
                     "enum": ["articles", "books", "docs", "notes"],
-                    "description": "Filter by category"
+                    "description": "Filter by category",
                 },
                 "tags": {
                     "type": "array",
                     "items": {"type": "string"},
-                    "description": "Filter by tags (must have all specified tags)"
+                    "description": "Filter by tags (must have all specified tags)",
                 },
-                "item_type": {
-                    "type": "string",
-                    "description": "Filter by item type"
-                }
-            }
+                "item_type": {"type": "string", "description": "Filter by item type"},
+            },
         }
 
     async def execute(
@@ -287,7 +264,7 @@ class KnowledgeListTool(Tool):
         category: str | None = None,
         tags: list[str] | None = None,
         item_type: str | None = None,
-        **kwargs: Any
+        **kwargs: Any,
     ) -> str:
         try:
             items = self.knowledge.list_items(
@@ -347,15 +324,9 @@ class KnowledgeStatsTool(Tool):
 
     @property
     def parameters(self) -> dict[str, Any]:
-        return {
-            "type": "object",
-            "properties": {}
-        }
+        return {"type": "object", "properties": {}}
 
-    async def execute(
-        self,
-        **kwargs: Any
-    ) -> str:
+    async def execute(self, **kwargs: Any) -> str:
         try:
             stats = self.knowledge.get_stats()
 

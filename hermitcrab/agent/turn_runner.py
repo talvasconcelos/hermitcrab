@@ -113,6 +113,36 @@ class TurnRunner:
             return result
         return result[: max_chars - 3].rstrip() + "..."
 
+    @staticmethod
+    def _build_successful_write_fallback(tool_name: str, tool_result: str) -> str | None:
+        """Turn successful write-style tool results into user-facing final replies."""
+        result = tool_result.strip()
+        if not result:
+            return None
+
+        if tool_name == "write_task" and result.startswith("Task saved:"):
+            return f"Done — {result}"
+        if tool_name == "write_goal" and result.startswith("Goal saved:"):
+            return f"Done — {result}"
+        if tool_name == "write_fact" and result.startswith("Fact saved:"):
+            return f"Done — {result}"
+        if tool_name == "write_decision" and result.startswith("Decision saved:"):
+            return f"Done — {result}"
+        if tool_name == "write_reflection" and result.startswith("Reflection saved:"):
+            return f"Done — {result}"
+        if tool_name == "knowledge_ingest" and result.startswith("Knowledge item ingested:"):
+            lines = [line.strip() for line in result.splitlines() if line.strip()]
+            path_line = lines[0].replace("Knowledge item ingested:", "Saved to").strip()
+            title_line = next((line for line in lines[1:] if line.startswith("Title:")), None)
+            category_line = next((line for line in lines[1:] if line.startswith("Category:")), None)
+            parts = ["Done — saved the knowledge note.", path_line]
+            if title_line:
+                parts.append(title_line)
+            if category_line:
+                parts.append(category_line)
+            return "\n".join(parts)
+        return None
+
     def _build_tool_result_fallback(
         self,
         *,
@@ -131,6 +161,9 @@ class TurnRunner:
         request_snippet = None
         if isinstance(request_text, str) and request_text.strip():
             request_snippet = " ".join(request_text.strip().split())
+
+        if write_fallback := self._build_successful_write_fallback(latest_name, latest_result):
+            return write_fallback
 
         if latest_name in {"read_memory", "search_memory"}:
             prefix = "I checked memory"

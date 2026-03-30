@@ -48,6 +48,8 @@ Tool signatures provided via function calling. Non-obvious constraints below.
 
 Use `write_decision` only when the user made or clearly accepted the choice. Assistant-authored recommendations, reports, and option lists belong in `projects/` or `knowledge/`, not `memory/decisions/`.
 
+Use `write_task` only for actionable commitments that somebody should do or track. Shopping lists, reusable checklists, reference notes, and "remember this list for later" content belong in `knowledge/notes/` via `knowledge_ingest`.
+
 ## File Placement Rules
 
 - Keep the workspace root clean. Do not save normal reports, drafts, or ad-hoc notes directly in the root.
