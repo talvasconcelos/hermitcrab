@@ -85,39 +85,31 @@ These points reflect the current state of the codebase and should override older
 - Interactive CLI input supports multiline entry with `Ctrl+J`.
 
 ## Current Branch Focus
-Active branch: `feat/learning-quality`
+Active branch: `main`
 
-This branch is focused on journal durability, reflection quality, and promotion of durable learnings into persistent context files without adding a heavy subsystem.
+`v0.1.0a4` release prep is complete locally. The reliability work from `release/pre-v0.1.0a4-reliability` is ready on `main`, with publishing left as a manual step.
 
-Implemented on this branch so far:
+Recently landed:
 
-- query-aware memory injection in prompt building
-- deterministic retrieval ranking improvements
-- history-window boundary repair for truncated session slices
-- prompt token estimation and retrieval budgeting
-- journaling scope cleanup to reduce raw tool and subagent noise
-- reflection validation hardening and duplicate/contradiction guards
-- suppression of blank progress updates and low-value background-task replies
-- deterministic reflection override for high-priority delegation/ownership corrections
-- session digests now preserve user goal, artifacts changed, decisions made, assistant responses, open loops, and structural signals for journal/reflection work
-- journal prompts and fallback entries are more concrete and should stay understandable days later instead of collapsing into vague narration
-- reflection output now uses observation, impact, lesson, recommended behavior, scope, confidence, evidence, and promotion target
-- reflection promotion is stricter: user-specific preferences stay in memory, target/scope compatibility is enforced, duplicate/conflicting bootstrap bullets are rejected, and promotions are logged in `bootstrap_promotion_log.md`
-- session digests now keep the primary user goal instead of letting late status pings overwrite journal/reflection framing, and successful file/tool writes count as outcomes
-- journal synthesis now gets a stronger grounded prompt plus one repair pass before falling back, reducing empty or scaffold-parroting entries
-- distillation no longer commits operational correction directives as facts; those are reserved for reflection/bootstrap routing instead
-- corrective operational learnings are now rerouted deterministically toward `AGENTS.md` rather than drifting into `SOUL.md` or memory facts
+- deterministic resume-query handling for "where did we leave off?"-style requests using saved session history instead of weak memory guesses
+- final assistant replies are now persisted into session history so later diagnosis sees what the user actually saw
+- post-tool completion is hardened with one explicit final-answer repair pass before failure
+- repeated empty or intent-only post-tool replies can now fall back to grounded tool-result summaries instead of fake-complete placeholders
+- low-value post-tool failure text is filtered more consistently from user-facing background updates
+- live regressions now cover repeated post-tool silence, final-reply persistence, and deterministic session recap behavior
+- prerelease version is now `0.1.0a4`, with release notes prepared and local build validation completed
 
-Planned on this branch:
+Near-term focus:
 
-- manual dogfooding of real sessions to judge journal usefulness and promotion quality from actual outputs, not only tests
-- refine promotion semantics between `SOUL.md` and `IDENTITY.md` if real sessions show muddled routing
-- keep shrinking brittle English-specific heuristics where structural grounding or model judgment can replace them cleanly
-- trim low-signal tests when they are clearly implementation bloat rather than behavior protection
+- publish `v0.1.0a4`
+- start the beta-oriented household usability and polish milestone without regressing the new reliability work
+- keep dogfooding interrupted turns, recall queries, and weak-model post-tool behavior so any remaining failures become focused regressions
 
-Current branch test status:
+Current branch validation status:
 
 - full suite passing with `uv run pytest`
+- lint passing with `uv run ruff check . --fix`
+- distribution artifacts building successfully with `uv build`
 
 ## Session Continuity
 Use this file to preserve high-value context across new chat sessions.
@@ -140,6 +132,7 @@ Current continuity points to preserve:
 - Coordinator failures should be treated as product issues to fix at the root cause, not by stacking narrow prompt band-aids.
 - Broad tasks should stay owned by the main agent; subagents are for bounded execution work, not for handing off the whole deliverable.
 - The next Nostr milestone should include direct-message support for NIP-17; group handling can wait until later.
+- After `feat/learning-quality` is merged, the next broader milestone should be context and coordination reliability before taking on the next product-facing push.
 - Dogfooding should include materially different user profiles, not only the repository owner; validate day-to-day assistant behavior for family scheduling, kid activities, and household coordination use cases.
 - Add a built-in `here.now` skill as a near-term product task.
 - These goals are urgent and should be treated as next-milestone work, not as distant backlog items.
@@ -147,6 +140,14 @@ Current continuity points to preserve:
 - The user wants the main agent to behave as a visible coordinator for substantial work: plan first, delegate bounded research/execution where appropriate, stay responsive, and avoid filler or repeated apology loops.
 - The user wants hardcoded English-specific marker heuristics reduced where structural evidence or model judgment can do the job more cleanly.
 - Tests are still local-only for now; do not newly commit ignored test files even when they are useful for local validation.
+- After `v0.1.0a4`, the next milestone should shift from reliability-only work toward a beta-oriented product pass for everyday households, while preserving the reliability gains.
+- HermitCrab should aim to work for mainstream users managing kids, chores, school, schedules, and household coordination, not only technically fluent operators.
+- Evaluate a two-lane product experience after `v0.1.0a4`: a simpler mainstream mode and a more transparent/power-user mode, with final naming still open.
+- The simpler mainstream mode must remain a presentation/defaults layer over the same deterministic, agentic HermitCrab core, not a fork or weakened architecture.
+- Mainstream users should not need to care about Markdown, YAML, workspace internals, or manual memory curation in normal use.
+- Simpler install, first-run setup, and adaptation to the specific user/household should be treated as beta-critical product work.
+- Normie-friendly support should include first-class lists and contextual recall flows such as groceries/errands and user-triggered check-ins like "I'm at the supermarket, what do I need?"
+- Consider an optional polished UI shell or plugin with surfaces like Chat, Today, Tasks, and Notes, while keeping the core product architecture unified.
 
 ## Coordinator And Subagent Policy
 Broad or strategic tasks must remain owned by the main agent.
@@ -237,19 +238,76 @@ Recent nearby-project takeaways worth preserving:
 - `ZeroClaw`'s recent releases added typed streaming tool events and provider-side SSE tool-call accumulation; adapt that style to reduce raw JSON/XML leakage and make the provider/tool boundary more deterministic in HermitCrab.
 - `ZeroClaw` also added boundary-aware context compression with provider-error limit parsing and tool-pair repair; borrow those ideas when HermitCrab needs stronger long-session history compaction beyond prompt-budget trimming.
 - `ZeroClaw`'s delegation path sharpens subagent boundaries with per-agent tool allowlists and enriched subagent prompts; reuse the bounded-tool-surface idea when tightening HermitCrab coordinator/subagent behavior, without importing the full delegate subsystem.
+- `Hermes` treats "self-improvement" as disciplined file-backed accumulation rather than opaque adaptation: small curated declarative memory, reusable procedural skills, transcript recall, and explicit maintenance of stale procedures. HermitCrab should borrow the discipline, not the marketing.
+- `Hermes`' strongest extractable pattern is procedural-memory capture: after a difficult or high-tool-count success, the agent is nudged to save the workflow as a portable skill and patch it quickly when reality diverges. HermitCrab should evaluate a safe, auditable `skill_manage`-style workflow for workspace skills.
+- `Hermes` also reinforces that "grows with you" depends heavily on searchable session history. HermitCrab should evaluate adding direct cross-session transcript recall before considering heavier user-modeling layers.
+- Do not regress HermitCrab toward a tiny flat `MEMORY.md`/`USER.md` design; the existing category-based memory, reflection validation, and conservative bootstrap promotion are the stronger foundation. The missing piece is clearer separation between durable facts/policy and reusable workflows.
 
 ## Next Targets
 The next milestone should prioritize the following urgent targets:
 
-1. Implement Nostr NIP-17 direct messages; group handling can follow in a later milestone.
-2. Dogfood HermitCrab with distinct user profiles, including household/schedule-heavy usage patterns, and capture adaptation gaps.
-3. Investigate OpenCode's subagent creation/internal-usage patterns and adapt only the parts that improve HermitCrab reliability and clarity.
-4. Add a built-in `here.now` skill with clear operational scope.
-5. Better coordinator/task handoff clarity between main agent and subagents, especially around delegated progress and recovery.
-6. Smarter journal and reflection prioritization based on session structure instead of brittle markers.
-7. Deterministic coordinator execution-state handling for plan/delegate/wait/fallback/complete across more surfaces.
-8. Test-suite rationalization: keep high-value regressions, merge overlaps, and remove low-signal implementation-specific tests.
-9. Further memory retrieval gains only if they stay lightweight and easy to validate.
+1. After merging `feat/learning-quality`, run a `context-and-coordination-reliability` milestone focused on context-boundary recovery, coordinator execution-state hardening, tighter subagent tool boundaries, and real dogfooding-derived regressions.
+2. In that milestone, add deterministic provider context-limit parsing plus boundary-aware history compaction that preserves recent turns, tool/result pairs, identifiers, decisions, and open loops before retrying.
+3. Tighten coordinator/task handoff clarity between main agent and subagents, especially around delegated progress, retries, fallback, and completion-state honesty.
+4. Dogfood HermitCrab with distinct user profiles, including household/schedule-heavy usage patterns, and convert real failures into focused regressions.
+5. Investigate OpenCode's subagent creation/internal-usage patterns and adapt only the parts that improve HermitCrab reliability and clarity.
+6. Test-suite rationalization: keep high-value regressions, merge overlaps, and remove low-signal implementation-specific tests.
+7. Evaluate a lightweight, file-backed procedural-memory flow inspired by `Hermes`: safe skill creation/patching for proven workflows, but enforced with deterministic Python-side policy and auditability rather than prompt-only nudges.
+8. Evaluate direct session-history recall tooling for cross-session memory of prior work, fixes, and discussions before adding any heavier user-modeling subsystem.
+9. Once context and coordination reliability is steadier, implement Nostr NIP-17 direct messages; group handling can follow in a later milestone.
+10. Add a built-in `here.now` skill with clear operational scope.
+11. Smarter journal and reflection prioritization based on session structure instead of brittle markers, and further memory retrieval gains only if they stay lightweight and easy to validate.
+
+## Next Milestone Roadmap
+After `v0.1.0a4`, target a beta-focused milestone centered on mainstream usability without regressing reliability.
+
+Suggested milestone name: `beta-household-usability-and-polish`
+
+Goals for that milestone:
+
+1. Make HermitCrab approachable for non-technical everyday users.
+2. Preserve strong adaptation and continuity while hiding unnecessary file-oriented complexity.
+3. Smooth installation, onboarding, and first-week usage.
+4. Clean remaining project rough edges before broader beta exposure.
+
+Priority roadmap:
+
+1. Product mode design
+   - define a simpler default mode for mainstream users and a separate power-user mode
+   - choose names that describe confidence and audience better than "normal" and "advanced" if possible
+   - decide which capabilities stay visible in each mode: memory files, scratchpads, slash commands, raw tooling, model/provider detail
+2. Installation and first-run simplicity
+   - reduce setup friction for users who just want the assistant running locally
+   - evaluate a friendlier onboarding flow than editing raw config by hand
+   - improve first-run guidance for model selection, missing dependencies, and common local-setup failures
+3. Household adaptation features
+    - improve support for schedules, chores, activities, school logistics, reminders, and recurring family coordination
+    - keep mainstream-friendly behavior as an abstraction layer over the same power-user-capable deterministic core rather than a separate product flavor
+    - add first-class lists, contextual reminders, and user-triggered context recall flows for errands such as supermarket/pharmacy/school
+    - design memory/retrieval behavior around recurring household rhythms, not only project work
+    - dogfood with real family-style scenarios and convert failures into focused regressions
+4. User-facing UX polish
+   - make responses feel calmer, clearer, and more helpful for non-technical users
+   - reduce visible internal jargon, tool framing, and implementation language in mainstream flows
+   - keep the power-user path available without forcing it into the default experience
+5. Product cleanup and consistency
+   - remove lingering `nanobot` references across code, docs, scripts, and packaging before beta push
+   - tighten naming consistency, version messaging, and project identity
+   - clean stale docs or scripts that no longer match HermitCrab behavior
+
+Execution checklist for the next milestone:
+
+- define the beta audience and choose the mode split/naming
+- map current onboarding pain points in CLI, docs, and config setup
+- design a simpler first-run flow for mainstream users
+- identify which advanced surfaces should be hidden, deferred, or relabeled in the simpler mode
+- create a household-use-case dogfooding matrix: schedules, chores, school, errands, reminders, family planning
+- define a local-first calendar/reminder/list model plus a future sync path, keeping exact scheduling separate from coarse heartbeat behavior
+- evaluate an optional UI/plugin direction for Chat/Today/Tasks/Notes without splitting the core product
+- add regressions for the most important household-memory and continuity flows
+- audit and remove remaining `nanobot` references
+- review docs, screenshots, and help text from a non-technical user perspective
+- prepare a beta readiness checklist covering install, onboarding, continuity, adaptation, and terminology
 
 ## Working Style
 When deciding what to do next:

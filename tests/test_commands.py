@@ -7,7 +7,14 @@ from unittest.mock import patch
 import pytest
 from typer.testing import CliRunner
 
-from hermitcrab.cli.commands import _build_job_models_from_config, _build_runtime_model_aliases, app
+from hermitcrab.cli.commands import (
+    _atomic_write_text,
+    _build_job_models_from_config,
+    _build_runtime_model_aliases,
+    _get_tty_stdin_fd,
+    _should_render_progress,
+    app,
+)
 from hermitcrab.config.schema import Config, ModelAliasConfig
 from hermitcrab.providers.litellm_provider import LiteLLMProvider
 from hermitcrab.providers.openai_codex_provider import _strip_model_prefix
@@ -15,6 +22,33 @@ from hermitcrab.providers.registry import find_by_model
 from hermitcrab.utils.helpers import resolve_model_alias, resolve_model_alias_config
 
 runner = CliRunner()
+
+
+def test_get_tty_stdin_fd_returns_none_when_stdin_is_not_a_tty():
+    with patch("sys.stdin.fileno", return_value=0), patch("os.isatty", return_value=False):
+        assert _get_tty_stdin_fd() is None
+
+
+def test_get_tty_stdin_fd_returns_file_descriptor_for_tty():
+    with patch("sys.stdin.fileno", return_value=7), patch("os.isatty", return_value=True):
+        assert _get_tty_stdin_fd() == 7
+
+
+def test_atomic_write_text_replaces_destination_contents(tmp_path):
+    destination = tmp_path / "AGENTS.md"
+    destination.write_text("old", encoding="utf-8")
+
+    _atomic_write_text(destination, "new content")
+
+    assert destination.read_text(encoding="utf-8") == "new content"
+
+
+def test_should_render_progress_respects_channel_settings():
+    channel_config = SimpleNamespace(send_tool_hints=False, send_progress=True)
+
+    assert _should_render_progress(channel_config, is_tool_hint=False) is True
+    assert _should_render_progress(channel_config, is_tool_hint=True) is False
+    assert _should_render_progress(None, is_tool_hint=True) is True
 
 
 @pytest.fixture

@@ -52,11 +52,13 @@ from hermitcrab.agent.message_preparation import (
     clean_snippet,
     is_empty_response,
     is_intent_only_response,
+    is_resume_query,
     is_subagent_completion_prompt,
     should_hint_subagent_delegation,
 )
 from hermitcrab.agent.reflection import ReflectionService
 from hermitcrab.agent.session_lifecycle import SessionLifecycleManager
+from hermitcrab.agent.session_recall import build_resume_reply
 from hermitcrab.agent.subagent import SubagentManager
 from hermitcrab.agent.tools.cron import CronTool
 from hermitcrab.agent.tools.filesystem import EditFileTool, ListDirTool, ReadFileTool, WriteFileTool
@@ -946,6 +948,10 @@ class AgentLoop:
             if slash_response is not None:
                 return slash_response
 
+            resume_response = self._maybe_handle_resume_query(msg, key, session)
+            if resume_response is not None:
+                return resume_response
+
             self._set_tool_context(msg.channel, msg.chat_id, msg.metadata.get("message_id"))
             if message_tool := self.tools.get("message"):
                 if isinstance(message_tool, MessageTool):
@@ -961,7 +967,7 @@ class AgentLoop:
             )
 
             final_content = (
-                final_content or "I've completed processing but have no response to give."
+                final_content or "I couldn't complete that turn cleanly. Please retry the request."
             )
             self._record_final_execution_state(key, final_content)
             preview = final_content[:120] + "..." if len(final_content) > 120 else final_content
@@ -980,6 +986,37 @@ class AgentLoop:
                 content=final_content,
                 metadata=msg.metadata or {},
             )
+
+    def _maybe_handle_resume_query(
+        self,
+        msg: InboundMessage,
+        session_key: str,
+        session: Session,
+    ) -> OutboundMessage | None:
+        """Handle deterministic recap requests without delegating to the model."""
+        if not is_resume_query(msg.content):
+            return None
+
+        reply = build_resume_reply(session.messages)
+        if not reply:
+            reply = "I don't have any saved prior work in this session yet."
+
+        history = session.get_history(max_messages=self.memory_window)
+        all_msgs = [
+            {"role": "system", "content": "deterministic session recall"},
+            *history,
+            {"role": "user", "content": msg.content},
+            {"role": "assistant", "content": reply},
+        ]
+        self._record_final_execution_state(session_key, reply)
+        self._save_turn(session, all_msgs, 1 + len(history))
+        self.sessions.save(session)
+        return OutboundMessage(
+            channel=msg.channel,
+            chat_id=msg.chat_id,
+            content=reply,
+            metadata=msg.metadata or {},
+        )
 
     async def _maybe_handle_slash_command(
         self,

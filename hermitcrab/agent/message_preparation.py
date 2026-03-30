@@ -26,6 +26,29 @@ def is_empty_response(text: str | None) -> bool:
     return text is None or not text.strip()
 
 
+def is_resume_query(text: str | None) -> bool:
+    """Detect user requests that ask to resume or recap prior work."""
+    if not text:
+        return False
+    normalized = " ".join(text.strip().lower().split())
+    if not normalized:
+        return False
+
+    markers = (
+        "where did we leave off",
+        "where did we left off",
+        "pick up where we left off",
+        "pick up where we left it",
+        "what were we doing last time",
+        "what were we working on",
+        "remind me where we left off",
+        "catch me up on where we left off",
+        "what happened last time",
+        "recap where we left off",
+    )
+    return any(marker in normalized for marker in markers)
+
+
 def should_hint_subagent_delegation(
     user_message: str,
     *,

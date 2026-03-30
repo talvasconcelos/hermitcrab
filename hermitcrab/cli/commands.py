@@ -6,6 +6,7 @@ import re
 import select
 import signal
 import sys
+import tempfile
 from pathlib import Path
 from typing import Any
 
@@ -104,13 +105,49 @@ def _build_runtime_model_aliases(config: Config) -> dict[str, str | ModelAliasCo
     return resolved_aliases
 
 
-def _flush_pending_tty_input() -> None:
-    """Drop unread keypresses typed while the model was generating output."""
+def _get_tty_stdin_fd() -> int | None:
+    """Return the stdin file descriptor when attached to a TTY."""
     try:
         fd = sys.stdin.fileno()
-        if not os.isatty(fd):
-            return
-    except Exception:
+    except (AttributeError, OSError, ValueError):
+        return None
+    return fd if os.isatty(fd) else None
+
+
+def _atomic_write_text(path: Path, content: str) -> None:
+    """Write text atomically to avoid leaving partial template files behind."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+
+    tmp_path: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            "w",
+            encoding="utf-8",
+            dir=path.parent,
+            delete=False,
+        ) as tmp:
+            tmp.write(content)
+            tmp_path = Path(tmp.name)
+        tmp_path.replace(path)
+    except OSError:
+        if tmp_path is not None:
+            tmp_path.unlink(missing_ok=True)
+        raise
+
+
+def _should_render_progress(channels_config: Any, *, is_tool_hint: bool) -> bool:
+    """Apply channel progress visibility rules consistently across CLI modes."""
+    if channels_config is None:
+        return True
+    if is_tool_hint:
+        return bool(channels_config.send_tool_hints)
+    return bool(channels_config.send_progress)
+
+
+def _flush_pending_tty_input() -> None:
+    """Drop unread keypresses typed while the model was generating output."""
+    fd = _get_tty_stdin_fd()
+    if fd is None:
         return
 
     try:
@@ -118,7 +155,7 @@ def _flush_pending_tty_input() -> None:
 
         termios.tcflush(fd, termios.TCIFLUSH)
         return
-    except Exception:
+    except (ImportError, OSError, ValueError, termios.error):
         pass
 
     try:
@@ -128,7 +165,7 @@ def _flush_pending_tty_input() -> None:
                 break
             if not os.read(fd, 4096):
                 break
-    except Exception:
+    except OSError:
         return
 
 
@@ -140,7 +177,7 @@ def _restore_terminal() -> None:
         import termios
 
         termios.tcsetattr(sys.stdin.fileno(), termios.TCSADRAIN, _SAVED_TERM_ATTRS)
-    except Exception:
+    except (ImportError, OSError, ValueError, termios.error):
         pass
 
 
@@ -153,7 +190,7 @@ def _init_prompt_session() -> None:
         import termios
 
         _SAVED_TERM_ATTRS = termios.tcgetattr(sys.stdin.fileno())
-    except Exception:
+    except (ImportError, OSError, ValueError, termios.error):
         pass
 
     history_file = Path.home() / ".hermitcrab" / "history" / "cli_history"
@@ -186,11 +223,8 @@ def _build_prompt_key_bindings() -> KeyBindings:
 
 async def _watch_for_escape(on_escape) -> None:
     """Watch stdin for Esc while the agent is busy and trigger cancellation."""
-    try:
-        fd = sys.stdin.fileno()
-        if not os.isatty(fd):
-            return
-    except Exception:
+    fd = _get_tty_stdin_fd()
+    if fd is None:
         return
 
     try:
@@ -199,7 +233,7 @@ async def _watch_for_escape(on_escape) -> None:
 
         saved = termios.tcgetattr(fd)
         tty.setcbreak(fd)
-    except Exception:
+    except (ImportError, OSError, ValueError, termios.error):
         return
 
     loop = asyncio.get_running_loop()
@@ -208,7 +242,7 @@ async def _watch_for_escape(on_escape) -> None:
     def _on_stdin_ready() -> None:
         try:
             data = os.read(fd, 32)
-        except Exception:
+        except OSError:
             return
         if b"\x1b" in data:
             escape_pressed.set()
@@ -223,7 +257,7 @@ async def _watch_for_escape(on_escape) -> None:
         loop.remove_reader(fd)
         try:
             termios.tcsetattr(fd, termios.TCSADRAIN, saved)
-        except Exception:
+        except (OSError, ValueError, termios.error):
             pass
 
 
@@ -353,7 +387,7 @@ def _create_workspace_templates(workspace: Path):
             continue
         dest = workspace / item.name
         if not dest.exists():
-            dest.write_text(item.read_text(encoding="utf-8"), encoding="utf-8")
+            _atomic_write_text(dest, item.read_text(encoding="utf-8"))
             console.print(f"  [dim]Created {item.name}[/dim]")
 
     # Create category-based memory directories
@@ -792,12 +826,10 @@ def _run_nostr_mode(
                         if not msg.content or not msg.content.strip():
                             continue
                         is_tool_hint = msg.metadata.get("_tool_hint", False)
-                        ch = agent_loop.channels_config
-                        if ch and is_tool_hint and not ch.send_tool_hints:
-                            pass
-                        elif ch and not is_tool_hint and not ch.send_progress:
-                            pass
-                        else:
+                        if _should_render_progress(
+                            agent_loop.channels_config,
+                            is_tool_hint=is_tool_hint,
+                        ):
                             console.print(f"  [dim]↳ {msg.content}[/dim]")
                     elif not turn_done.is_set():
                         if msg.content:
@@ -1022,12 +1054,10 @@ def agent(
                             if not msg.content or not msg.content.strip():
                                 continue
                             is_tool_hint = msg.metadata.get("_tool_hint", False)
-                            ch = agent_loop.channels_config
-                            if ch and is_tool_hint and not ch.send_tool_hints:
-                                pass
-                            elif ch and not is_tool_hint and not ch.send_progress:
-                                pass
-                            else:
+                            if _should_render_progress(
+                                agent_loop.channels_config,
+                                is_tool_hint=is_tool_hint,
+                            ):
                                 console.print(f"  [dim]↳ {msg.content}[/dim]")
                         elif not turn_done.is_set():
                             if msg.content:
@@ -1065,9 +1095,9 @@ def agent(
                                     channel=cli_channel,
                                     chat_id=cli_chat_id,
                                 )
-                                # Wait up to 10s for background tasks (journal/distillation/reflection)
+                                # Wait up to 20s for background tasks (journal/distillation/reflection)
                                 done, pending = await agent_loop.wait_for_background_tasks(
-                                    timeout_s=10.0
+                                    timeout_s=20.0
                                 )
                                 if done > 0:
                                     console.print(f"[dim]Background tasks completed: {done}[/dim]")
