@@ -1,6 +1,6 @@
 [project]
 name = "hermitcrab-ai"
-version = "0.1.0a4"
+version = "0.1.0b1"
 description = "A lightweight, memory-first, Nostr-primary personal AI assistant"
 requires-python = ">=3.11"
 readme = "README.md"
@@ -11,7 +11,7 @@ authors = [
 ]
 keywords = ["ai", "agent", "assistant", "nostr", "memory"]
 classifiers = [
-    "Development Status :: 3 - Alpha",
+    "Development Status :: 4 - Beta",
     "Intended Audience :: Developers",
     "License :: OSI Approved :: MIT License",
     "Programming Language :: Python :: 3.11",

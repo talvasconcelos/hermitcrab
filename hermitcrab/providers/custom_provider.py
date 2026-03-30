@@ -9,17 +9,16 @@ import json_repair
 from openai import AsyncOpenAI
 
 from hermitcrab.providers.base import LLMProvider, LLMResponse, ToolCallRequest
-
-
-def _function_parts(function: Any) -> tuple[str | None, Any]:
-    if isinstance(function, dict):
-        return function.get("name"), function.get("arguments")
-    return getattr(function, "name", None), getattr(function, "arguments", None)
+from hermitcrab.providers.utils import function_parts
 
 
 class CustomProvider(LLMProvider):
-
-    def __init__(self, api_key: str = "no-key", api_base: str = "http://localhost:8000/v1", default_model: str = "default"):
+    def __init__(
+        self,
+        api_key: str = "no-key",
+        api_base: str = "http://localhost:8000/v1",
+        default_model: str = "default",
+    ):
         super().__init__(api_key, api_base)
         self.default_model = default_model
         self._client = AsyncOpenAI(
@@ -28,9 +27,15 @@ class CustomProvider(LLMProvider):
             default_headers={"x-session-affinity": uuid.uuid4().hex},
         )
 
-    async def chat(self, messages: list[dict[str, Any]], tools: list[dict[str, Any]] | None = None,
-                   model: str | None = None, max_tokens: int = 4096, temperature: float = 0.7,
-                   reasoning_effort: str | None = None) -> LLMResponse:
+    async def chat(
+        self,
+        messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]] | None = None,
+        model: str | None = None,
+        max_tokens: int = 4096,
+        temperature: float = 0.7,
+        reasoning_effort: str | None = None,
+    ) -> LLMResponse:
         kwargs: dict[str, Any] = {
             "model": model or self.default_model,
             "messages": self._sanitize_empty_content(messages),
@@ -50,10 +55,10 @@ class CustomProvider(LLMProvider):
         choice = response.choices[0]
         msg = choice.message
         tool_calls = []
-        for tc in (msg.tool_calls or []):
+        for tc in msg.tool_calls or []:
             call_id = tc.get("id") if isinstance(tc, dict) else getattr(tc, "id", None)
             function = tc.get("function") if isinstance(tc, dict) else getattr(tc, "function", None)
-            name, arguments = _function_parts(function)
+            name, arguments = function_parts(function)
             if not name:
                 continue
             if isinstance(arguments, str):
@@ -67,7 +72,7 @@ class CustomProvider(LLMProvider):
             )
         if not tool_calls and getattr(msg, "function_call", None):
             function_call = msg.function_call
-            name, args = _function_parts(function_call)
+            name, args = function_parts(function_call)
             if not name:
                 name = None
             args = args or {}
@@ -87,8 +92,16 @@ class CustomProvider(LLMProvider):
             finish_reason = "stop"
 
         return LLMResponse(
-            content=msg.content, tool_calls=tool_calls, finish_reason=finish_reason,
-            usage={"prompt_tokens": u.prompt_tokens, "completion_tokens": u.completion_tokens, "total_tokens": u.total_tokens} if u else {},
+            content=msg.content,
+            tool_calls=tool_calls,
+            finish_reason=finish_reason,
+            usage={
+                "prompt_tokens": u.prompt_tokens,
+                "completion_tokens": u.completion_tokens,
+                "total_tokens": u.total_tokens,
+            }
+            if u
+            else {},
             reasoning_content=getattr(msg, "reasoning_content", None) or None,
         )
 

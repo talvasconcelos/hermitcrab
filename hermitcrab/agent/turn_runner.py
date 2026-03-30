@@ -46,7 +46,6 @@ class TurnRunner:
         strip_think: Callable[[str | None], str | None],
         tool_hint: Callable[[list[Any]], str],
         is_empty_response: Callable[[str | None], bool],
-        is_intent_only_response: Callable[[str | None], bool],
     ):
         self.context = context
         self.tools = tools
@@ -57,7 +56,6 @@ class TurnRunner:
         self.strip_think = strip_think
         self.tool_hint = tool_hint
         self.is_empty_response = is_empty_response
-        self.is_intent_only_response = is_intent_only_response
 
     def _remaining_seconds(self, started_at: float) -> float:
         return self.config.max_loop_seconds - (time.monotonic() - started_at)
@@ -472,16 +470,10 @@ class TurnRunner:
             repeated_tool_cycles = 0
             last_tool_signature = None
             final_content = self.strip_think(response.content)
-            needs_reprompt = tools_used and (
-                self.is_empty_response(final_content) or self.is_intent_only_response(final_content)
-            )
+            needs_reprompt = tools_used and self.is_empty_response(final_content)
             if needs_reprompt:
                 intent_reprompt_count += 1
-                failure_type = (
-                    "empty_post_tool_response"
-                    if self.is_empty_response(final_content)
-                    else "intent_only_post_tool_response"
-                )
+                failure_type = "empty_post_tool_response"
                 logger.warning(
                     "Non-final response after tool usage; reprompting model (attempt {}, type={}, finish_reason={})",
                     intent_reprompt_count,
@@ -495,7 +487,7 @@ class TurnRunner:
                             "role": "system",
                             "content": (
                                 "Final answer required now. You already have the tool results. "
-                                "Do not narrate your next step. Do not call more tools unless the "
+                                "Do not stop with an empty reply. Do not call more tools unless the "
                                 "tool results clearly show something is missing. Either reply to the "
                                 "user with the actual result, or explain exactly what is missing in "
                                 "one concise answer."

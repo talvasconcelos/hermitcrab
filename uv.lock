@@ -767,7 +767,7 @@ wheels = [
 
 [[package]]
 name = "hermitcrab-ai"
-version = "0.1.0a4"
+version = "0.1.0b1"
 source = { editable = "." }
 dependencies = [
     { name = "croniter" },

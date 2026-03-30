@@ -31,6 +31,7 @@ from hermitcrab.providers.base import (
     ToolCallRequest,
 )
 from hermitcrab.providers.registry import find_by_model, find_gateway
+from hermitcrab.providers.utils import function_parts
 
 # Standard OpenAI chat-completion message keys; extras (e.g. reasoning_content) are stripped for strict providers.
 _ALLOWED_MSG_KEYS = frozenset({"role", "content", "tool_calls", "tool_call_id", "name"})
@@ -55,13 +56,6 @@ class _StreamingToolCallState:
 def _short_tool_id() -> str:
     """Generate a provider-safe short tool call ID."""
     return "".join(secrets.choice(_ALNUM) for _ in range(9))
-
-
-def _tool_function_parts(function: Any) -> tuple[str | None, Any]:
-    """Extract tool function name and arguments from object- or dict-shaped payloads."""
-    if isinstance(function, dict):
-        return function.get("name"), function.get("arguments")
-    return getattr(function, "name", None), getattr(function, "arguments", None)
 
 
 class LiteLLMProvider(LLMProvider):
@@ -654,7 +648,7 @@ class LiteLLMProvider(LLMProvider):
             else getattr(delta, "function_call", None)
         )
         if legacy:
-            name, arguments = _tool_function_parts(legacy)
+            name, arguments = function_parts(legacy)
             fragments.append((0, None, str(name or ""), str(arguments or "")))
         return fragments
 
@@ -854,7 +848,7 @@ class LiteLLMProvider(LLMProvider):
                 function = (
                     tc.get("function") if isinstance(tc, dict) else getattr(tc, "function", None)
                 )
-                name, args = _tool_function_parts(function)
+                name, args = function_parts(function)
 
                 if not name:
                     continue
@@ -882,7 +876,7 @@ class LiteLLMProvider(LLMProvider):
                         if isinstance(tc, dict)
                         else getattr(tc, "function", None)
                     )
-                    name, args = _tool_function_parts(function)
+                    name, args = function_parts(function)
                     if not name:
                         continue
                     if isinstance(args, str):
@@ -909,7 +903,7 @@ class LiteLLMProvider(LLMProvider):
 
         if not tool_calls:
             legacy_function_call = getattr(message, "function_call", None)
-            legacy_name, legacy_args = _tool_function_parts(legacy_function_call)
+            legacy_name, legacy_args = function_parts(legacy_function_call)
             if legacy_name:
                 legacy_args = legacy_args or {}
                 if isinstance(legacy_args, str):

@@ -175,7 +175,7 @@ async def test_subagent_recovers_inline_json_tool_call(tmp_path):
         side_effect=[
             LLMResponse(
                 content=(
-                    'Let me inspect the file. '
+                    "Let me inspect the file. "
                     '{"name":"read_file","arguments":{"path":"README.md"}}'
                 )
             ),
@@ -195,7 +195,9 @@ async def test_subagent_recovers_inline_json_tool_call(tmp_path):
         exec_config=ExecToolConfig(),
     )
 
-    await manager.spawn(task="Inspect README", label="readme", origin_channel="cli", origin_chat_id="direct")
+    await manager.spawn(
+        task="Inspect README", label="readme", origin_channel="cli", origin_chat_id="direct"
+    )
 
     for _ in range(20):
         if manager.get_running_count() == 0:
@@ -213,11 +215,11 @@ async def test_subagent_recovers_inline_xml_tool_call(tmp_path):
         side_effect=[
             LLMResponse(
                 content=(
-                    '<minimax:tool_call>\n'
+                    "<minimax:tool_call>\n"
                     '<invoke name="read_file">\n'
                     '<parameter name="path">README.md</parameter>\n'
-                    '</invoke>\n'
-                    '</minimax:tool_call>'
+                    "</invoke>\n"
+                    "</minimax:tool_call>"
                 )
             ),
             LLMResponse(content="done"),
@@ -236,7 +238,9 @@ async def test_subagent_recovers_inline_xml_tool_call(tmp_path):
         exec_config=ExecToolConfig(),
     )
 
-    await manager.spawn(task="Inspect README", label="readme", origin_channel="cli", origin_chat_id="direct")
+    await manager.spawn(
+        task="Inspect README", label="readme", origin_channel="cli", origin_chat_id="direct"
+    )
 
     for _ in range(20):
         if manager.get_running_count() == 0:
@@ -274,52 +278,13 @@ async def test_subagent_normalizes_string_tool_arguments(tmp_path):
         exec_config=ExecToolConfig(),
     )
 
-    await manager.spawn(task="Inspect README", label="readme", origin_channel="cli", origin_chat_id="direct")
+    await manager.spawn(
+        task="Inspect README", label="readme", origin_channel="cli", origin_chat_id="direct"
+    )
 
     for _ in range(20):
         if manager.get_running_count() == 0:
             break
         await asyncio.sleep(0)
 
-    bus.publish_inbound.assert_awaited()
-
-
-@pytest.mark.asyncio
-async def test_subagent_reprompts_intent_only_post_tool_response(tmp_path):
-    provider = MagicMock()
-    provider.get_default_model = MagicMock(return_value="anthropic/claude-opus-4-5")
-    provider.chat_with_retry = AsyncMock(
-        side_effect=[
-            LLMResponse(
-                content=None,
-                tool_calls=[
-                    ToolCallRequest(id="1", name="read_file", arguments={"path": "README.md"})
-                ],
-                finish_reason="tool_calls",
-            ),
-            LLMResponse(content="Let me inspect the rest of the file first."),
-            LLMResponse(content="README inspected successfully."),
-        ]
-    )
-
-    bus = MessageBus()
-    bus.publish_inbound = AsyncMock()
-    (tmp_path / "README.md").write_text("hello", encoding="utf-8")
-
-    manager = SubagentManager(
-        provider=provider,
-        workspace=tmp_path,
-        bus=bus,
-        model="anthropic/claude-opus-4-5",
-        exec_config=ExecToolConfig(),
-    )
-
-    await manager.spawn(task="Inspect README", label="readme", origin_channel="cli", origin_chat_id="direct")
-
-    for _ in range(20):
-        if manager.get_running_count() == 0:
-            break
-        await asyncio.sleep(0)
-
-    provider.chat_with_retry.assert_awaited()
     bus.publish_inbound.assert_awaited()

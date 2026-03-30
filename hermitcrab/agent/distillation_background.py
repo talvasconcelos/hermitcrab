@@ -167,9 +167,8 @@ class DistillationManager:
         allowed_types = {CandidateType.FACT, CandidateType.GOAL, CandidateType.TASK}
         if candidate.type == CandidateType.DECISION:
             has_rationale = bool((candidate.decision_rationale or "").strip())
-            if candidate.confidence < 0.9 or not has_rationale:
-                return False
-            if self.looks_like_non_decision_artifact(candidate):
+            has_status = candidate.decision_status is not None
+            if candidate.confidence < 0.9 or not has_rationale or not has_status:
                 return False
         elif candidate.type == CandidateType.FACT:
             if self.looks_like_bootstrap_instruction(candidate):
@@ -182,81 +181,29 @@ class DistillationManager:
         return not self.find_existing_memory_duplicates(candidate)
 
     @staticmethod
-    def looks_like_non_decision_artifact(candidate: AtomicCandidate) -> bool:
-        normalized = " ".join(
-            re.sub(
-                r"[^a-z0-9\s]+",
-                " ",
-                " ".join(
-                    filter(None, [candidate.title, candidate.content, candidate.decision_rationale])
-                ).lower(),
-            ).split()
-        )
-        if not normalized:
-            return True
-
-        report_markers = (
-            "recommendation",
-            "recommended",
-            "report",
-            "analysis",
-            "placeholder",
-            "not explicitly stated",
-            "not prioritized yet",
-            "possible decision",
-            "tentative",
-            "option list",
-        )
-        proposal_markers = (
-            "we should ",
-            "should use",
-            "could use",
-            "might use",
-            "proposal",
-            "proposed",
-        )
-        return any(marker in normalized for marker in report_markers + proposal_markers)
-
-    @staticmethod
     def looks_like_bootstrap_instruction(candidate: AtomicCandidate) -> bool:
-        normalized = " ".join(
-            re.sub(
-                r"[^a-z0-9\s]+",
-                " ",
-                " ".join(filter(None, [candidate.title, candidate.content])).lower(),
-            ).split()
-        )
-        if not normalized:
+        normalized_tags = {
+            re.sub(r"[^a-z0-9\s]+", " ", str(tag).lower()).strip()
+            for tag in candidate.tags or []
+            if str(tag).strip()
+        }
+        if not candidate.title.strip() and not candidate.content.strip():
             return True
-
-        agent_markers = (
+        operational_tags = {
             "agent",
             "assistant",
             "subagent",
             "tool",
             "workflow",
-            "context",
+            "process",
             "prompt",
             "journal",
             "reflection",
             "memory",
-        )
-        instruction_markers = (
-            "should",
-            "must",
-            "always",
-            "never",
-            "prefer",
-            "do not",
-            "keep",
-            "plan",
-            "delegate",
-            "stay available",
-            "remain responsive",
-        )
-        return any(marker in normalized for marker in agent_markers) and any(
-            marker in normalized for marker in instruction_markers
-        )
+            "delegation",
+            "coordination",
+        }
+        return bool(normalized_tags & operational_tags)
 
     async def distill_session(self, session: Any, distillation_job_class: Any) -> None:
         try:

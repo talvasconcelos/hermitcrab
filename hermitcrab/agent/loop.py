@@ -38,7 +38,7 @@ from loguru import logger
 from hermitcrab.agent.background_jobs import BackgroundJobManager, SessionDigest
 from hermitcrab.agent.background_messages import (
     fallback_system_task_summary,
-    is_low_value_system_reply,
+    is_grounded_system_reply,
     summarize_subagent_completion,
 )
 from hermitcrab.agent.context import ContextBuilder
@@ -48,17 +48,12 @@ from hermitcrab.agent.journal import JournalStore
 from hermitcrab.agent.knowledge import KnowledgeStore
 from hermitcrab.agent.memory import MemoryStore
 from hermitcrab.agent.message_preparation import (
-    build_delegation_hint,
     clean_snippet,
     is_empty_response,
-    is_intent_only_response,
-    is_resume_query,
     is_subagent_completion_prompt,
-    should_hint_subagent_delegation,
 )
 from hermitcrab.agent.reflection import ReflectionService
 from hermitcrab.agent.session_lifecycle import SessionLifecycleManager
-from hermitcrab.agent.session_recall import build_resume_reply
 from hermitcrab.agent.subagent import SubagentManager
 from hermitcrab.agent.tools.cron import CronTool
 from hermitcrab.agent.tools.filesystem import EditFileTool, ListDirTool, ReadFileTool, WriteFileTool
@@ -920,7 +915,7 @@ class AgentLoop:
             self.sessions.save(session)
             safe_content = (
                 fallback_system_task_summary(msg.content)
-                if is_low_value_system_reply(final_content)
+                if not is_grounded_system_reply(msg.content, final_content)
                 else final_content
             )
             self.execution_state.set(key, ExecutionPhase.COMPLETED, "system update ready")
@@ -947,10 +942,6 @@ class AgentLoop:
             slash_response = await self._maybe_handle_slash_command(msg, key, session)
             if slash_response is not None:
                 return slash_response
-
-            resume_response = self._maybe_handle_resume_query(msg, key, session)
-            if resume_response is not None:
-                return resume_response
 
             self._set_tool_context(msg.channel, msg.chat_id, msg.metadata.get("message_id"))
             if message_tool := self.tools.get("message"):
@@ -986,37 +977,6 @@ class AgentLoop:
                 content=final_content,
                 metadata=msg.metadata or {},
             )
-
-    def _maybe_handle_resume_query(
-        self,
-        msg: InboundMessage,
-        session_key: str,
-        session: Session,
-    ) -> OutboundMessage | None:
-        """Handle deterministic recap requests without delegating to the model."""
-        if not is_resume_query(msg.content):
-            return None
-
-        reply = build_resume_reply(session.messages)
-        if not reply:
-            reply = "I don't have any saved prior work in this session yet."
-
-        history = session.get_history(max_messages=self.memory_window)
-        all_msgs = [
-            {"role": "system", "content": "deterministic session recall"},
-            *history,
-            {"role": "user", "content": msg.content},
-            {"role": "assistant", "content": reply},
-        ]
-        self._record_final_execution_state(session_key, reply)
-        self._save_turn(session, all_msgs, 1 + len(history))
-        self.sessions.save(session)
-        return OutboundMessage(
-            channel=msg.channel,
-            chat_id=msg.chat_id,
-            content=reply,
-            metadata=msg.metadata or {},
-        )
 
     async def _maybe_handle_slash_command(
         self,
@@ -1066,20 +1026,6 @@ class AgentLoop:
             chat_id=msg.chat_id,
             scratchpad_path=str(scratchpad_path),
         )
-        if should_hint_subagent_delegation(
-            msg.content,
-            has_spawn_tool=self.tools.has("spawn"),
-            subagent_model=self._job_models.get(JobClass.SUBAGENT),
-        ):
-            messages.insert(
-                len(messages) - 1,
-                {
-                    "role": "system",
-                    "content": build_delegation_hint(
-                        self._job_models.get(JobClass.SUBAGENT) or self.model
-                    ),
-                },
-            )
         return messages
 
     def _build_bus_progress_callback(
@@ -1141,7 +1087,6 @@ class AgentLoop:
             strip_think=self._strip_think,
             tool_hint=self._tool_hint,
             is_empty_response=is_empty_response,
-            is_intent_only_response=is_intent_only_response,
         )
 
     class _SessionScope:

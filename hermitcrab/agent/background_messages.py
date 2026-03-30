@@ -67,17 +67,21 @@ def fallback_system_task_summary(content: str) -> str:
     return summarize_subagent_completion(content)
 
 
-def is_low_value_system_reply(content: str | None) -> bool:
-    """Detect inner-loop failure text that should not be surfaced."""
-    normalized = (content or "").strip().lower()
-    if not normalized:
-        return True
+def is_grounded_system_reply(source_content: str, reply_content: str | None) -> bool:
+    """Return True when a generated system reply is grounded in the source update."""
+    reply = (reply_content or "").strip()
+    if not reply:
+        return False
 
-    low_value_markers = (
-        "i detected repeated tool calls without progress",
-        "please refine the request or provide more constraints",
-        "i've completed processing but have no response to give",
-        "i reached the maximum number of tool call iterations",
-        "i completed the tool work, but the model stopped before producing a usable final answer",
-    )
-    return any(marker in normalized for marker in low_value_markers)
+    source_tokens = _grounding_tokens(source_content)
+    reply_tokens = _grounding_tokens(reply)
+    if not source_tokens or not reply_tokens:
+        return False
+
+    overlap = source_tokens & reply_tokens
+    return len(overlap) >= 2
+
+
+def _grounding_tokens(value: str) -> set[str]:
+    normalized = re.sub(r"[^a-z0-9]+", " ", value.lower())
+    return {token for token in normalized.split() if len(token) >= 4}

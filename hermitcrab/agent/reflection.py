@@ -429,130 +429,20 @@ Rules:
             return self._default_promotion_target(str(result.get("scope", "")))
         return target
 
-    def _normalize_learning_scope(self, result: dict[str, Any], digest: SessionDigest) -> str:
-        scope = str(result.get("scope", "")).strip().lower()
-        if self._looks_like_tool_learning(result):
-            return "tool_usage"
-        if scope == "user_preference" and self._looks_like_operational_learning(result, digest):
-            return "session_tactic"
-        if scope == "assistant_behavior" and self._looks_like_operational_learning(result, digest):
-            return "session_tactic"
-        return scope
+    def _normalize_learning_scope(self, result: dict[str, Any], _digest: SessionDigest) -> str:
+        return str(result.get("scope", "")).strip().lower()
 
     def _infer_bootstrap_target(self, result: dict[str, Any], digest: SessionDigest) -> str:
-        if self._looks_like_tool_learning(result):
-            return "TOOLS.md"
-        if self._looks_like_identity_learning(result):
-            return "IDENTITY.md"
-        if self._looks_like_operational_learning(result, digest):
-            return "AGENTS.md"
-        if self._looks_like_style_learning(result):
-            return "SOUL.md"
-        return "none"
-
-    @staticmethod
-    def _learning_text(result: dict[str, Any]) -> str:
-        return " ".join(
-            str(result.get(field, ""))
-            for field in (
-                "title",
-                "observation",
-                "impact",
-                "lesson",
-                "recommended_behavior",
-                "evidence",
-                "promote_content",
+        scope = str(result.get("scope", "")).strip().lower()
+        if (
+            scope == "assistant_behavior"
+            and digest.user_corrections
+            and (
+                digest.outcomes or digest.open_loops or digest.artifacts_changed or digest.failures
             )
-        )
-
-    @classmethod
-    def _has_any_marker(cls, text: str, markers: set[str]) -> bool:
-        normalized_text = cls._normalize_text(text)
-        token_set = set(normalized_text.split())
-        for marker in markers:
-            normalized_marker = cls._normalize_text(marker)
-            if not normalized_marker:
-                continue
-            if " " in normalized_marker:
-                if normalized_marker in normalized_text:
-                    return True
-            elif normalized_marker in token_set:
-                return True
-        return False
-
-    def _looks_like_operational_learning(
-        self, result: dict[str, Any], digest: SessionDigest
-    ) -> bool:
-        text = self._learning_text(result)
-        if not text:
-            return False
-        operational_markers = {
-            "delegate",
-            "delegation",
-            "subagent",
-            "plan",
-            "planner",
-            "workflow",
-            "status",
-            "progress",
-            "coordinator",
-            "ownership",
-            "context window",
-            "bootstrap",
-            "journal",
-            "reflection",
-            "memory",
-            "prompt",
-            "session",
-            "background",
-        }
-        return bool(digest.user_corrections) and self._has_any_marker(text, operational_markers)
-
-    def _looks_like_tool_learning(self, result: dict[str, Any]) -> bool:
-        if str(result.get("scope", "")).strip().lower() == "tool_usage":
-            return True
-        text = self._learning_text(result)
-        tool_markers = {
-            "tool",
-            "read_file",
-            "write_file",
-            "edit_file",
-            "list_dir",
-            "search",
-            "bash",
-            "spawn",
-            "subagent tool",
-            "call the tool",
-            "task status",
-        }
-        return self._has_any_marker(text, tool_markers)
-
-    def _looks_like_style_learning(self, result: dict[str, Any]) -> bool:
-        text = self._learning_text(result)
-        style_markers = {
-            "tone",
-            "voice",
-            "concise",
-            "verbosity",
-            "brief",
-            "direct",
-            "personality",
-            "casual",
-            "filler",
-        }
-        return self._has_any_marker(text, style_markers)
-
-    def _looks_like_identity_learning(self, result: dict[str, Any]) -> bool:
-        text = self._learning_text(result)
-        identity_markers = {
-            "identity",
-            "self model",
-            "who i am",
-            "what i am",
-            "durable local ai",
-            "same crab",
-        }
-        return self._has_any_marker(text, identity_markers)
+        ):
+            return "AGENTS.md"
+        return self._default_promotion_target(scope) if scope in self.VALID_SCOPES else "none"
 
     def _promotion_audit_path(self) -> Path:
         """Return the audit log path for bootstrap promotions."""

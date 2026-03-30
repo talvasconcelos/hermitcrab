@@ -12,7 +12,7 @@ from typing import Any
 
 from loguru import logger
 
-from hermitcrab.agent.message_preparation import is_empty_response, is_intent_only_response
+from hermitcrab.agent.message_preparation import is_empty_response
 from hermitcrab.agent.tool_call_recovery import coerce_inline_tool_calls, normalize_tool_calls
 from hermitcrab.agent.tools.filesystem import EditFileTool, ListDirTool, ReadFileTool, WriteFileTool
 from hermitcrab.agent.tools.registry import ToolRegistry
@@ -133,11 +133,6 @@ class SubagentManager:
         return normalize_tool_calls(tool_calls)
 
     @staticmethod
-    def _is_intent_only_response(text: str | None) -> bool:
-        """Detect planning-only text that should not be treated as a final result."""
-        return is_intent_only_response(text)
-
-    @staticmethod
     def _is_empty_response(text: str | None) -> bool:
         """Treat blank or whitespace-only replies as missing output."""
         return is_empty_response(text)
@@ -223,7 +218,7 @@ class SubagentManager:
             iteration = 0
             final_result: str | None = None
             tools_used: list[str] = []
-            intent_reprompt_count = 0
+            post_tool_empty_reprompt_count = 0
             empty_reprompt_count = 0
 
             while iteration < max_iterations:
@@ -309,13 +304,10 @@ class SubagentManager:
                         final_result = None
                         continue
 
-                    needs_reprompt = tools_used and (
-                        self._is_empty_response(final_result)
-                        or self._is_intent_only_response(final_result)
-                    )
+                    needs_reprompt = tools_used and self._is_empty_response(final_result)
                     if needs_reprompt:
-                        intent_reprompt_count += 1
-                        if intent_reprompt_count >= 2:
+                        post_tool_empty_reprompt_count += 1
+                        if post_tool_empty_reprompt_count >= 2:
                             final_result = (
                                 "I used tools for the task, but the model kept stopping without "
                                 "a usable final result."
@@ -325,9 +317,9 @@ class SubagentManager:
                             {
                                 "role": "system",
                                 "content": (
-                                    "Do not stop with an empty reply or an intention statement. "
-                                    "You already used tools. Either call the next tool now, or "
-                                    "reply with the actual task result."
+                                    "Do not stop with an empty reply. You already used tools. "
+                                    "Either call the next tool now, or reply with the actual task "
+                                    "result."
                                 ),
                             }
                         )

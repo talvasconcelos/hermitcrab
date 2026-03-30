@@ -149,10 +149,6 @@ class BackgroundJobManager:
     def should_commit_distilled_candidate(self, candidate: AtomicCandidate) -> bool:
         return self._distillation_manager.should_commit_distilled_candidate(candidate)
 
-    @staticmethod
-    def looks_like_non_decision_artifact(candidate: AtomicCandidate) -> bool:
-        return DistillationManager.looks_like_non_decision_artifact(candidate)
-
     async def distill_session(self, session: Any, distillation_job_class: Any) -> None:
         await self._distillation_manager.distill_session(session, distillation_job_class)
 

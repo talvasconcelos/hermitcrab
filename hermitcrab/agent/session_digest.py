@@ -151,12 +151,23 @@ class SessionDigestBuilder:
                 tool_calls = (
                     msg.get("tool_calls") if isinstance(msg.get("tool_calls"), list) else []
                 )
-                if content and not is_transition_assistant_message(content, tool_calls):
+                if (
+                    content
+                    and not is_transition_assistant_message(content, tool_calls)
+                    and self._is_grounded_assistant_content(
+                        content,
+                        user_requests=user_requests,
+                        outcomes=outcomes,
+                        artifacts_changed=artifacts_changed,
+                    )
+                ):
                     assistant_responses.append(content)
                 tool_turn_count += self._digest_assistant_message(
                     msg,
                     content,
                     event_lines,
+                    user_requests,
+                    outcomes,
                     wikilinks,
                     artifacts_changed,
                     decisions_made,
@@ -201,12 +212,23 @@ class SessionDigestBuilder:
         msg: dict[str, Any],
         content: str,
         event_lines: list[str],
+        user_requests: list[str],
+        outcomes: list[str],
         wikilinks: list[str],
         artifacts_changed: list[str],
         decisions_made: list[str],
     ) -> int:
         tool_calls = msg.get("tool_calls") if isinstance(msg.get("tool_calls"), list) else []
-        if content and not is_transition_assistant_message(content, tool_calls):
+        if (
+            content
+            and not is_transition_assistant_message(content, tool_calls)
+            and self._is_grounded_assistant_content(
+                content,
+                user_requests=user_requests,
+                outcomes=outcomes,
+                artifacts_changed=artifacts_changed,
+            )
+        ):
             event_lines.append(f"- Assistant: {content}")
         for call in tool_calls:
             if not isinstance(call, dict):
@@ -229,6 +251,41 @@ class SessionDigestBuilder:
             if focus:
                 event_lines.append(f"- Assistant used {tool_name}: {focus}")
         return len(tool_calls)
+
+    @staticmethod
+    def _is_grounded_assistant_content(
+        content: str,
+        *,
+        user_requests: list[str],
+        outcomes: list[str],
+        artifacts_changed: list[str],
+    ) -> bool:
+        references = [*user_requests[-3:], *outcomes[-3:], *artifacts_changed[-3:]]
+        if not references:
+            return True
+
+        content_tokens = {
+            token
+            for token in SessionDigestBuilder._tokenize_grounding_text(content)
+            if len(token) >= 4
+        }
+        if not content_tokens:
+            return False
+
+        for reference in references:
+            reference_tokens = {
+                token
+                for token in SessionDigestBuilder._tokenize_grounding_text(reference)
+                if len(token) >= 4
+            }
+            if content_tokens & reference_tokens:
+                return True
+        return False
+
+    @staticmethod
+    def _tokenize_grounding_text(value: str) -> list[str]:
+        normalized = "".join(char.lower() if char.isalnum() else " " for char in value)
+        return normalized.split()
 
     @staticmethod
     def _build_open_loops(
@@ -265,19 +322,9 @@ class SessionDigestBuilder:
             failure = f"{tool_name}: {content}"
             failures.append(failure)
             event_lines.append(f"- Tool failure ({tool_name}): {content}")
-        elif lowered.startswith(
-            (
-                "successfully wrote",
-                "successfully edited",
-                "successfully created",
-                "successfully updated",
-                "applied patch",
-            )
-        ):
+        elif tool_name == "edit_file" or tool_name.startswith("write_"):
             outcomes.append(content)
             event_lines.append(f"- Tool success ({tool_name}): {content}")
-        elif lowered.startswith(("task saved:", "goal saved:", "decision saved:", "fact saved:")):
-            outcomes.append(content)
 
     @staticmethod
     def format_digest_timestamp(value: str) -> str:
