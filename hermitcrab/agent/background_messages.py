@@ -78,5 +78,6 @@ def is_low_value_system_reply(content: str | None) -> bool:
         "please refine the request or provide more constraints",
         "i've completed processing but have no response to give",
         "i reached the maximum number of tool call iterations",
+        "i completed the tool work, but the model stopped before producing a usable final answer",
     )
     return any(marker in normalized for marker in low_value_markers)

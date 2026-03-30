@@ -503,7 +503,7 @@ async def test_run_agent_loop_reprompts_empty_post_tool_response(agent_loop, moc
 async def test_run_agent_loop_returns_honest_fallback_after_repeated_intent_only(
     agent_loop, mock_provider
 ):
-    """Repeated planning-only replies should not be forwarded as final output."""
+    """Repeated planning-only replies should fall back to grounded tool output."""
     mock_provider.chat.side_effect = [
         LLMResponse(
             content=None,
@@ -519,7 +519,8 @@ async def test_run_agent_loop_returns_honest_fallback_after_repeated_intent_only
         [{"role": "user", "content": "check memory"}]
     )
 
-    assert "without a usable answer after tool calls" in final_content.lower()
+    assert "i checked memory" in final_content.lower()
+    assert "no memory items found" in final_content.lower()
     assert tools_used == ["read_memory"]
     assert mock_provider.chat.await_count == 3
 
@@ -528,7 +529,7 @@ async def test_run_agent_loop_returns_honest_fallback_after_repeated_intent_only
 async def test_run_agent_loop_returns_honest_fallback_after_repeated_empty_post_tool_response(
     agent_loop, mock_provider
 ):
-    """Repeated blank replies after tool use should yield an explicit failure message."""
+    """Repeated blank replies after tool use should fall back to grounded tool output."""
     mock_provider.chat.side_effect = [
         LLMResponse(
             content=None,
@@ -544,9 +545,97 @@ async def test_run_agent_loop_returns_honest_fallback_after_repeated_empty_post_
         [{"role": "user", "content": "check memory"}]
     )
 
-    assert "without a usable answer after tool calls" in final_content.lower()
+    assert "i checked memory" in final_content.lower()
+    assert "no memory items found" in final_content.lower()
     assert tools_used == ["read_memory"]
     assert mock_provider.chat.await_count == 3
+
+
+@pytest.mark.asyncio
+async def test_process_message_persists_final_assistant_reply(agent_loop, mock_provider):
+    """The saved session should include the exact assistant reply shown to the user."""
+    mock_provider.chat.return_value = LLMResponse(content="done")
+
+    response = await agent_loop._process_message(
+        InboundMessage(
+            channel="cli",
+            sender_id="user",
+            chat_id="direct",
+            content="say done",
+        )
+    )
+
+    assert response is not None
+    assert response.content == "done"
+
+    session = agent_loop.sessions.get_or_create("cli:direct")
+    assert session.messages[-1]["role"] == "assistant"
+    assert session.messages[-1]["content"] == "done"
+
+
+@pytest.mark.asyncio
+async def test_process_message_handles_resume_query_without_model_call(agent_loop, mock_provider):
+    """Resume-style queries should use deterministic session recall."""
+    session = agent_loop.sessions.get_or_create("cli:direct")
+    session.messages = [
+        {"role": "user", "content": "Check what we did last time"},
+        {
+            "role": "assistant",
+            "content": "Let me check memory.",
+            "tool_calls": [
+                {
+                    "id": "call_1",
+                    "type": "function",
+                    "function": {"name": "read_memory", "arguments": '{"category":"tasks"}'},
+                }
+            ],
+        },
+        {
+            "role": "tool",
+            "tool_call_id": "call_1",
+            "name": "read_memory",
+            "content": "[tasks] Ship release checklist (id=1234abcd)\nFinish the release validation run.",
+        },
+    ]
+
+    response = await agent_loop._process_message(
+        InboundMessage(
+            channel="cli",
+            sender_id="user",
+            chat_id="direct",
+            content="where did we leave off last time?",
+        )
+    )
+
+    assert response is not None
+    assert "here's where we left off" in response.content.lower()
+    assert "used `read_memory`" in response.content.lower()
+    assert "no final answer was saved" in response.content.lower()
+    mock_provider.chat.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_process_message_resume_query_recap_persists_reply(agent_loop, mock_provider):
+    """Deterministic recap replies should also be saved into the session."""
+    session = agent_loop.sessions.get_or_create("cli:direct")
+    session.messages = [
+        {"role": "user", "content": "Prepare the release"},
+        {"role": "assistant", "content": "The release checklist is ready."},
+    ]
+
+    response = await agent_loop._process_message(
+        InboundMessage(
+            channel="cli",
+            sender_id="user",
+            chat_id="direct",
+            content="where did we leave off last time?",
+        )
+    )
+
+    assert response is not None
+    assert session.messages[-1]["role"] == "assistant"
+    assert session.messages[-1]["content"] == response.content
+    mock_provider.chat.assert_not_awaited()
 
 
 @pytest.mark.asyncio

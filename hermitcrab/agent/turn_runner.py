@@ -103,6 +103,80 @@ class TurnRunner:
         payload = [{"name": tc.name, "arguments": tc.arguments} for tc in tool_calls]
         return json.dumps(payload, sort_keys=True, ensure_ascii=False, default=str)
 
+    @staticmethod
+    def _is_tool_error_result(result: str | None) -> bool:
+        normalized = (result or "").strip().lower()
+        return normalized.startswith("error") or normalized.startswith("tool error")
+
+    @staticmethod
+    def _trim_tool_result(result: str, max_chars: int = 900) -> str:
+        result = result.strip()
+        if len(result) <= max_chars:
+            return result
+        return result[: max_chars - 3].rstrip() + "..."
+
+    def _build_tool_result_fallback(
+        self,
+        *,
+        request_text: str | None,
+        tool_results: list[tuple[str, str]],
+    ) -> str | None:
+        usable = [
+            (name, result)
+            for name, result in tool_results
+            if not self._is_tool_error_result(result)
+        ]
+        if not usable:
+            return None
+
+        latest_name, latest_result = usable[-1]
+        request_snippet = None
+        if isinstance(request_text, str) and request_text.strip():
+            request_snippet = " ".join(request_text.strip().split())
+
+        if latest_name in {"read_memory", "search_memory"}:
+            prefix = "I checked memory"
+        elif latest_name == "list_dir":
+            prefix = "I checked the directory contents"
+        elif latest_name == "read_file":
+            prefix = "I checked the file"
+        elif latest_name == "exec":
+            prefix = "I ran the requested command"
+        else:
+            prefix = f"I completed the `{latest_name}` step"
+
+        if request_snippet:
+            prefix += f" for: {request_snippet}"
+
+        if len(usable) == 1:
+            return f"{prefix}, but the model stopped before writing the final answer.\n\n{self._trim_tool_result(latest_result)}"
+
+        lines = [
+            f"{prefix}, but the model stopped before writing the final answer.",
+            "",
+            "Here are the latest grounded tool results:",
+        ]
+        for name, result in usable[-3:]:
+            lines.append(f"- `{name}`: {self._trim_tool_result(result, max_chars=280)}")
+        return "\n".join(lines)
+
+    def _append_final_assistant_message(
+        self,
+        messages: list[dict[str, Any]],
+        final_content: str | None,
+    ) -> list[dict[str, Any]]:
+        if final_content is None:
+            return messages
+        if messages:
+            last = messages[-1]
+            if (
+                last.get("role") == "assistant"
+                and last.get("content") == final_content
+                and not last.get("tool_calls")
+            ):
+                return messages
+        return self.context.add_assistant_message(messages, final_content)
+
     async def _consume_streaming_response(
         self,
         *,
@@ -182,10 +256,20 @@ class TurnRunner:
         iteration = 0
         final_content = None
         tools_used: list[str] = []
+        tool_results: list[tuple[str, str]] = []
         started_at = time.monotonic()
         last_tool_signature: str | None = None
         repeated_tool_cycles = 0
         intent_reprompt_count = 0
+        post_tool_repair_attempted = False
+        current_request = next(
+            (
+                msg.get("content")
+                for msg in reversed(initial_messages)
+                if msg.get("role") == "user" and isinstance(msg.get("content"), str)
+            ),
+            None,
+        )
 
         model = self.get_model_for_job(job_class)
         if model is None:
@@ -372,6 +456,7 @@ class TurnRunner:
                     messages = self.context.add_tool_result(
                         messages, tool_call.id, tool_call.name, result
                     )
+                    tool_results.append((tool_call.name, result))
                     if tool_call.name == "spawn" and spawned_result is None:
                         spawned_result = result
 
@@ -381,6 +466,7 @@ class TurnRunner:
                     break
                 if final_content is not None:
                     break
+                post_tool_repair_attempted = False
                 continue
 
             repeated_tool_cycles = 0
@@ -391,33 +477,54 @@ class TurnRunner:
             )
             if needs_reprompt:
                 intent_reprompt_count += 1
-                logger.warning(
-                    "Non-final response after tool usage; reprompting model (attempt {}, empty={}, intent_only={})",
-                    intent_reprompt_count,
-                    self.is_empty_response(final_content),
-                    self.is_intent_only_response(final_content),
+                failure_type = (
+                    "empty_post_tool_response"
+                    if self.is_empty_response(final_content)
+                    else "intent_only_post_tool_response"
                 )
-                if intent_reprompt_count >= 2:
-                    logger.warning("Stopping after repeated non-final responses post-tool usage")
-                    final_content = (
-                        "I checked the available context, but the model kept stopping without a "
-                        "usable answer after tool calls. Please retry this request or switch to "
-                        "a stronger tool-calling model."
+                logger.warning(
+                    "Non-final response after tool usage; reprompting model (attempt {}, type={}, finish_reason={})",
+                    intent_reprompt_count,
+                    failure_type,
+                    response.finish_reason,
+                )
+                if not post_tool_repair_attempted:
+                    post_tool_repair_attempted = True
+                    messages.append(
+                        {
+                            "role": "system",
+                            "content": (
+                                "Final answer required now. You already have the tool results. "
+                                "Do not narrate your next step. Do not call more tools unless the "
+                                "tool results clearly show something is missing. Either reply to the "
+                                "user with the actual result, or explain exactly what is missing in "
+                                "one concise answer."
+                            ),
+                        }
                     )
+                    final_content = None
+                    continue
+
+                tool_result_fallback = self._build_tool_result_fallback(
+                    request_text=current_request,
+                    tool_results=tool_results,
+                )
+                if tool_result_fallback:
+                    logger.warning(
+                        "Recovered post-tool turn with deterministic fallback (type={}, tools={})",
+                        failure_type,
+                        [name for name, _ in tool_results[-3:]],
+                    )
+                    final_content = tool_result_fallback
                     break
 
-                messages.append(
-                    {
-                        "role": "system",
-                        "content": (
-                            "Do not stop with an empty reply or an intention statement. "
-                            "You already used tools. Either call the next tool now, or reply "
-                            "with the actual result for the user."
-                        ),
-                    }
+                logger.warning("Stopping after repeated non-final responses post-tool usage")
+                final_content = (
+                    "I completed the tool work, but the model stopped before producing a usable "
+                    f"final answer ({failure_type}). Please retry this request or switch to a "
+                    "stronger tool-calling model."
                 )
-                final_content = None
-                continue
+                break
 
             logger.info(
                 "Agent loop completed without tool calls at iteration {} (final_chars={})",
@@ -440,4 +547,5 @@ class TurnRunner:
             tools_used,
             len(final_content or ""),
         )
+        messages = self._append_final_assistant_message(messages, final_content)
         return final_content, tools_used, messages

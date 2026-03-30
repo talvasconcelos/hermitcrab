@@ -1,6 +1,6 @@
 [project]
 name = "hermitcrab-ai"
-version = "0.1.0a3"
+version = "0.1.0a4"
 description = "A lightweight, memory-first, Nostr-primary personal AI assistant"
 requires-python = ">=3.11"
 readme = "README.md"
@@ -96,3 +96,8 @@ ignore = ["E501"]
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
+
+[dependency-groups]
+dev = [
+    "desloppify[full]>=0.9.14",
+]
