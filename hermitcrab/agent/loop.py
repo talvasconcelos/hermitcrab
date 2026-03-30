@@ -994,10 +994,6 @@ class AgentLoop:
             self.execution_state.set(
                 session_key, ExecutionPhase.WAITING_BACKGROUND, "starting new session"
             )
-            session.clear()
-            session.metadata.pop("last_cognition_index", None)
-            self.sessions.save(session)
-            self.sessions.invalidate(session.key)
             return OutboundMessage(
                 channel=msg.channel, chat_id=msg.chat_id, content="New session started."
             )

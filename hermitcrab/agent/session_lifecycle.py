@@ -142,6 +142,7 @@ class SessionLifecycleManager:
         messages_for_background = all_messages[last_cognition_index:]
         session.metadata["last_cognition_index"] = len(all_messages)
         self.sessions.save(session)
+        self.sessions.archive(session, reason)
 
         if not messages_for_background:
             logger.debug(

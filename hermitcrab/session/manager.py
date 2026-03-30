@@ -32,12 +32,7 @@ class Session:
 
     def add_message(self, role: str, content: str, **kwargs: Any) -> None:
         """Add a message to the session."""
-        msg = {
-            "role": role,
-            "content": content,
-            "timestamp": datetime.now().isoformat(),
-            **kwargs
-        }
+        msg = {"role": role, "content": content, "timestamp": datetime.now().isoformat(), **kwargs}
         self.messages.append(msg)
         self.updated_at = datetime.now()
 
@@ -61,7 +56,11 @@ class Session:
         first_role = first.get("role")
         if first_role == "tool":
             return True
-        if first_role == "assistant" and isinstance(first.get("tool_calls"), list) and first["tool_calls"]:
+        if (
+            first_role == "assistant"
+            and isinstance(first.get("tool_calls"), list)
+            and first["tool_calls"]
+        ):
             return True
         if first_role != "user":
             return False
@@ -122,6 +121,7 @@ class SessionManager:
     def __init__(self, workspace: Path):
         self.workspace = workspace
         self.sessions_dir = ensure_dir(self.workspace / "sessions")
+        self.archive_dir = ensure_dir(self.sessions_dir / "archive")
         self.legacy_sessions_dir = Path.home() / ".hermitcrab" / "sessions"
         self._cache: dict[str, Session] = {}
 
@@ -185,7 +185,11 @@ class SessionManager:
 
                     if data.get("_type") == "metadata":
                         metadata = data.get("metadata", {})
-                        created_at = datetime.fromisoformat(data["created_at"]) if data.get("created_at") else None
+                        created_at = (
+                            datetime.fromisoformat(data["created_at"])
+                            if data.get("created_at")
+                            else None
+                        )
                     else:
                         messages.append(data)
 
@@ -193,7 +197,7 @@ class SessionManager:
                 key=key,
                 messages=messages,
                 created_at=created_at or datetime.now(),
-                metadata=metadata
+                metadata=metadata,
             )
         except Exception as e:
             logger.warning("Failed to load session {}: {}", key, e)
@@ -209,7 +213,7 @@ class SessionManager:
                 "key": session.key,
                 "created_at": session.created_at.isoformat(),
                 "updated_at": session.updated_at.isoformat(),
-                "metadata": session.metadata
+                "metadata": session.metadata,
             }
             f.write(json.dumps(metadata_line, ensure_ascii=False) + "\n")
             for msg in session.messages:
@@ -220,6 +224,26 @@ class SessionManager:
     def invalidate(self, key: str) -> None:
         """Remove a session from the in-memory cache."""
         self._cache.pop(key, None)
+
+    def archive(self, session: Session, reason: str) -> Path | None:
+        """Archive the current on-disk session and reset in-memory state."""
+        path = self._get_session_path(session.key)
+        if not path.exists():
+            self.invalidate(session.key)
+            session.clear()
+            session.metadata.clear()
+            return None
+
+        ts = datetime.now().strftime("%Y-%m-%dT%H-%M-%S")
+        archive_name = f"{safe_filename(session.key.replace(':', '_'))}-{reason}-{ts}.jsonl"
+        archive_path = self.archive_dir / archive_name
+        path.replace(archive_path)
+        logger.info("Archived session {} -> {}", session.key, archive_path.name)
+
+        self.invalidate(session.key)
+        session.clear()
+        session.metadata.clear()
+        return archive_path
 
     def list_sessions(self) -> list[dict[str, Any]]:
         """
@@ -239,12 +263,14 @@ class SessionManager:
                         data = json.loads(first_line)
                         if data.get("_type") == "metadata":
                             key = data.get("key") or path.stem.replace("_", ":", 1)
-                            sessions.append({
-                                "key": key,
-                                "created_at": data.get("created_at"),
-                                "updated_at": data.get("updated_at"),
-                                "path": str(path)
-                            })
+                            sessions.append(
+                                {
+                                    "key": key,
+                                    "created_at": data.get("created_at"),
+                                    "updated_at": data.get("updated_at"),
+                                    "path": str(path),
+                                }
+                            )
             except Exception:
                 continue
 

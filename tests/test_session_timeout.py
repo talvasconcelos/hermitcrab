@@ -80,6 +80,7 @@ class TestUpdateSessionTimer:
 
         # Wait a bit and update again
         import time
+
         time.sleep(0.01)
         agent_loop._update_session_timer(session_key)
         second = agent_loop._session_timers[session_key]
@@ -182,7 +183,8 @@ class TestSessionTimeoutIntegration:
 
         # Check which sessions timed out
         timed_out = [
-            k for k in list(agent_loop._session_timers.keys())
+            k
+            for k in list(agent_loop._session_timers.keys())
             if agent_loop._check_session_timeout(k)
         ]
 
@@ -258,6 +260,7 @@ class TestBackgroundTaskScheduling:
     @pytest.mark.asyncio
     async def test_schedule_background_creates_task(self, agent_loop):
         """Background task is created and tracked."""
+
         async def dummy_coro():
             pass
 
@@ -268,6 +271,7 @@ class TestBackgroundTaskScheduling:
     @pytest.mark.asyncio
     async def test_schedule_background_handles_failure(self, agent_loop):
         """Background task failure is logged, not raised."""
+
         async def failing_coro():
             raise Exception("Test failure")
 
@@ -279,11 +283,13 @@ class TestBackgroundTaskScheduling:
 
         # Wait for task to complete (and fail)
         import asyncio
+
         await asyncio.sleep(0.1)
 
     @pytest.mark.asyncio
     async def test_completed_task_removed_from_tracking(self, agent_loop):
         """Completed task is removed from tracking set."""
+
         async def quick_coro():
             pass
 
@@ -291,6 +297,7 @@ class TestBackgroundTaskScheduling:
 
         # Wait for completion
         import asyncio
+
         await asyncio.sleep(0.1)
 
         # Task should be removed (handled in _wrapped finally block)
@@ -305,7 +312,13 @@ class TestSessionEndToTimeout:
         """Expired sessions are finalized by the active timeout monitor hook."""
         session_key = "timeout:test"
         session = agent_loop.sessions.get_or_create(session_key)
-        session.messages.append({"role": "user", "content": "hello", "timestamp": datetime.now(timezone.utc).isoformat()})
+        session.messages.append(
+            {
+                "role": "user",
+                "content": "hello",
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+            }
+        )
         agent_loop._session_timers[session_key] = datetime.now(timezone.utc) - timedelta(hours=2)
 
         with patch.object(
@@ -328,13 +341,20 @@ class TestSessionEndToTimeout:
 
         # Should complete without raising
         import asyncio
+
         asyncio.run(agent_loop._on_session_end(session, reason="timeout"))
 
     @pytest.mark.asyncio
     async def test_process_expired_sessions_only_schedules_each_session_once(self, agent_loop):
         session_key = "timeout:once"
         session = agent_loop.sessions.get_or_create(session_key)
-        session.messages.append({"role": "user", "content": "hello", "timestamp": datetime.now(timezone.utc).isoformat()})
+        session.messages.append(
+            {
+                "role": "user",
+                "content": "hello",
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+            }
+        )
         agent_loop._session_timers[session_key] = datetime.now(timezone.utc) - timedelta(hours=2)
 
         with patch.object(
@@ -353,7 +373,13 @@ class TestSessionEndToTimeout:
     async def test_process_expired_sessions_skips_busy_sessions(self, agent_loop):
         session_key = "timeout:busy"
         session = agent_loop.sessions.get_or_create(session_key)
-        session.messages.append({"role": "user", "content": "hello", "timestamp": datetime.now(timezone.utc).isoformat()})
+        session.messages.append(
+            {
+                "role": "user",
+                "content": "hello",
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+            }
+        )
         agent_loop._session_timers[session_key] = datetime.now(timezone.utc) - timedelta(hours=2)
         agent_loop._session_active_turns[session_key] = 1
 
@@ -362,3 +388,31 @@ class TestSessionEndToTimeout:
 
         assert expired == 0
         assert not mock_schedule.called
+
+    @pytest.mark.asyncio
+    async def test_on_session_end_archives_timeout_session_file(self, agent_loop):
+        session_key = "timeout:archive"
+        session = agent_loop.sessions.get_or_create(session_key)
+        session.messages.append(
+            {
+                "role": "user",
+                "content": "hello",
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+            }
+        )
+        agent_loop.sessions.save(session)
+
+        with patch.object(
+            agent_loop,
+            "_schedule_background",
+            side_effect=lambda coro, _task_name: coro.close(),
+        ):
+            await agent_loop._on_session_end(session, reason="timeout")
+
+        active_path = agent_loop.workspace / "sessions" / "timeout_archive.jsonl"
+        archived = list(
+            (agent_loop.workspace / "sessions" / "archive").glob("timeout_archive-timeout-*.jsonl")
+        )
+
+        assert not active_path.exists()
+        assert archived
