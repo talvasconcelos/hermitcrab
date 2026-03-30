@@ -583,6 +583,40 @@ async def test_process_message_resume_query_flows_through_normal_model_turn(
 
 
 @pytest.mark.asyncio
+async def test_process_message_uses_recent_archived_history_for_same_chat_follow_up(
+    agent_loop, mock_provider
+):
+    """A fresh same-chat session should reuse very recent archived history for continuity."""
+    session = agent_loop.sessions.get_or_create("nostr:chat")
+    session.messages = [
+        {"role": "user", "content": "Store the groceries list as a knowledge note."},
+        {"role": "assistant", "content": "Done! It's in knowledge/notes/Groceries list.md."},
+    ]
+    agent_loop.sessions.save(session)
+    agent_loop.sessions.archive(session, "timeout")
+    mock_provider.chat.return_value = LLMResponse(content="done")
+
+    await agent_loop._process_message(
+        InboundMessage(
+            channel="nostr",
+            sender_id="user",
+            chat_id="chat",
+            content="can you add milk and eggs also?",
+        )
+    )
+
+    sent_messages = mock_provider.chat.await_args.kwargs["messages"]
+    assert any(
+        msg.get("content") == "Store the groceries list as a knowledge note."
+        for msg in sent_messages
+    )
+    assert any(
+        msg.get("content") == "Done! It's in knowledge/notes/Groceries list.md."
+        for msg in sent_messages
+    )
+
+
+@pytest.mark.asyncio
 async def test_distillation_skips_null_candidates(agent_loop, mock_provider):
     session = agent_loop.sessions.get_or_create("cli:test-distill")
     session.messages = [

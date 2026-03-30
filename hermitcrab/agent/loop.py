@@ -949,7 +949,17 @@ class AgentLoop:
                     message_tool.start_turn()
 
             history = session.get_history(max_messages=self.memory_window)
-            initial_messages = self._build_interactive_messages(msg, scratchpad_path, history)
+            history_for_prompt = history
+            if not history_for_prompt:
+                history_for_prompt = self.sessions.get_recent_archived_history(
+                    key,
+                    max_messages=min(12, self.memory_window),
+                )
+            initial_messages = self._build_interactive_messages(
+                msg,
+                scratchpad_path,
+                history_for_prompt,
+            )
             progress_callback = on_progress or self._build_bus_progress_callback(msg, key)
             final_content, _, all_msgs = await self._run_agent_loop(
                 initial_messages,

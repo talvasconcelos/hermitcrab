@@ -3,7 +3,7 @@
 import json
 import shutil
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -135,6 +135,15 @@ class SessionManager:
         safe_key = safe_filename(key.replace(":", "_"))
         return self.legacy_sessions_dir / f"{safe_key}.jsonl"
 
+    def _archived_session_paths(self, key: str) -> list[Path]:
+        """Return archived session files for a key, newest first."""
+        safe_key = safe_filename(key.replace(":", "_"))
+        return sorted(
+            self.archive_dir.glob(f"{safe_key}-*.jsonl"),
+            key=lambda path: path.name,
+            reverse=True,
+        )
+
     def get_or_create(self, key: str) -> Session:
         """
         Get an existing session or create a new one.
@@ -171,37 +180,48 @@ class SessionManager:
             return None
 
         try:
-            messages = []
-            metadata = {}
-            created_at = None
-
-            with open(path, encoding="utf-8") as f:
-                for line in f:
-                    line = line.strip()
-                    if not line:
-                        continue
-
-                    data = json.loads(line)
-
-                    if data.get("_type") == "metadata":
-                        metadata = data.get("metadata", {})
-                        created_at = (
-                            datetime.fromisoformat(data["created_at"])
-                            if data.get("created_at")
-                            else None
-                        )
-                    else:
-                        messages.append(data)
-
-            return Session(
-                key=key,
-                messages=messages,
-                created_at=created_at or datetime.now(),
-                metadata=metadata,
-            )
+            return self._load_from_path(path, key=key)
         except Exception as e:
             logger.warning("Failed to load session {}: {}", key, e)
             return None
+
+    def _load_from_path(self, path: Path, *, key: str) -> Session:
+        """Load a session object from a specific JSONL path."""
+        messages = []
+        metadata = {}
+        created_at = None
+        updated_at = None
+
+        with open(path, encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+
+                data = json.loads(line)
+
+                if data.get("_type") == "metadata":
+                    metadata = data.get("metadata", {})
+                    created_at = (
+                        datetime.fromisoformat(data["created_at"])
+                        if data.get("created_at")
+                        else None
+                    )
+                    updated_at = (
+                        datetime.fromisoformat(data["updated_at"])
+                        if data.get("updated_at")
+                        else None
+                    )
+                else:
+                    messages.append(data)
+
+        return Session(
+            key=key,
+            messages=messages,
+            created_at=created_at or datetime.now(),
+            updated_at=updated_at or datetime.now(),
+            metadata=metadata,
+        )
 
     def save(self, session: Session) -> None:
         """Save a session to disk."""
@@ -244,6 +264,31 @@ class SessionManager:
         session.clear()
         session.metadata.clear()
         return archive_path
+
+    def get_recent_archived_history(
+        self,
+        key: str,
+        *,
+        max_messages: int = 12,
+        max_age: timedelta = timedelta(hours=6),
+    ) -> list[dict[str, Any]]:
+        """Return recent archived history for the same chat when it ended recently."""
+        now = datetime.now(timezone.utc)
+        for path in self._archived_session_paths(key):
+            try:
+                session = self._load_from_path(path, key=key)
+            except Exception:
+                logger.exception("Failed to load archived session context from {}", path)
+                continue
+
+            age = now - session.updated_at.astimezone(timezone.utc)
+            if age > max_age:
+                return []
+
+            history = session.get_history(max_messages=max_messages)
+            if history:
+                return history
+        return []
 
     def list_sessions(self) -> list[dict[str, Any]]:
         """
