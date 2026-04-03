@@ -114,7 +114,9 @@ class JournalBackgroundManager:
         journal_event_trace = self.digest_builder.build_journal_event_trace(digest)
         return (
             "Write a short first-person journal entry about what happened in this session.\n"
-            "Sound like a useful human journal entry that is still understandable days later, not telemetry.\n"
+            "This is the assistant's own journal. 'I' always refers to the assistant, never the user.\n"
+            "Refer to the human as 'the user', not 'I'.\n"
+            "Sound like a useful agent journal that is still understandable days later, not telemetry.\n"
             "Preserve concrete specifics: what the user wanted, what changed, the important artifacts, the outcome, and anything still open.\n"
             "Use Obsidian-style wikilinks when referencing tasks, goals, decisions, reflections, or named work items.\n"
             "Do not mention counts of messages, requests, or tool calls.\n\n"
@@ -135,8 +137,9 @@ class JournalBackgroundManager:
     def _build_journal_repair_prompt(self, digest: Any, prior_content: str | None) -> str:
         return (
             "Rewrite the journal entry so it is specific and grounded in the digest. "
-            "Keep it to 4-6 sentences, first person, no bullet list, and include the main user goal, "
+            "Keep it to 4-6 sentences, first person as the assistant, no bullet list, and include the main user goal, "
             "the key artifact or outcome, and any real open loop. "
+            "Do not write from the user's point of view. 'I' refers to the assistant only; say 'the user' for the human. "
             "Do not mention prompt scaffolding, subagent boilerplate, or generic assistant filler.\n\n"
             f"Primary goal: {digest.user_goal or 'unknown'}\n"
             f"Artifacts: {', '.join(digest.artifacts_changed) if digest.artifacts_changed else 'none'}\n"
@@ -162,6 +165,7 @@ class JournalBackgroundManager:
             return False
 
         normalized = cleaned.lower()
+
         grounding_terms = [
             digest.user_goal,
             *(digest.artifacts_changed or []),
@@ -169,17 +173,19 @@ class JournalBackgroundManager:
             *(digest.open_loops or []),
         ]
         grounding_hits = 0
+        grounding_candidates = 0
         for term in grounding_terms:
             if not isinstance(term, str):
                 continue
             snippet = term.strip().lower()
+            if snippet:
+                grounding_candidates += 1
             if snippet and any(
                 token in normalized for token in snippet.split()[:3] if len(token) >= 4
             ):
                 grounding_hits += 1
-            if grounding_hits >= 1:
-                return True
-        return False
+        required_hits = 1 if grounding_candidates <= 1 else 2
+        return grounding_hits >= required_hits
 
     async def synthesize_journal_from_messages(
         self,

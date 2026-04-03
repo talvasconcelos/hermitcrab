@@ -290,6 +290,37 @@ class TestReflectionService:
         assert result["lesson"] == "Test content"
 
     @pytest.mark.asyncio
+    async def test_parse_response_handles_labeled_non_json_reflection(
+        self, memory_store, mock_provider
+    ):
+        service = ReflectionService(
+            memory=memory_store,
+            chat_callable=mock_provider.chat,
+            model="test-model",
+            auto_promote=False,
+            allowed_targets=["AGENTS.md", "TOOLS.md", "SOUL.md", "IDENTITY.md"],
+            max_file_lines=500,
+        )
+
+        text = """
+        Title: Keep ownership of delegated work
+        Observation: The user corrected a weak delegation handoff.
+        Impact: Trust drops when I act like the subagent owns the whole job.
+        Lesson: I should keep broad work under main-agent ownership.
+        Recommended behavior: Plan first and delegate only bounded execution slices.
+        Scope: assistant_behavior
+        Confidence: 0.84
+        Evidence: The user said broad tasks should stay with the main agent.
+        Should promote: true
+        Promotion target: AGENTS.md
+        Promote content: Keep broad work under main-agent ownership.
+        """
+        result = service._parse_response(text)
+        assert result["title"] == "Keep ownership of delegated work"
+        assert result["scope"] == "assistant_behavior"
+        assert result["should_promote"] == "true"
+
+    @pytest.mark.asyncio
     async def test_reflect_on_session_skips_duplicate_reflection(self, memory_store, mock_provider):
         service = ReflectionService(
             memory=memory_store,

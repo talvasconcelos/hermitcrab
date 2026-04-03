@@ -270,19 +270,85 @@ Rules:
         if not content:
             return {"skip": True, "reason": "Invalid response format"}
 
-        try:
-            # Extract JSON from response
-            start = content.find("{")
-            end = content.rfind("}") + 1
-            if start >= 0 and end > start:
-                json_str = content[start:end]
-                result = json_repair.loads(json_str)
-                if isinstance(result, dict):
-                    return result
-        except Exception as e:
-            logger.warning("Failed to parse reflection JSON: {}", e)
+        parsed = self._parse_json_like_response(content)
+        if parsed is not None:
+            return parsed
+
+        parsed = self._parse_labeled_response(content)
+        if parsed is not None:
+            return parsed
 
         return {"skip": True, "reason": "Invalid response format"}
+
+    def _parse_json_like_response(self, content: str) -> dict[str, Any] | None:
+        candidates = [content.strip()]
+
+        fenced = re.findall(r"```(?:json)?\s*(\{.*?\}|\[.*?\])\s*```", content, flags=re.DOTALL)
+        candidates.extend(candidate.strip() for candidate in fenced if candidate.strip())
+
+        start = content.find("{")
+        end = content.rfind("}") + 1
+        if start >= 0 and end > start:
+            candidates.append(content[start:end])
+
+        start = content.find("[")
+        end = content.rfind("]") + 1
+        if start >= 0 and end > start:
+            candidates.append(content[start:end])
+
+        for candidate in candidates:
+            try:
+                result = json_repair.loads(candidate)
+            except Exception as exc:
+                logger.debug("Reflection JSON candidate parse failed: {}", exc)
+                continue
+            normalized = self._normalize_parsed_result(result)
+            if normalized is not None:
+                return normalized
+        return None
+
+    def _normalize_parsed_result(self, result: Any) -> dict[str, Any] | None:
+        if isinstance(result, dict):
+            if isinstance(result.get("reflection"), dict):
+                return dict(result["reflection"])
+            return dict(result)
+        if isinstance(result, list) and result and isinstance(result[0], dict):
+            return dict(result[0])
+        return None
+
+    def _parse_labeled_response(self, content: str) -> dict[str, Any] | None:
+        field_patterns = {
+            "title": r"(?im)^\s*(?:[-*]\s*)?(?:title)\s*:\s*(.+)$",
+            "observation": r"(?im)^\s*(?:[-*]\s*)?(?:observation)\s*:\s*(.+)$",
+            "impact": r"(?im)^\s*(?:[-*]\s*)?(?:impact)\s*:\s*(.+)$",
+            "lesson": r"(?im)^\s*(?:[-*]\s*)?(?:lesson)\s*:\s*(.+)$",
+            "recommended_behavior": r"(?im)^\s*(?:[-*]\s*)?(?:recommended behavior|recommended_behavior)\s*:\s*(.+)$",
+            "scope": r"(?im)^\s*(?:[-*]\s*)?(?:scope)\s*:\s*(.+)$",
+            "evidence": r"(?im)^\s*(?:[-*]\s*)?(?:evidence)\s*:\s*(.+)$",
+            "promotion_target": r"(?im)^\s*(?:[-*]\s*)?(?:promotion target|promotion_target)\s*:\s*(.+)$",
+            "promote_content": r"(?im)^\s*(?:[-*]\s*)?(?:promote content|promote_content)\s*:\s*(.+)$",
+        }
+        result: dict[str, Any] = {}
+        for field, pattern in field_patterns.items():
+            match = re.search(pattern, content)
+            if match:
+                result[field] = match.group(1).strip().strip('"')
+
+        confidence_match = re.search(
+            r"(?im)^\s*(?:[-*]\s*)?(?:confidence)\s*:\s*([0-9.]+)\s*$",
+            content,
+        )
+        if confidence_match:
+            result["confidence"] = confidence_match.group(1)
+
+        should_promote_match = re.search(
+            r"(?im)^\s*(?:[-*]\s*)?(?:should promote|should_promote)\s*:\s*(true|false|yes|no)\s*$",
+            content,
+        )
+        if should_promote_match:
+            result["should_promote"] = should_promote_match.group(1)
+
+        return result or None
 
     def _is_valid_result(self, result: dict[str, Any], digest: SessionDigest) -> bool:
         """Reject malformed or low-value reflections."""

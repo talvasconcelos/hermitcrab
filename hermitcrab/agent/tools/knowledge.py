@@ -156,7 +156,12 @@ class KnowledgeIngestTool(Tool):
             )
 
             if item:
-                return f"Knowledge item ingested: `{item.file_path}`\nTitle: {item.title}\nCategory: {category}"
+                action = item.metadata.get("_write_action", "created")
+                verb = "updated" if action == "updated_existing" else "ingested"
+                return (
+                    f"Knowledge item {verb}: `{item.file_path}`\n"
+                    f"Title: {item.title}\nCategory: {category}"
+                )
             else:
                 return "Failed to ingest knowledge item."
 

@@ -10,6 +10,7 @@ import pytest
 from hermitcrab.agent.journal import JournalStore
 from hermitcrab.agent.journal_background import JournalBackgroundManager
 from hermitcrab.agent.loop import AgentLoop
+from hermitcrab.agent.session_digest import SessionDigestBuilder
 
 
 @pytest.fixture
@@ -218,10 +219,59 @@ class TestJournalStore:
         # Both contents present
         assert "First content" in content
         assert "Second content" in content
-
         # Original frontmatter preserved
         assert "session1" in content
         assert "tag1" in content
+
+
+def test_journal_background_rejects_generic_body_when_digest_has_specifics():
+    digest = SimpleNamespace(
+        user_goal="Create the weekly grocery list",
+        artifacts_changed=["knowledge/notes/checklists/grocery.md"],
+        outcomes=["Created grocery checklist"],
+        open_loops=["Need to add cleaning supplies later"],
+    )
+
+    assert (
+        JournalBackgroundManager._is_usable_journal_body(
+            "I worked on it. I helped the user. I completed the task.",
+            digest,
+        )
+        is False
+    )
+
+
+def test_journal_prompt_requires_agent_point_of_view(temp_workspace: Path):
+    journal = JournalStore(temp_workspace)
+    reflection_service = MagicMock()
+    manager = JournalBackgroundManager(
+        journal=journal,
+        reflection_service=reflection_service,
+        digest_builder=SessionDigestBuilder(),
+        chat_callable=AsyncMock(),
+        get_model_for_job=lambda job_class: "test-model",
+        strip_think=lambda text: text,
+        reasoning_effort=None,
+    )
+    digest = SimpleNamespace(
+        session_key="cli:direct",
+        channel="cli",
+        chat_id="direct",
+        first_timestamp="2026-04-03T10:00:00+00:00",
+        last_timestamp="2026-04-03T10:05:00+00:00",
+        wikilinks=[],
+        event_lines=["- User asked to update a preference", "- I updated memory"],
+        user_goal="Update a shopping preference",
+        artifacts_changed=["memory/facts/shopping-day.md"],
+        outcomes=["Updated shopping preference in memory"],
+        decisions_made=[],
+        open_loops=["Need to verify the reminder time"],
+    )
+
+    prompt = manager._build_journal_prompt(digest)
+
+    assert "assistant's own journal" in prompt
+    assert "'I' always refers to the assistant" in prompt
 
 
 class TestJournalFormatting:

@@ -228,6 +228,11 @@ class WriteFactTool(Tool):
                 confidence=confidence,
                 source=source,
             )
+            action = item.metadata.get("_write_action", "created")
+            if action == "updated_existing":
+                return f"Fact updated: {item.title}"
+            if action == "reused_existing":
+                return f"Fact already covered: {item.title}"
             return f"Fact saved: {item.title}"
         except Exception as e:
             return f"Error saving fact: {str(e)}"

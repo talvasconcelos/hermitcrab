@@ -7,6 +7,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
+from click.exceptions import Exit
 from typer.testing import CliRunner
 
 from hermitcrab.cli.commands import (
@@ -15,10 +16,12 @@ from hermitcrab.cli.commands import (
     _build_onboard_next_steps,
     _build_runtime_model_aliases,
     _get_tty_stdin_fd,
+    _load_runtime_config,
+    _print_agent_response,
     _should_render_progress,
     app,
 )
-from hermitcrab.config.loader import save_config
+from hermitcrab.config.loader import ConfigLoadError, save_config
 from hermitcrab.config.schema import Config, ModelAliasConfig
 from hermitcrab.providers.litellm_provider import LiteLLMProvider
 from hermitcrab.providers.openai_codex_provider import _strip_model_prefix
@@ -26,6 +29,16 @@ from hermitcrab.providers.registry import find_by_model
 from hermitcrab.utils.helpers import resolve_model_alias, resolve_model_alias_config
 
 runner = CliRunner()
+
+
+def _make_slash_loop(workspace: Path) -> tuple[object, object]:
+    from hermitcrab.agent.loop import AgentLoop
+
+    bus = SimpleNamespace(publish_outbound=None, publish_inbound=None)
+    provider = SimpleNamespace(get_default_model=lambda: "test-model")
+    loop = AgentLoop(bus=bus, provider=provider, workspace=workspace)
+    session = loop.sessions.get_or_create("cli:direct")
+    return loop, session
 
 
 def test_get_tty_stdin_fd_returns_none_when_stdin_is_not_a_tty():
@@ -36,6 +49,72 @@ def test_get_tty_stdin_fd_returns_none_when_stdin_is_not_a_tty():
 def test_get_tty_stdin_fd_returns_file_descriptor_for_tty():
     with patch("sys.stdin.fileno", return_value=7), patch("os.isatty", return_value=True):
         assert _get_tty_stdin_fd() == 7
+
+
+def test_print_agent_response_ignores_broken_output_stream():
+    with patch("hermitcrab.cli.commands.console.print", side_effect=BrokenPipeError):
+        _print_agent_response("hello", render_markdown=False)
+
+
+def test_chat_help_mentions_chat_scope_not_full_cli():
+    from hermitcrab.bus.events import InboundMessage
+
+    loop, session = _make_slash_loop(Path("."))
+
+    result = asyncio.run(
+        loop._maybe_handle_slash_command(
+            InboundMessage(channel="cli", sender_id="user", chat_id="direct", content="/help"),
+            "cli:direct",
+            session,
+        )
+    )
+
+    assert result is not None
+    assert "chat commands" in result.content.lower()
+    assert "/reflect" in result.content
+    assert "hermitcrab status" in result.content
+
+
+def test_reflect_slash_command_reports_saved_reflection(tmp_path):
+    from hermitcrab.bus.events import InboundMessage
+
+    loop, session = _make_slash_loop(tmp_path)
+    session.messages = [{"role": "user", "content": "Help me remember my routine."}]
+
+    async def fake_reflect(messages, session_key):
+        loop.memory.write_reflection(
+            title="Test reflection",
+            content="Observation: Test\nImpact: Test\nLesson: Test\nRecommended behavior: Test",
+            tags=["assistant_behavior", "reflection", "learning"],
+            context="manual reflect test",
+        )
+
+    loop._background_jobs.reflect_on_session_from_messages = fake_reflect
+
+    result = asyncio.run(
+        loop._maybe_handle_slash_command(
+            InboundMessage(channel="cli", sender_id="user", chat_id="direct", content="/reflect"),
+            "cli:direct",
+            session,
+        )
+    )
+
+    assert result is not None
+    assert "Reflection complete." in result.content
+    assert "Test reflection" in result.content
+
+
+def test_load_runtime_config_exits_cleanly_on_invalid_config(tmp_path):
+    config_path = tmp_path / "config.json"
+
+    with patch(
+        "hermitcrab.config.loader.load_config",
+        side_effect=ConfigLoadError(config_path, "bad json"),
+    ):
+        with pytest.raises(Exit) as exc:
+            _load_runtime_config()
+
+    assert exc.value.exit_code == 1
 
 
 def test_atomic_write_text_replaces_destination_contents(tmp_path):
@@ -194,18 +273,18 @@ def test_save_config_hardens_file_and_directory_permissions(tmp_path):
     assert file_mode == 0o600
 
 
-def test_config_matches_github_copilot_codex_with_hyphen_prefix():
+@pytest.mark.parametrize(
+    ("model", "provider_name"),
+    [
+        ("github-copilot/gpt-5.3-codex", "github_copilot"),
+        ("openai-codex/gpt-5.1-codex", "openai_codex"),
+    ],
+)
+def test_config_matches_hyphen_prefixed_providers(model, provider_name):
     config = Config()
-    config.agents.defaults.model = "github-copilot/gpt-5.3-codex"
+    config.agents.defaults.model = model
 
-    assert config.get_provider_name() == "github_copilot"
-
-
-def test_config_matches_openai_codex_with_hyphen_prefix():
-    config = Config()
-    config.agents.defaults.model = "openai-codex/gpt-5.1-codex"
-
-    assert config.get_provider_name() == "openai_codex"
+    assert config.get_provider_name() == provider_name
 
 
 def test_find_by_model_prefers_explicit_prefix_over_generic_codex_keyword():
@@ -248,30 +327,32 @@ def test_config_falls_back_to_openrouter_gateway_when_only_openrouter_is_configu
     assert config.get_api_base() == "https://openrouter.ai/api/v1"
 
 
-def test_litellm_provider_prefixes_model_for_openrouter_gateway():
+@pytest.mark.parametrize(
+    ("default_model", "requested_model", "expected"),
+    [
+        (
+            "anthropic/claude-opus-4-5",
+            "anthropic/claude-opus-4-5",
+            "openrouter/anthropic/claude-opus-4-5",
+        ),
+        (
+            "openrouter/anthropic/claude-opus-4-5",
+            "openrouter/anthropic/claude-opus-4-5",
+            "openrouter/anthropic/claude-opus-4-5",
+        ),
+    ],
+)
+def test_litellm_provider_openrouter_resolution(default_model, requested_model, expected):
     provider = LiteLLMProvider(
         api_key="sk-or-test",
         api_base="https://openrouter.ai/api/v1",
-        default_model="anthropic/claude-opus-4-5",
+        default_model=default_model,
         provider_name="openrouter",
     )
 
-    resolved = provider._resolve_model("anthropic/claude-opus-4-5")
+    resolved = provider._resolve_model(requested_model)
 
-    assert resolved == "openrouter/anthropic/claude-opus-4-5"
-
-
-def test_litellm_provider_preserves_explicit_openrouter_prefix():
-    provider = LiteLLMProvider(
-        api_key="sk-or-test",
-        api_base="https://openrouter.ai/api/v1",
-        default_model="openrouter/anthropic/claude-opus-4-5",
-        provider_name="openrouter",
-    )
-
-    resolved = provider._resolve_model("openrouter/anthropic/claude-opus-4-5")
-
-    assert resolved == "openrouter/anthropic/claude-opus-4-5"
+    assert resolved == expected
 
 
 def test_build_job_models_includes_subagent_model():
@@ -327,6 +408,55 @@ def test_channels_status_only_lists_supported_channels():
     assert "Discord" not in result.stdout
     assert "Feishu" not in result.stdout
     assert "Slack" not in result.stdout
+
+
+def test_status_json_reports_missing_config(tmp_path):
+    config_path = tmp_path / "missing-config.json"
+
+    with patch("hermitcrab.cli.diagnostics.get_config_path", return_value=config_path):
+        result = runner.invoke(app, ["status", "--json"])
+
+    assert result.exit_code == 0
+    assert '"config_exists": false' in result.stdout
+    assert '"selected_model": "anthropic/claude-opus-4-5"' in result.stdout
+
+
+def test_doctor_reports_missing_config_with_actionable_fix(tmp_path):
+    config_path = tmp_path / "missing-config.json"
+
+    with patch("hermitcrab.cli.diagnostics.get_config_path", return_value=config_path):
+        result = runner.invoke(app, ["doctor"])
+
+    assert result.exit_code == 0
+    assert "Config file is missing" in result.stdout
+    assert "hermitcrab onboard" in result.stdout
+
+
+def test_status_reports_configured_provider_and_workspace(tmp_path):
+    config_path = tmp_path / "config.json"
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    (workspace / "AGENTS.md").write_text("hello", encoding="utf-8")
+    config = Config.model_validate(
+        {
+            "agents": {
+                "defaults": {
+                    "workspace": str(workspace),
+                    "model": "openrouter/anthropic/claude-opus-4-5",
+                }
+            },
+            "providers": {"openrouter": {"apiKey": "sk-or-test"}},
+        }
+    )
+    config_path.write_text(config.model_dump_json(by_alias=True), encoding="utf-8")
+
+    with patch("hermitcrab.cli.diagnostics.get_config_path", return_value=config_path):
+        result = runner.invoke(app, ["status"])
+
+    assert result.exit_code == 0
+    assert "Selected provider: openrouter" in result.stdout
+    assert "Workspace:" in result.stdout
+    assert "OpenRouter" in result.stdout
 
 
 def test_removed_channels_login_command_is_not_exposed():
@@ -387,12 +517,13 @@ def test_agent_interactive_exit_closes_loop_resources(tmp_path):
         return "/exit"
 
     with (
-        patch("hermitcrab.config.loader.load_config", return_value=config),
+        patch("hermitcrab.cli.commands._load_runtime_config", return_value=config),
         patch("hermitcrab.config.loader.get_data_dir", return_value=tmp_path),
         patch("hermitcrab.cli.commands._make_provider", return_value=SimpleNamespace()),
         patch("hermitcrab.cron.service.CronService", FakeCronService),
         patch("hermitcrab.session.timeout_service.SessionTimeoutService", FakeTimeoutService),
         patch("hermitcrab.agent.loop.AgentLoop", FakeAgentLoop),
+        patch("hermitcrab.cli.commands._get_tty_stdin_fd", return_value=0),
         patch("hermitcrab.cli.commands._init_prompt_session"),
         patch("hermitcrab.cli.commands._flush_pending_tty_input"),
         patch("hermitcrab.cli.commands._restore_terminal"),
@@ -409,6 +540,22 @@ def test_agent_interactive_exit_closes_loop_resources(tmp_path):
     assert "\nGoodbye!" in result.stdout
     assert FakeAgentLoop.instances
     assert FakeAgentLoop.instances[0].closed is True
+
+
+def test_agent_interactive_mode_requires_tty(tmp_path):
+    config = Config()
+    config.agents.defaults.workspace = str(tmp_path)
+
+    with (
+        patch("hermitcrab.cli.commands._load_runtime_config", return_value=config),
+        patch("hermitcrab.config.loader.get_data_dir", return_value=tmp_path),
+        patch("hermitcrab.cli.commands._make_provider", return_value=SimpleNamespace()),
+        patch("hermitcrab.cli.commands._get_tty_stdin_fd", return_value=None),
+    ):
+        result = runner.invoke(app, ["agent"])
+
+    assert result.exit_code == 1
+    assert "Interactive mode requires a TTY" in result.stdout
 
 
 def test_build_job_models_preserves_named_model_references():

@@ -8,6 +8,14 @@ from pathlib import Path
 from hermitcrab.config.schema import Config
 
 
+class ConfigLoadError(RuntimeError):
+    """Raised when a persisted config exists but cannot be loaded safely."""
+
+    def __init__(self, path: Path, message: str):
+        super().__init__(message)
+        self.path = path
+
+
 def get_config_path() -> Path:
     """Get the default configuration file path."""
     return Path.home() / ".hermitcrab" / "config.json"
@@ -20,7 +28,7 @@ def get_data_dir() -> Path:
     return get_data_path()
 
 
-def load_config(config_path: Path | None = None) -> Config:
+def load_config(config_path: Path | None = None, *, strict: bool = False) -> Config:
     """
     Load configuration from file or create default.
 
@@ -39,6 +47,8 @@ def load_config(config_path: Path | None = None) -> Config:
             data = _migrate_config(data)
             return Config.model_validate(data)
         except (json.JSONDecodeError, ValueError) as e:
+            if strict:
+                raise ConfigLoadError(path, f"Failed to load config: {e}") from e
             print(f"Warning: Failed to load config from {path}: {e}")
             print("Using default configuration.")
 

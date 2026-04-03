@@ -185,6 +185,45 @@ class KnowledgeStore:
         for category in self.DEFAULT_CATEGORIES:
             self.category_dirs[category] = ensure_dir(self.knowledge_dir / category)
 
+    @staticmethod
+    def _normalize_text(value: str) -> str:
+        """Normalize text for stable duplicate checks."""
+        return " ".join(value.casefold().split())
+
+    def _find_existing_by_title(self, title: str, category: str) -> list[KnowledgeItem]:
+        """Find existing knowledge items with the same normalized title in a category."""
+        normalized_title = self._normalize_text(title)
+        category_path = self.category_dirs.get(category)
+        if not category_path:
+            return []
+
+        matches: list[KnowledgeItem] = []
+        for file_path in sorted(category_path.rglob("*.md")):
+            item = KnowledgeItem.from_file(file_path)
+            if not item:
+                continue
+            if self._normalize_text(item.title) == normalized_title:
+                matches.append(item)
+        return matches
+
+    def _cleanup_duplicate_title_items(
+        self, canonical: KnowledgeItem, candidates: list[KnowledgeItem]
+    ) -> None:
+        """Remove exact duplicate files that share the same normalized title and content."""
+        canonical_content = self._normalize_text(canonical.content)
+        for item in candidates:
+            if item.file_path == canonical.file_path:
+                continue
+            if self._normalize_text(item.content) != canonical_content:
+                continue
+            try:
+                item.file_path.unlink()
+                logger.info("Removed duplicate knowledge item: {}", item.file_path)
+            except FileNotFoundError:
+                continue
+            except Exception as exc:
+                logger.warning("Failed to remove duplicate knowledge item {}: {}", item.file_path, exc)
+
     def get_item(self, file_path: Path | str) -> KnowledgeItem | None:
         """
         Load a specific knowledge item by path.
@@ -416,16 +455,22 @@ class KnowledgeStore:
             logger.error(f"Category directory not found: {category}")
             return None
 
-        # Generate safe filename from title
-        filename = safe_filename(title) + ".md"
-        file_path = category_path / filename
+        existing_items = self._find_existing_by_title(title, category)
 
-        # Handle filename collisions
-        counter = 1
-        while file_path.exists():
-            filename = safe_filename(title) + f"_{counter}.md"
-            file_path = category_path / filename
-            counter += 1
+        # Reuse the canonical path for an existing note with the same title.
+        file_path = category_path / f"{safe_filename(title)}.md"
+        if existing_items:
+            canonical_existing = next(
+                (item for item in existing_items if item.file_path == file_path),
+                existing_items[0],
+            )
+            file_path = canonical_existing.file_path
+        else:
+            counter = 1
+            while file_path.exists():
+                filename = safe_filename(title) + f"_{counter}.md"
+                file_path = category_path / filename
+                counter += 1
 
         # Build frontmatter
         metadata: dict[str, Any] = {
@@ -444,8 +489,14 @@ class KnowledgeStore:
             post = frontmatter.Post(content, **metadata)
             file_path.write_text(frontmatter.dumps(post), encoding="utf-8")
             logger.info(f"Ingested knowledge item: {file_path}")
+            item = KnowledgeItem.from_file(file_path)
+            if item is None:
+                return None
 
-            return KnowledgeItem.from_file(file_path)
+            item.metadata["_write_action"] = "updated_existing" if existing_items else "created"
+            if existing_items:
+                self._cleanup_duplicate_title_items(item, existing_items)
+            return item
         except Exception as e:
             logger.error(f"Failed to ingest knowledge item: {e}")
             return None

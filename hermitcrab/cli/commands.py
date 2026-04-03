@@ -145,6 +145,58 @@ def _should_render_progress(channels_config: Any, *, is_tool_hint: bool) -> bool
     return bool(channels_config.send_progress)
 
 
+def _build_reflection_config(config: Config) -> dict[str, Any]:
+    """Build reflection promotion settings for AgentLoop."""
+    return {
+        "auto_promote": config.reflection.promotion.auto_promote,
+        "target_files": config.reflection.promotion.target_files,
+        "max_file_lines": config.reflection.promotion.max_file_lines,
+        "notify_user": config.reflection.promotion.notify_user,
+    }
+
+
+def _build_agent_loop_kwargs(
+    config: Config,
+    provider: Any,
+    *,
+    cron_service: Any | None = None,
+    session_manager: Any | None = None,
+) -> dict[str, Any]:
+    """Build the shared AgentLoop configuration used by CLI entrypoints."""
+    return {
+        "provider": provider,
+        "workspace": config.workspace_path,
+        "model": config.agents.defaults.model,
+        "temperature": config.agents.defaults.temperature,
+        "max_tokens": config.agents.defaults.max_tokens,
+        "max_iterations": config.agents.defaults.max_tool_iterations,
+        "memory_window": config.agents.defaults.memory_window,
+        "brave_api_key": config.tools.web.search.api_key or None,
+        "exec_config": config.tools.exec,
+        "cron_service": cron_service,
+        "restrict_to_workspace": config.tools.restrict_to_workspace,
+        "session_manager": session_manager,
+        "mcp_servers": config.tools.mcp_servers,
+        "channels_config": config.channels,
+        "job_models": _build_job_models_from_config(config),
+        "distillation_enabled": config.agents.defaults.enable_distillation,
+        "model_aliases": _build_runtime_model_aliases(config),
+        "named_models": config.models,
+        "reasoning_effort_config": {
+            "reasoning_effort": config.agents.defaults.job_models.reasoning_effort,
+        },
+        "inactivity_timeout_s": config.agents.defaults.inactivity_timeout_s,
+        "llm_max_retries": config.agents.defaults.llm_max_retries,
+        "llm_retry_base_delay_s": config.agents.defaults.llm_retry_base_delay_s,
+        "max_loop_seconds": config.agents.defaults.max_loop_seconds,
+        "max_identical_tool_cycles": config.agents.defaults.max_identical_tool_cycles,
+        "memory_context_max_chars": config.agents.defaults.memory_context_max_chars,
+        "memory_context_max_items_per_category": config.agents.defaults.memory_context_max_items_per_category,
+        "memory_context_max_item_chars": config.agents.defaults.memory_context_max_item_chars,
+        "reflection_config": _build_reflection_config(config),
+    }
+
+
 def _flush_pending_tty_input() -> None:
     """Drop unread keypresses typed while the model was generating output."""
     fd = _get_tty_stdin_fd()
@@ -272,19 +324,36 @@ def _print_agent_response(
 ) -> None:
     """Render assistant response with consistent terminal styling."""
     content = response or ""
-    if prompt_safe:
-        clean = _strip_ansi(content)
-        print_formatted_text("")
-        print_formatted_text(HTML("<ansicyan>🦀 hermitcrab</ansicyan>"))
-        print_formatted_text(clean)
-        print_formatted_text("")
+    try:
+        if prompt_safe:
+            clean = _strip_ansi(content)
+            print_formatted_text("")
+            print_formatted_text(HTML("<ansicyan>🦀 hermitcrab</ansicyan>"))
+            print_formatted_text(clean)
+            print_formatted_text("")
+            return
+
+        body = Markdown(content) if render_markdown else Text(content)
+        console.print()
+        console.print(f"[cyan]{__logo__} hermitcrab[/cyan]")
+        console.print(body)
+        console.print()
+    except (BrokenPipeError, OSError, ValueError):
         return
 
-    body = Markdown(content) if render_markdown else Text(content)
-    console.print()
-    console.print(f"[cyan]{__logo__} hermitcrab[/cyan]")
-    console.print(body)
-    console.print()
+
+def _load_runtime_config() -> Config:
+    """Load config strictly for runtime commands that should fail clearly."""
+    from hermitcrab.config.loader import ConfigLoadError, load_config
+
+    try:
+        return load_config(strict=True)
+    except ConfigLoadError as exc:
+        console.print("[red]Error: Failed to load config.[/red]")
+        console.print(f"Path: {exc.path}")
+        console.print(f"Reason: {exc}")
+        console.print("Fix the file or run [cyan]hermitcrab doctor[/cyan] for diagnostics.")
+        raise typer.Exit(1) from exc
 
 
 def _is_exit_command(command: str) -> bool:
@@ -425,7 +494,8 @@ def _build_onboard_next_steps() -> list[str]:
                 "  1. Recommended local setup detected: [cyan]ollama[/cyan] is installed",
                 "     Start it with [cyan]ollama serve[/cyan] and pull a model like [cyan]ollama pull qwen3.5:4b[/cyan]",
                 "  2. Review [cyan]~/.hermitcrab/config.json[/cyan] and point your main model at Ollama or your preferred provider",
-                '  3. Start chatting: [cyan]hermitcrab agent[/cyan] or [cyan]hermitcrab agent -m "Hello!"[/cyan]',
+                "  3. Verify setup: [cyan]hermitcrab status[/cyan] or [cyan]hermitcrab doctor[/cyan]",
+                '  4. Start chatting: [cyan]hermitcrab agent[/cyan] or [cyan]hermitcrab agent -m "Hello!"[/cyan]',
             ]
         )
         return lines
@@ -435,7 +505,8 @@ def _build_onboard_next_steps() -> list[str]:
             "  1. Choose a provider in [cyan]~/.hermitcrab/config.json[/cyan]",
             "     - Local: install [cyan]Ollama[/cyan] from https://ollama.com and use its local OpenAI-compatible endpoint",
             "     - Cloud: add an API key such as OpenRouter from https://openrouter.ai/keys",
-            '  2. Start chatting: [cyan]hermitcrab agent[/cyan] or [cyan]hermitcrab agent -m "Hello!"[/cyan]',
+            "  2. Verify setup: [cyan]hermitcrab status[/cyan] or [cyan]hermitcrab doctor[/cyan]",
+            '  3. Start chatting: [cyan]hermitcrab agent[/cyan] or [cyan]hermitcrab agent -m "Hello!"[/cyan]',
         ]
     )
     return lines
@@ -452,6 +523,12 @@ def _make_provider(config: Config):
     resolved_model = config.resolve_model_config(model)
     provider_name = config.get_provider_name(model)
     p = config.get_provider(model)
+
+    if provider_name is None:
+        console.print("[red]Error: Could not resolve a provider for the selected model.[/red]")
+        console.print(f"Model: {model}")
+        console.print("Check [cyan]hermitcrab status[/cyan] or [cyan]hermitcrab doctor[/cyan].")
+        raise typer.Exit(1)
 
     def _uses_ollama_anywhere() -> bool:
         candidates: set[str] = set()
@@ -550,8 +627,12 @@ def _make_provider(config: Config):
         and not (p and p.api_key)
         and not (spec and (spec.is_oauth or spec.is_local))
     ):
-        console.print("[red]Error: No API key configured.[/red]")
-        console.print("Set one in ~/.hermitcrab/config.json under providers section")
+        console.print("[red]Error: No API key configured for the selected provider.[/red]")
+        console.print(f"Provider: {provider_name}")
+        console.print(f"Model: {resolved_model_name}")
+        console.print(
+            "Set it in ~/.hermitcrab/config.json or run [cyan]hermitcrab doctor[/cyan]."
+        )
         raise typer.Exit(1)
 
     fallback_provider = LiteLLMProvider(
@@ -597,7 +678,7 @@ def gateway(
     from hermitcrab.agent.loop import AgentLoop
     from hermitcrab.bus.queue import MessageBus
     from hermitcrab.channels.manager import ChannelManager
-    from hermitcrab.config.loader import get_data_dir, load_config
+    from hermitcrab.config.loader import get_data_dir
     from hermitcrab.cron.service import CronService
     from hermitcrab.cron.types import CronJob
     from hermitcrab.heartbeat.service import HeartbeatService
@@ -611,7 +692,7 @@ def gateway(
     console.print(f"{__logo__} Starting hermitcrab gateway on port {port}...")
     console.print(f"[dim]Log level: {configured_level}[/dim]")
 
-    config = load_config()
+    config = _load_runtime_config()
     bus = MessageBus()
     provider = _make_provider(config)
     session_manager = SessionManager(config.workspace_path)
@@ -620,47 +701,15 @@ def gateway(
     cron_store_path = get_data_dir() / "cron" / "jobs.json"
     cron = CronService(cron_store_path)
 
-    # Build job models from config (with fallback logic)
-    job_models = _build_job_models_from_config(config)
-
     # Create agent with cron service
     agent = AgentLoop(
         bus=bus,
-        provider=provider,
-        workspace=config.workspace_path,
-        model=config.agents.defaults.model,
-        temperature=config.agents.defaults.temperature,
-        max_tokens=config.agents.defaults.max_tokens,
-        max_iterations=config.agents.defaults.max_tool_iterations,
-        memory_window=config.agents.defaults.memory_window,
-        brave_api_key=config.tools.web.search.api_key or None,
-        exec_config=config.tools.exec,
-        cron_service=cron,
-        restrict_to_workspace=config.tools.restrict_to_workspace,
-        session_manager=session_manager,
-        mcp_servers=config.tools.mcp_servers,
-        channels_config=config.channels,
-        job_models=job_models,  # Pass job models (or None for defaults)
-        distillation_enabled=config.agents.defaults.enable_distillation,
-        model_aliases=_build_runtime_model_aliases(config),
-        named_models=config.models,
-        reasoning_effort_config={
-            "reasoning_effort": config.agents.defaults.job_models.reasoning_effort,
-        },
-        inactivity_timeout_s=config.agents.defaults.inactivity_timeout_s,
-        llm_max_retries=config.agents.defaults.llm_max_retries,
-        llm_retry_base_delay_s=config.agents.defaults.llm_retry_base_delay_s,
-        max_loop_seconds=config.agents.defaults.max_loop_seconds,
-        max_identical_tool_cycles=config.agents.defaults.max_identical_tool_cycles,
-        memory_context_max_chars=config.agents.defaults.memory_context_max_chars,
-        memory_context_max_items_per_category=config.agents.defaults.memory_context_max_items_per_category,
-        memory_context_max_item_chars=config.agents.defaults.memory_context_max_item_chars,
-        reflection_config={
-            "auto_promote": config.reflection.promotion.auto_promote,
-            "target_files": config.reflection.promotion.target_files,
-            "max_file_lines": config.reflection.promotion.max_file_lines,
-            "notify_user": config.reflection.promotion.notify_user,
-        },
+        **_build_agent_loop_kwargs(
+            config,
+            provider,
+            cron_service=cron,
+            session_manager=session_manager,
+        ),
     )
 
     # Set cron callback (needs agent)
@@ -939,11 +988,11 @@ def agent(
 
     from hermitcrab.agent.loop import AgentLoop
     from hermitcrab.bus.queue import MessageBus
-    from hermitcrab.config.loader import get_data_dir, load_config
+    from hermitcrab.config.loader import get_data_dir
     from hermitcrab.cron.service import CronService
     from hermitcrab.session.timeout_service import SessionTimeoutService
 
-    config = load_config()
+    config = _load_runtime_config()
 
     bus = MessageBus()
     provider = _make_provider(config)
@@ -957,45 +1006,9 @@ def agent(
     else:
         logger.disable("hermitcrab")
 
-    # Build job models from config (with fallback logic)
-    job_models = _build_job_models_from_config(config)
-
     agent_loop = AgentLoop(
         bus=bus,
-        provider=provider,
-        workspace=config.workspace_path,
-        model=config.agents.defaults.model,
-        temperature=config.agents.defaults.temperature,
-        max_tokens=config.agents.defaults.max_tokens,
-        max_iterations=config.agents.defaults.max_tool_iterations,
-        memory_window=config.agents.defaults.memory_window,
-        brave_api_key=config.tools.web.search.api_key or None,
-        exec_config=config.tools.exec,
-        cron_service=cron,
-        restrict_to_workspace=config.tools.restrict_to_workspace,
-        mcp_servers=config.tools.mcp_servers,
-        channels_config=config.channels,
-        job_models=job_models,  # Pass job models (or None for defaults)
-        distillation_enabled=config.agents.defaults.enable_distillation,
-        model_aliases=_build_runtime_model_aliases(config),
-        named_models=config.models,
-        reasoning_effort_config={
-            "reasoning_effort": config.agents.defaults.job_models.reasoning_effort,
-        },
-        inactivity_timeout_s=config.agents.defaults.inactivity_timeout_s,
-        llm_max_retries=config.agents.defaults.llm_max_retries,
-        llm_retry_base_delay_s=config.agents.defaults.llm_retry_base_delay_s,
-        max_loop_seconds=config.agents.defaults.max_loop_seconds,
-        max_identical_tool_cycles=config.agents.defaults.max_identical_tool_cycles,
-        memory_context_max_chars=config.agents.defaults.memory_context_max_chars,
-        memory_context_max_items_per_category=config.agents.defaults.memory_context_max_items_per_category,
-        memory_context_max_item_chars=config.agents.defaults.memory_context_max_item_chars,
-        reflection_config={
-            "auto_promote": config.reflection.promotion.auto_promote,
-            "target_files": config.reflection.promotion.target_files,
-            "max_file_lines": config.reflection.promotion.max_file_lines,
-            "notify_user": config.reflection.promotion.notify_user,
-        },
+        **_build_agent_loop_kwargs(config, provider, cron_service=cron),
     )
     timeout_monitor = SessionTimeoutService(
         agent_loop.process_expired_sessions,
@@ -1046,6 +1059,13 @@ def agent(
     else:
         # Interactive mode — route through bus like other channels
         from hermitcrab.bus.events import InboundMessage
+
+        if _get_tty_stdin_fd() is None:
+            console.print("[red]Error: Interactive mode requires a TTY on stdin.[/red]")
+            console.print(
+                "Use [cyan]hermitcrab agent -m \"...\"[/cyan] for one-shot mode or run from a terminal."
+            )
+            raise typer.Exit(1)
 
         _init_prompt_session()
         console.print(
@@ -1206,9 +1226,7 @@ app.add_typer(channels_app, name="channels")
 @channels_app.command("status")
 def channels_status():
     """Show channel status."""
-    from hermitcrab.config.loader import load_config
-
-    config = load_config()
+    config = _load_runtime_config()
 
     table = Table(title="Channel Status")
     table.add_column("Channel", style="cyan")
@@ -1408,54 +1426,19 @@ def cron_run(
 
     from hermitcrab.agent.loop import AgentLoop
     from hermitcrab.bus.queue import MessageBus
-    from hermitcrab.config.loader import get_data_dir, load_config
+    from hermitcrab.config.loader import get_data_dir
     from hermitcrab.cron.service import CronService
     from hermitcrab.cron.types import CronJob
 
     logger.disable("hermitcrab")
 
-    config = load_config()
+    config = _load_runtime_config()
     provider = _make_provider(config)
     bus = MessageBus()
 
-    # Build job models from config (with fallback logic)
-    job_models = _build_job_models_from_config(config)
-
     agent_loop = AgentLoop(
         bus=bus,
-        provider=provider,
-        workspace=config.workspace_path,
-        model=config.agents.defaults.model,
-        temperature=config.agents.defaults.temperature,
-        max_tokens=config.agents.defaults.max_tokens,
-        max_iterations=config.agents.defaults.max_tool_iterations,
-        memory_window=config.agents.defaults.memory_window,
-        brave_api_key=config.tools.web.search.api_key or None,
-        exec_config=config.tools.exec,
-        restrict_to_workspace=config.tools.restrict_to_workspace,
-        mcp_servers=config.tools.mcp_servers,
-        channels_config=config.channels,
-        job_models=job_models,  # Pass job models (or None for defaults)
-        distillation_enabled=config.agents.defaults.enable_distillation,
-        model_aliases=_build_runtime_model_aliases(config),
-        named_models=config.models,
-        reasoning_effort_config={
-            "reasoning_effort": config.agents.defaults.job_models.reasoning_effort,
-        },
-        inactivity_timeout_s=config.agents.defaults.inactivity_timeout_s,
-        llm_max_retries=config.agents.defaults.llm_max_retries,
-        llm_retry_base_delay_s=config.agents.defaults.llm_retry_base_delay_s,
-        max_loop_seconds=config.agents.defaults.max_loop_seconds,
-        max_identical_tool_cycles=config.agents.defaults.max_identical_tool_cycles,
-        memory_context_max_chars=config.agents.defaults.memory_context_max_chars,
-        memory_context_max_items_per_category=config.agents.defaults.memory_context_max_items_per_category,
-        memory_context_max_item_chars=config.agents.defaults.memory_context_max_item_chars,
-        reflection_config={
-            "auto_promote": config.reflection.promotion.auto_promote,
-            "target_files": config.reflection.promotion.target_files,
-            "max_file_lines": config.reflection.promotion.max_file_lines,
-            "notify_user": config.reflection.promotion.notify_user,
-        },
+        **_build_agent_loop_kwargs(config, provider),
     )
 
     store_path = get_data_dir() / "cron" / "jobs.json"
@@ -1492,46 +1475,90 @@ def cron_run(
 
 
 @app.command()
-def status():
-    """Show hermitcrab status."""
-    from hermitcrab.config.loader import get_config_path, load_config
+def status(
+    as_json: bool = typer.Option(False, "--json", help="Print the status report as JSON"),
+):
+    """Show HermitCrab runtime and setup status."""
+    from hermitcrab.cli.diagnostics import build_status_report, render_json_report
 
-    config_path = get_config_path()
-    config = load_config()
-    workspace = config.workspace_path
+    report = build_status_report()
+    if as_json:
+        typer.echo(render_json_report(report), nl=False)
+        return
 
     console.print(f"{__logo__} hermitcrab Status\n")
+    config_status = "[green]valid[/green]" if report.config_valid else "[red]invalid[/red]"
+    if not report.config_exists:
+        config_status = "[red]missing[/red]"
+    console.print(f"Config: {report.config_path} {config_status}")
+    if report.config_error:
+        console.print(f"  [red]{report.config_error}[/red]")
 
+    workspace_status = "[green]ready[/green]" if report.workspace_exists else "[red]missing[/red]"
+    console.print(f"Workspace: {report.workspace} {workspace_status}")
     console.print(
-        f"Config: {config_path} {'[green]✓[/green]' if config_path.exists() else '[red]✗[/red]'}"
+        "Bootstrap: "
+        + ("[green]ready[/green]" if report.bootstrap_ready else "[yellow]incomplete[/yellow]")
     )
+
+    console.print(f"Selected model: {report.selected_model}")
+    if report.resolved_model and report.resolved_model != report.selected_model:
+        console.print(f"Resolved model: {report.resolved_model}")
+    console.print(f"Selected provider: {report.selected_provider or 'none'}")
+
+    console.print("\n[bold]Providers[/bold]")
+    for item in report.provider_statuses:
+        marker = "[green]✓[/green]" if item.configured else "[dim]•[/dim]"
+        selected = " [cyan](selected)[/cyan]" if item.selected else ""
+        console.print(f"- {item.label}: {marker} {item.detail}{selected}")
+
+    available_skills = sum(1 for skill in report.skill_statuses if skill.available)
+    unavailable_skills = len(report.skill_statuses) - available_skills
+    console.print("\n[bold]Skills[/bold]")
     console.print(
-        f"Workspace: {workspace} {'[green]✓[/green]' if workspace.exists() else '[red]✗[/red]'}"
+        f"- Available: {available_skills}  [dim](unavailable: {unavailable_skills})[/dim]"
+    )
+    for skill in [item for item in report.skill_statuses if not item.available][:3]:
+        if skill.missing_requirements:
+            console.print(f"- {skill.name}: [yellow]{skill.missing_requirements}[/yellow]")
+
+    console.print("\n[bold]MCP[/bold]")
+    console.print(
+        f"- Configured servers: {report.mcp_servers_configured}"
+        f"  [dim](valid: {report.mcp_servers_valid})[/dim]"
     )
 
-    if config_path.exists():
-        from hermitcrab.providers.registry import PROVIDERS
+    if report.next_steps:
+        console.print("\n[bold]Next Steps[/bold]")
+        for step in report.next_steps:
+            console.print(f"- {step}")
 
-        console.print(f"Model: {config.agents.defaults.model}")
 
-        # Check API keys from registry
-        for spec in PROVIDERS:
-            p = getattr(config.providers, spec.name, None)
-            if p is None:
-                continue
-            if spec.is_oauth:
-                console.print(f"{spec.label}: [green]✓ (OAuth)[/green]")
-            elif spec.is_local:
-                # Local deployments show api_base instead of api_key
-                if p.api_base:
-                    console.print(f"{spec.label}: [green]✓ {p.api_base}[/green]")
-                else:
-                    console.print(f"{spec.label}: [dim]not set[/dim]")
-            else:
-                has_key = bool(p.api_key)
-                console.print(
-                    f"{spec.label}: {'[green]✓[/green]' if has_key else '[dim]not set[/dim]'}"
-                )
+@app.command()
+def doctor(
+    as_json: bool = typer.Option(False, "--json", help="Print the doctor report as JSON"),
+):
+    """Run first-run diagnostics and suggest concrete fixes."""
+    from hermitcrab.cli.diagnostics import build_doctor_report, render_json_report
+
+    report = build_doctor_report()
+    if as_json:
+        typer.echo(render_json_report(report), nl=False)
+        return
+
+    console.print(f"{__logo__} hermitcrab Doctor\n")
+    for finding in report.findings:
+        if finding.severity == "ok":
+            marker = "[green]OK[/green]"
+        elif finding.severity == "error":
+            marker = "[red]ERROR[/red]"
+        elif finding.severity == "warning":
+            marker = "[yellow]WARN[/yellow]"
+        else:
+            marker = "[cyan]INFO[/cyan]"
+        console.print(f"{marker} {finding.title}")
+        console.print(f"  {finding.detail}")
+        console.print(f"  Fix: {finding.remediation}\n")
 
 
 # ============================================================================
@@ -1556,9 +1583,7 @@ def journal_write(
     from datetime import datetime, timezone
 
     from hermitcrab.agent.journal import JournalStore
-    from hermitcrab.config.loader import load_config
-
-    config = load_config()
+    config = _load_runtime_config()
     workspace = config.workspace_path
     journal = JournalStore(workspace)
 
@@ -1615,9 +1640,7 @@ def journal_read(
     from datetime import datetime, timezone
 
     from hermitcrab.agent.journal import JournalStore
-    from hermitcrab.config.loader import load_config
-
-    config = load_config()
+    config = _load_runtime_config()
     workspace = config.workspace_path
     journal = JournalStore(workspace)
 
@@ -1656,9 +1679,7 @@ def journal_list(
     from datetime import datetime, timezone
 
     from hermitcrab.agent.journal import JournalStore
-    from hermitcrab.config.loader import load_config
-
-    config = load_config()
+    config = _load_runtime_config()
     workspace = config.workspace_path
     journal = JournalStore(workspace)
 

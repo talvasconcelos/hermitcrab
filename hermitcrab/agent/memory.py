@@ -226,6 +226,137 @@ class MemoryStore:
             return 1
         return 1
 
+    @staticmethod
+    def _normalize_text(value: str) -> str:
+        """Normalize text for duplicate detection."""
+        return " ".join(value.casefold().split())
+
+    def _fact_token_coverage(
+        self, title: str, content: str, candidate: MemoryItem
+    ) -> tuple[float, set[str], int]:
+        """Measure how much of an incoming fact is covered by an existing candidate."""
+        incoming_tokens = self._tokenize_search(content)
+        if not incoming_tokens:
+            return 0.0, set(), 0
+
+        candidate_tokens = self._tokenize_search(
+            " ".join([candidate.title, candidate.content, " ".join(candidate.tags)])
+        )
+        overlap = incoming_tokens & candidate_tokens
+        return len(overlap) / len(incoming_tokens), overlap, len(incoming_tokens)
+
+    def _merge_fact_metadata(
+        self,
+        existing: MemoryItem,
+        *,
+        title: str,
+        content: str,
+        tags: list[str] | None,
+        confidence: float | None,
+        source: str | None,
+    ) -> MemoryItem:
+        """Merge a new fact payload into an existing fact item."""
+        normalized_existing_content = self._normalize_text(existing.content)
+        normalized_new_content = self._normalize_text(content)
+        merged_tags = list(dict.fromkeys([*existing.tags, *(tags or [])]))
+
+        updated_content = existing.content
+        if len(normalized_new_content) > len(normalized_existing_content):
+            updated_content = content.strip()
+
+        updated_title = existing.title
+        if len(title.strip()) > len(existing.title.strip()):
+            updated_title = title.strip()
+
+        merged_source = source or existing.metadata.get("source")
+        existing_confidence = existing.metadata.get("confidence")
+        if isinstance(existing_confidence, (int, float)) and confidence is not None:
+            merged_confidence = max(float(existing_confidence), confidence)
+        else:
+            merged_confidence = confidence if confidence is not None else existing_confidence
+
+        updated = self.update_memory(
+            MemoryCategory.FACTS,
+            existing.id,
+            title=updated_title,
+            content=updated_content,
+            tags=merged_tags,
+            source=merged_source,
+            confidence=merged_confidence,
+        )
+        if updated is None:
+            raise ValueError(f"Failed to update existing fact: {existing.id}")
+        updated.metadata["_write_action"] = "updated_existing"
+        return updated
+
+    def _resolve_existing_fact(
+        self,
+        *,
+        title: str,
+        content: str,
+        tags: list[str] | None,
+        confidence: float | None,
+        source: str | None,
+    ) -> MemoryItem | None:
+        """Return an existing fact to reuse/update when the new payload is redundant."""
+        normalized_title = self._normalize_text(title)
+        normalized_content = self._normalize_text(content)
+        facts = self.read_memory(MemoryCategory.FACTS)
+        if not facts:
+            return None
+
+        # Exact title match should behave like an upsert.
+        for fact in facts:
+            if self._normalize_text(fact.title) == normalized_title:
+                return self._merge_fact_metadata(
+                    fact,
+                    title=title,
+                    content=content,
+                    tags=tags,
+                    confidence=confidence,
+                    source=source,
+                )
+
+        scored_candidates: list[tuple[float, MemoryItem, set[str], int]] = []
+        for fact in facts:
+            coverage, overlap, token_count = self._fact_token_coverage(title, content, fact)
+            min_overlap = 2
+            if token_count >= 4 and coverage >= 0.25 and len(overlap) >= min_overlap:
+                scored_candidates.append((coverage, fact, overlap, token_count))
+
+        if not scored_candidates:
+            return None
+
+        scored_candidates.sort(key=lambda item: (item[0], item[1].updated_at), reverse=True)
+        best_coverage, best_fact, _, token_count = scored_candidates[0]
+
+        # One existing fact already covers the new payload closely enough.
+        if token_count >= 4 and best_coverage >= 0.9:
+            updated = best_fact
+            if self._normalize_text(best_fact.content) != normalized_content:
+                updated = self._merge_fact_metadata(
+                    best_fact,
+                    title=title,
+                    content=content,
+                    tags=tags,
+                    confidence=confidence,
+                    source=source,
+                )
+            updated.metadata["_write_action"] = "reused_existing"
+            return updated
+
+        # Multiple existing facts collectively cover the new payload. Prefer not to create
+        # another summary file that repeats the same facts in a different grouping.
+        incoming_tokens = self._tokenize_search(content)
+        covered_tokens: set[str] = set()
+        for _, fact, overlap, _ in scored_candidates[:3]:
+            covered_tokens.update(overlap)
+        if len(incoming_tokens) >= 4 and len(covered_tokens) / len(incoming_tokens) >= 0.8:
+            best_fact.metadata["_write_action"] = "reused_existing"
+            return best_fact
+
+        return None
+
     def _slugify(self, text: str) -> str:
         """Convert text to a safe URL-friendly slug."""
         text = text.lower().strip()
@@ -467,6 +598,17 @@ class MemoryStore:
         if not content.strip():
             raise ValueError("Fact content cannot be empty")
 
+        existing = self._resolve_existing_fact(
+            title=title,
+            content=content,
+            tags=tags,
+            confidence=confidence,
+            source=source,
+        )
+        if existing is not None:
+            logger.info("Reused existing fact: {}", existing.title)
+            return existing
+
         item = MemoryItem(
             id=self._generate_id(title, content),
             category=MemoryCategory.FACTS,
@@ -482,6 +624,7 @@ class MemoryStore:
         )
 
         self._write_file(item)
+        item.metadata["_write_action"] = "created"
         logger.info("Wrote fact: {}", title)
         return item
 

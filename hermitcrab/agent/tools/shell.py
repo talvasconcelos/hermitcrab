@@ -81,39 +81,69 @@ class ExecTool(Tool):
                     timeout=self.timeout
                 )
             except asyncio.TimeoutError:
-                process.kill()
-                # Wait for the process to fully terminate so pipes are
-                # drained and file descriptors are released.
                 try:
-                    await asyncio.wait_for(process.wait(), timeout=5.0)
-                except asyncio.TimeoutError:
+                    process.terminate()
+                except ProcessLookupError:
                     pass
-                return f"Error: Command timed out after {self.timeout} seconds"
+                try:
+                    stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=3.0)
+                except asyncio.TimeoutError:
+                    try:
+                        process.kill()
+                    except ProcessLookupError:
+                        pass
+                    try:
+                        stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=3.0)
+                    except asyncio.TimeoutError:
+                        stdout, stderr = b"", b""
+                return self._format_command_result(
+                    stdout=stdout,
+                    stderr=stderr,
+                    returncode=process.returncode,
+                    timed_out=True,
+                )
 
-            output_parts = []
-
-            if stdout:
-                output_parts.append(stdout.decode("utf-8", errors="replace"))
-
-            if stderr:
-                stderr_text = stderr.decode("utf-8", errors="replace")
-                if stderr_text.strip():
-                    output_parts.append(f"STDERR:\n{stderr_text}")
-
-            if process.returncode != 0:
-                output_parts.append(f"\nExit code: {process.returncode}")
-
-            result = "\n".join(output_parts) if output_parts else "(no output)"
-
-            # Truncate very long output
-            max_len = 10000
-            if len(result) > max_len:
-                result = result[:max_len] + f"\n... (truncated, {len(result) - max_len} more chars)"
-
-            return result
+            return self._format_command_result(
+                stdout=stdout,
+                stderr=stderr,
+                returncode=process.returncode,
+                timed_out=False,
+            )
 
         except Exception as e:
             return f"Error executing command: {str(e)}"
+
+    def _format_command_result(
+        self,
+        *,
+        stdout: bytes | None,
+        stderr: bytes | None,
+        returncode: int | None,
+        timed_out: bool,
+    ) -> str:
+        output_parts = []
+
+        if timed_out:
+            output_parts.append(f"Error: Command timed out after {self.timeout} seconds")
+
+        if stdout:
+            output_parts.append(stdout.decode("utf-8", errors="replace"))
+
+        if stderr:
+            stderr_text = stderr.decode("utf-8", errors="replace")
+            if stderr_text.strip():
+                output_parts.append(f"STDERR:\n{stderr_text}")
+
+        if returncode not in (None, 0):
+            output_parts.append(f"\nExit code: {returncode}")
+
+        result = "\n".join(output_parts) if output_parts else "(no output)"
+
+        max_len = 10000
+        if len(result) > max_len:
+            result = result[:max_len] + f"\n... (truncated, {len(result) - max_len} more chars)"
+
+        return result
 
     def _guard_command(self, command: str, cwd: str) -> str | None:
         """Best-effort safety guard for potentially destructive commands."""
