@@ -46,14 +46,26 @@ from hermitcrab.agent.distillation import AtomicCandidate
 from hermitcrab.agent.execution_state import ExecutionPhase, ExecutionStateTracker
 from hermitcrab.agent.journal import JournalStore
 from hermitcrab.agent.knowledge import KnowledgeStore
+from hermitcrab.agent.lists import ListStore
 from hermitcrab.agent.memory import MemoryStore
 from hermitcrab.agent.message_preparation import (
     clean_snippet,
     is_empty_response,
     is_subagent_completion_prompt,
 )
+from hermitcrab.agent.pending_work import (
+    PendingWork,
+    build_pending_work_hint,
+    build_skill_creation_hint,
+    find_action_source,
+    has_structured_payload,
+    relates_to_pending_work,
+    should_resume_pending_work,
+    snippet,
+)
 from hermitcrab.agent.reflection import ReflectionService
 from hermitcrab.agent.session_lifecycle import SessionLifecycleManager
+from hermitcrab.agent.skill_runtime import SkillRuntimeManager
 from hermitcrab.agent.subagent import SubagentManager
 from hermitcrab.agent.tools.cron import CronTool
 from hermitcrab.agent.tools.filesystem import EditFileTool, ListDirTool, ReadFileTool, WriteFileTool
@@ -63,6 +75,13 @@ from hermitcrab.agent.tools.knowledge import (
     KnowledgeListTool,
     KnowledgeSearchTool,
     KnowledgeStatsTool,
+)
+from hermitcrab.agent.tools.lists import (
+    AddListItemsTool,
+    DeleteListTool,
+    RemoveListItemsTool,
+    SetListItemStatusTool,
+    ShowListTool,
 )
 from hermitcrab.agent.tools.mcp import connect_mcp_servers
 from hermitcrab.agent.tools.memory import (
@@ -75,12 +94,13 @@ from hermitcrab.agent.tools.memory import (
     WriteTaskTool,
 )
 from hermitcrab.agent.tools.message import MessageTool
+from hermitcrab.agent.tools.policy import build_main_agent_policy
 from hermitcrab.agent.tools.registry import ToolRegistry
 from hermitcrab.agent.tools.session_search import SessionSearchTool
 from hermitcrab.agent.tools.shell import ExecTool
 from hermitcrab.agent.tools.spawn import SpawnTool
 from hermitcrab.agent.tools.web import WebFetchTool, WebSearchTool
-from hermitcrab.agent.turn_runner import TurnRunner, TurnRunnerConfig
+from hermitcrab.agent.turn_runner import TurnOutcome, TurnResult, TurnRunner, TurnRunnerConfig
 from hermitcrab.bus.events import InboundMessage, OutboundMessage
 from hermitcrab.bus.queue import MessageBus
 from hermitcrab.config.schema import ExecToolConfig, ModelAliasConfig, NamedModelConfig
@@ -223,11 +243,13 @@ class AgentLoop:
             model_aliases=self.model_aliases,
             named_models=self.named_models,
         )
+        self.skill_runtime = SkillRuntimeManager(workspace, self.context.skills)
         self.sessions = session_manager or SessionManager(workspace)
         self.journal = JournalStore(workspace)
         self.memory = MemoryStore(workspace)
         self.knowledge = KnowledgeStore(workspace)
-        self.tools = ToolRegistry()
+        self.lists = ListStore(workspace)
+        self.tools = ToolRegistry(default_policy=build_main_agent_policy())
         self.execution_state = ExecutionStateTracker()
         self.subagents = SubagentManager(
             provider=provider,
@@ -287,8 +309,23 @@ class AgentLoop:
     def _register_default_tools(self) -> None:
         """Register the default set of tools."""
         allowed_dir = self.workspace if self.restrict_to_workspace else None
-        for cls in (ReadFileTool, WriteFileTool, EditFileTool, ListDirTool):
-            self.tools.register(cls(workspace=self.workspace, allowed_dir=allowed_dir))
+        read_fallback_dir = Path.cwd() if not self.restrict_to_workspace else None
+        self.tools.register(
+            ReadFileTool(
+                workspace=self.workspace,
+                allowed_dir=allowed_dir,
+                fallback_dir=read_fallback_dir,
+            )
+        )
+        self.tools.register(WriteFileTool(workspace=self.workspace, allowed_dir=allowed_dir))
+        self.tools.register(EditFileTool(workspace=self.workspace, allowed_dir=allowed_dir))
+        self.tools.register(
+            ListDirTool(
+                workspace=self.workspace,
+                allowed_dir=allowed_dir,
+                fallback_dir=read_fallback_dir,
+            )
+        )
         self.tools.register(
             ExecTool(
                 working_dir=str(self.workspace),
@@ -316,6 +353,11 @@ class AgentLoop:
         self.tools.register(KnowledgeIngestURLTool(self.knowledge))
         self.tools.register(KnowledgeListTool(self.knowledge))
         self.tools.register(KnowledgeStatsTool(self.knowledge))
+        self.tools.register(ShowListTool(self.lists))
+        self.tools.register(AddListItemsTool(self.lists))
+        self.tools.register(SetListItemStatusTool(self.lists))
+        self.tools.register(RemoveListItemsTool(self.lists))
+        self.tools.register(DeleteListTool(self.lists))
 
         if self.cron_service:
             self.tools.register(CronTool(self.cron_service))
@@ -706,7 +748,7 @@ class AgentLoop:
         initial_messages: list[dict],
         on_progress: Callable[..., Awaitable[None]] | None = None,
         job_class: JobClass = JobClass.INTERACTIVE_RESPONSE,
-    ) -> tuple[str | None, list[str], list[dict]]:
+    ) -> TurnResult:
         """
         Run the agent iteration loop.
 
@@ -718,7 +760,7 @@ class AgentLoop:
             job_class: Job class for model routing.
 
         Returns:
-            Tuple of (final_content, tools_used, all_messages).
+            Structured turn result.
         """
         runner = self._build_turn_runner()
         return await runner.run(initial_messages, on_progress=on_progress, job_class=job_class)
@@ -896,6 +938,8 @@ class AgentLoop:
                     {"role": "assistant", "content": safe_content},
                 ]
                 self._save_turn(session, all_msgs, 1 + len(history))
+                if "failed" not in safe_content.lower() and "error" not in safe_content.lower():
+                    session.metadata.pop("pending_work", None)
                 self.sessions.save(session)
                 self.execution_state.set(key, ExecutionPhase.COMPLETED, "system update ready")
                 return OutboundMessage(channel=channel, chat_id=chat_id, content=safe_content)
@@ -909,16 +953,16 @@ class AgentLoop:
                 chat_id=chat_id,
                 scratchpad_path=str(scratchpad_path),
             )
-            final_content, _, all_msgs = await self._run_agent_loop(
+            turn_result = await self._run_agent_loop(
                 messages,
                 job_class=JobClass.INTERACTIVE_RESPONSE,
             )
-            self._save_turn(session, all_msgs, 1 + len(history))
+            self._save_turn(session, turn_result.messages, 1 + len(history))
             self.sessions.save(session)
             safe_content = (
                 fallback_system_task_summary(msg.content)
-                if not is_grounded_system_reply(msg.content, final_content)
-                else final_content
+                if not is_grounded_system_reply(msg.content, turn_result.final_content)
+                else turn_result.final_content
             )
             self.execution_state.set(key, ExecutionPhase.COMPLETED, "system update ready")
             return OutboundMessage(
@@ -957,26 +1001,32 @@ class AgentLoop:
                     key,
                     max_messages=min(12, self.memory_window),
                 )
-            initial_messages = self._build_interactive_messages(
+            initial_messages, save_skip = self._build_interactive_messages(
                 msg,
                 scratchpad_path,
                 history_for_prompt,
+                session,
             )
             progress_callback = on_progress or self._build_bus_progress_callback(msg, key)
-            final_content, _, all_msgs = await self._run_agent_loop(
+            turn_result = await self._run_agent_loop(
                 initial_messages,
                 on_progress=progress_callback,
                 job_class=JobClass.INTERACTIVE_RESPONSE,
             )
+            final_content = turn_result.final_content
 
-            final_content = (
-                final_content or "I couldn't complete that turn cleanly. Please retry the request."
-            )
-            self._record_final_execution_state(key, final_content)
+            final_content = final_content or self._build_unexpected_empty_turn_fallback(msg.content)
+            self._record_final_execution_state(key, final_content, turn_result.outcome)
             preview = final_content[:120] + "..." if len(final_content) > 120 else final_content
             logger.info("Response to {}:{}: {}", msg.channel, msg.sender_id, preview)
 
-            self._save_turn(session, all_msgs, 1 + len(history))
+            self._save_turn(session, turn_result.messages, save_skip)
+            self.skill_runtime.update_after_turn(
+                session.metadata,
+                result_messages=turn_result.messages,
+                tools_used=turn_result.tools_used,
+            )
+            self._update_pending_work(session, msg, turn_result)
             self.sessions.save(session)
 
             if message_tool := self.tools.get("message"):
@@ -989,6 +1039,50 @@ class AgentLoop:
                 content=final_content,
                 metadata=msg.metadata or {},
             )
+
+    @staticmethod
+    def _reply(
+        msg: InboundMessage,
+        content: str,
+        *,
+        metadata: dict[str, Any] | None = None,
+    ) -> OutboundMessage:
+        """Build a standard outbound reply for the current inbound message."""
+        return OutboundMessage(
+            channel=msg.channel,
+            chat_id=msg.chat_id,
+            content=content,
+            metadata=metadata or {},
+        )
+
+    async def _handle_reflect_command(
+        self,
+        msg: InboundMessage,
+        session_key: str,
+        session: Session,
+    ) -> OutboundMessage:
+        """Run reflection on demand for the current conversation."""
+        before = len(self.memory.list_memories("reflections"))
+        try:
+            await self._background_jobs.reflect_on_session_from_messages(
+                list(session.messages),
+                session_key,
+            )
+        except Exception as exc:
+            logger.warning("Manual reflection failed for {}: {}", session_key, exc)
+            return self._reply(msg, "Reflection failed for this conversation.")
+
+        after_items = self.memory.list_memories("reflections")
+        if len(after_items) > before and after_items:
+            latest = after_items[0]
+            return self._reply(
+                msg,
+                "Reflection complete.\n"
+                f"Saved: {latest.title}\n"
+                f"Path: {latest.file_path}",
+            )
+
+        return self._reply(msg, "Reflection complete. No new reflection was saved.")
 
     async def _maybe_handle_slash_command(
         self,
@@ -1006,16 +1100,21 @@ class AgentLoop:
             self.execution_state.set(
                 session_key, ExecutionPhase.WAITING_BACKGROUND, "starting new session"
             )
-            return OutboundMessage(
-                channel=msg.channel, chat_id=msg.chat_id, content="New session started."
-            )
+            return self._reply(msg, "New session started.")
 
         if cmd == "/help":
-            return OutboundMessage(
-                channel=msg.channel,
-                chat_id=msg.chat_id,
-                content="🦀 hermitcrab commands:\n/new — Start a new conversation\n/help — Show available commands",
+            return self._reply(
+                msg,
+                "🦀 hermitcrab chat commands:\n"
+                "/new — Start a new conversation\n"
+                "/reflect — Run reflection on this conversation\n"
+                "/help — Show chat commands\n\n"
+                "For CLI commands like status, doctor, or onboard, run them in the shell "
+                "as `hermitcrab status`, `hermitcrab doctor`, or `hermitcrab onboard`.",
             )
+
+        if cmd == "/reflect":
+            return await self._handle_reflect_command(msg, session_key, session)
 
         return None
 
@@ -1024,8 +1123,14 @@ class AgentLoop:
         msg: InboundMessage,
         scratchpad_path: Path,
         history: list[dict[str, Any]],
-    ) -> list[dict[str, Any]]:
+        session: Session,
+    ) -> tuple[list[dict[str, Any]], int]:
         """Build the interactive message list and insert deterministic hints when needed."""
+        self.skill_runtime.maybe_activate(
+            session.metadata,
+            current_message=msg.content,
+            history=history,
+        )
         messages = self.context.build_messages(
             history=history,
             current_message=msg.content,
@@ -1034,7 +1139,120 @@ class AgentLoop:
             chat_id=msg.chat_id,
             scratchpad_path=str(scratchpad_path),
         )
-        return messages
+        internal_skip = 1 + len(history)
+        pending = PendingWork.from_metadata(session.metadata)
+        user_index = next(
+            (
+                idx
+                for idx in range(len(messages) - 1, -1, -1)
+                if messages[idx].get("role") == "user"
+            ),
+            None,
+        )
+        procedural_skill_hint = self.skill_runtime.build_turn_guidance(session.metadata)
+        if procedural_skill_hint and user_index is not None:
+            messages.insert(
+                user_index,
+                {
+                    "role": "system",
+                    "content": procedural_skill_hint,
+                },
+            )
+            internal_skip += 1
+            user_index += 1
+        if pending and should_resume_pending_work(pending, msg.content):
+            if user_index is not None:
+                messages.insert(
+                    user_index,
+                    {
+                        "role": "system",
+                        "content": build_pending_work_hint(pending, msg.content),
+                    },
+                )
+                internal_skip += 1
+                if skill_hint := build_skill_creation_hint(pending.source_excerpt or pending.origin_request):
+                    messages.insert(
+                        user_index,
+                        {
+                            "role": "system",
+                            "content": skill_hint,
+                        },
+                    )
+                    internal_skip += 1
+        elif skill_hint := build_skill_creation_hint(msg.content):
+            if user_index is not None:
+                messages.insert(
+                    user_index,
+                    {
+                        "role": "system",
+                        "content": skill_hint,
+                    },
+                )
+                internal_skip += 1
+        return messages, internal_skip
+
+    def _update_pending_work(
+        self,
+        session: Session,
+        msg: InboundMessage,
+        result: TurnResult,
+    ) -> None:
+        """Persist unresolved actionable work at the coordinator layer."""
+        pending = PendingWork.from_metadata(session.metadata)
+        outcome = result.outcome
+
+        if outcome == TurnOutcome.DELEGATED:
+            source_excerpt = find_action_source(
+                session.messages + [{"role": "user", "content": msg.content}]
+            )
+            origin_request = pending.origin_request if pending else msg.content
+            created_at = pending.created_at if pending else session.updated_at.isoformat()
+            session.metadata["pending_work"] = PendingWork(
+                origin_request=origin_request,
+                latest_request=msg.content,
+                source_excerpt=source_excerpt,
+                last_failure="Delegated work is still running.",
+                tools_used=result.tools_used,
+                created_at=created_at,
+                updated_at=session.updated_at.isoformat(),
+            ).to_metadata()
+            return
+
+        unresolved = {
+            TurnOutcome.EMPTY_REPLY,
+            TurnOutcome.INCOMPLETE_ACTION,
+            TurnOutcome.TOOL_FALLBACK,
+            TurnOutcome.MAX_ITERATIONS,
+            TurnOutcome.TIMEOUT,
+            TurnOutcome.REPEATED_TOOL_CYCLE,
+        }
+        if outcome in unresolved and (
+            pending or result.tools_used or has_structured_payload(msg.content)
+        ):
+            source_excerpt = find_action_source(
+                session.messages + [{"role": "user", "content": msg.content}]
+            )
+            origin_request = pending.origin_request if pending else msg.content
+            created_at = pending.created_at if pending else session.updated_at.isoformat()
+            session.metadata["pending_work"] = PendingWork(
+                origin_request=origin_request,
+                latest_request=msg.content,
+                source_excerpt=source_excerpt,
+                last_failure=snippet(result.final_content, max_chars=280),
+                tools_used=result.tools_used,
+                created_at=created_at,
+                updated_at=session.updated_at.isoformat(),
+            ).to_metadata()
+            return
+
+        if pending and (
+            outcome == TurnOutcome.COMPLETED
+            and result.tools_used
+            and (
+                has_structured_payload(msg.content) or relates_to_pending_work(pending, msg.content)
+            )
+        ):
+            session.metadata.pop("pending_work", None)
 
     def _build_bus_progress_callback(
         self,
@@ -1063,16 +1281,49 @@ class AgentLoop:
 
         return _bus_progress
 
-    def _record_final_execution_state(self, session_key: str, final_content: str) -> None:
+    def _record_final_execution_state(
+        self,
+        session_key: str,
+        final_content: str,
+        outcome: TurnOutcome = TurnOutcome.COMPLETED,
+    ) -> None:
         """Record the final execution state for a completed interactive turn."""
-        if "Subagent [" in final_content and "started" in final_content:
+        if outcome == TurnOutcome.DELEGATED or (
+            "Subagent [" in final_content and "started" in final_content
+        ):
             self.execution_state.set(session_key, ExecutionPhase.DELEGATED, "subagent spawned")
+            return
+        if outcome in {
+            TurnOutcome.EMPTY_REPLY,
+            TurnOutcome.INCOMPLETE_ACTION,
+            TurnOutcome.TOOL_FALLBACK,
+            TurnOutcome.MAX_ITERATIONS,
+            TurnOutcome.TIMEOUT,
+            TurnOutcome.REPEATED_TOOL_CYCLE,
+        }:
+            self.execution_state.set(
+                session_key,
+                ExecutionPhase.RECOVERING,
+                clean_snippet(final_content, max_chars=80),
+            )
             return
         self.execution_state.set(
             session_key,
             ExecutionPhase.COMPLETED,
             clean_snippet(final_content, max_chars=80),
         )
+
+    @staticmethod
+    def _build_unexpected_empty_turn_fallback(request_text: str) -> str:
+        """Last-resort user-facing fallback if a turn ends with no final content."""
+        snippet = clean_snippet(request_text, max_chars=120)
+        if snippet:
+            return (
+                "The model returned an empty reply before answering your request"
+                f" about: {snippet}\n\n"
+                "Please retry the request or switch to a stronger model."
+            )
+        return "The model returned an empty reply. Please retry the request or switch to a stronger model."
 
     def _build_turn_runner(self) -> TurnRunner:
         """Build a turn runner configured with the current loop dependencies."""

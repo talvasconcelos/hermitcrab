@@ -24,9 +24,15 @@ def _resolve_path(path: str, workspace: Path | None = None, allowed_dir: Path | 
 class ReadFileTool(Tool):
     """Tool to read file contents."""
 
-    def __init__(self, workspace: Path | None = None, allowed_dir: Path | None = None):
+    def __init__(
+        self,
+        workspace: Path | None = None,
+        allowed_dir: Path | None = None,
+        fallback_dir: Path | None = None,
+    ):
         self._workspace = workspace
         self._allowed_dir = allowed_dir
+        self._fallback_dir = fallback_dir
 
     @property
     def name(self) -> str:
@@ -52,6 +58,14 @@ class ReadFileTool(Tool):
     async def execute(self, path: str, **kwargs: Any) -> str:
         try:
             file_path = _resolve_path(path, self._workspace, self._allowed_dir)
+            if (
+                not Path(path).expanduser().is_absolute()
+                and self._fallback_dir is not None
+                and not file_path.exists()
+            ):
+                fallback_path = _resolve_path(path, self._fallback_dir, self._allowed_dir)
+                if fallback_path.exists():
+                    file_path = fallback_path
             if not file_path.exists():
                 return f"Error: File not found: {path}"
             if not file_path.is_file():
@@ -196,9 +210,15 @@ class EditFileTool(Tool):
 class ListDirTool(Tool):
     """Tool to list directory contents."""
 
-    def __init__(self, workspace: Path | None = None, allowed_dir: Path | None = None):
+    def __init__(
+        self,
+        workspace: Path | None = None,
+        allowed_dir: Path | None = None,
+        fallback_dir: Path | None = None,
+    ):
         self._workspace = workspace
         self._allowed_dir = allowed_dir
+        self._fallback_dir = fallback_dir
 
     @property
     def name(self) -> str:
@@ -224,6 +244,14 @@ class ListDirTool(Tool):
     async def execute(self, path: str, **kwargs: Any) -> str:
         try:
             dir_path = _resolve_path(path, self._workspace, self._allowed_dir)
+            if (
+                not Path(path).expanduser().is_absolute()
+                and self._fallback_dir is not None
+                and not dir_path.exists()
+            ):
+                fallback_path = _resolve_path(path, self._fallback_dir, self._allowed_dir)
+                if fallback_path.exists():
+                    dir_path = fallback_path
             if not dir_path.exists():
                 return f"Error: Directory not found: {path}"
             if not dir_path.is_dir():

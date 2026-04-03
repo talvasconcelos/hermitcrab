@@ -69,6 +69,8 @@ class ContextBuilder:
         current_message_tokens = estimate_text_tokens(current_message)
         reserved_history_tokens = min(history_tokens, self.prompt_token_budget // 3)
         memory_reserve_tokens = min(300, self.prompt_token_budget // 5)
+        auto_skills = self.skills.select_skills(current_message, history or [])
+        selected_skills = list(dict.fromkeys((skill_names or []) + auto_skills))
 
         fixed_parts = []
 
@@ -104,13 +106,21 @@ class ContextBuilder:
         if active_skills_summary:
             optional_parts.append(f"# Active Skills\n\n{active_skills_summary}")
 
+        selected_skills_content = self.skills.load_skills_for_context(selected_skills)
+        if selected_skills_content:
+            optional_parts.append(
+                "# Selected Skills\n\n"
+                "These skills were selected deterministically for the current turn. "
+                "Follow them when relevant.\n\n"
+                f"{selected_skills_content}"
+            )
+
         skills_summary = self.skills.build_skills_summary(exclude_names=set(always_skills))
         if skills_summary:
             optional_parts.append(
                 "# Skills\n\n"
-                "The following skills extend your capabilities. Read a skill's `SKILL.md` "
-                "with `read_file` before using it. Skills with `available=\"false\"` need "
-                "dependencies installed first.\n\n"
+                "The following skills extend your capabilities. This is a discovery index only. "
+                'Skills with `available="false"` need dependencies installed first.\n\n'
                 f"{skills_summary}"
             )
 
@@ -265,6 +275,8 @@ Reply directly for normal conversation. Only use `message` to send to a specific
 
 ## Tool Call Guidelines
 - Before tools, you may briefly state intent, but never predict results.
+- If you say you will take an action, make the corresponding tool call in the same turn.
+- Never end a turn with only a promise of future action when the available tools can do the work now.
 - Before modifying a file, read it first to confirm its current content.
 - Do not assume a file or directory exists — use list_dir or read_file to verify.
 - After writing or editing a file, re-read it if accuracy matters.
@@ -273,6 +285,8 @@ Reply directly for normal conversation. Only use `message` to send to a specific
 ## Memory
 - Search memory before answering when durable past context may matter.
 - Use typed memory tools for authoritative writes; do not guess or invent memory content.
+- Retrieved memory snippets in prompt context are helpful, but they are not authoritative proof of a write or update in this turn.
+- If you claim a durable fact is already stored, verify it with a memory read/search tool. If you claim you saved or updated memory, do it with the typed memory write tools in the same turn.
 
 ## Models For Subagents
 You can spawn subagents with configured named models, optional aliases, or full model names. Choose the right model for the job:
@@ -354,7 +368,9 @@ Use subagents for complex, time-consuming, or specialized tasks. For substantial
 
         return messages
 
-    def _build_memory_query(self, current_message: str | None, history: list[dict[str, Any]]) -> str:
+    def _build_memory_query(
+        self, current_message: str | None, history: list[dict[str, Any]]
+    ) -> str:
         """Build a lightweight retrieval query from the active user request and recent user turns."""
         parts: list[str] = []
         if current_message and current_message.strip():

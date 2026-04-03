@@ -1,7 +1,11 @@
 """Base class for agent tools."""
 
+from __future__ import annotations
+
 from abc import ABC, abstractmethod
 from typing import Any
+
+from hermitcrab.agent.tools.policy import ToolMetadata, get_default_tool_metadata
 
 
 class Tool(ABC):
@@ -84,10 +88,12 @@ class Tool(ABC):
                     errors.append(f"missing required {path + '.' + k if path else k}")
             for k, v in val.items():
                 if k in props:
-                    errors.extend(self._validate(v, props[k], path + '.' + k if path else k))
+                    errors.extend(self._validate(v, props[k], path + "." + k if path else k))
         if t == "array" and "items" in schema:
             for i, item in enumerate(val):
-                errors.extend(self._validate(item, schema["items"], f"{path}[{i}]" if path else f"[{i}]"))
+                errors.extend(
+                    self._validate(item, schema["items"], f"{path}[{i}]" if path else f"[{i}]")
+                )
         return errors
 
     def to_schema(self) -> dict[str, Any]:
@@ -98,5 +104,10 @@ class Tool(ABC):
                 "name": self.name,
                 "description": self.description,
                 "parameters": self.parameters,
-            }
+            },
         }
+
+    @property
+    def metadata(self) -> ToolMetadata:
+        """Static tool metadata used for runtime authorization."""
+        return get_default_tool_metadata(self.name)

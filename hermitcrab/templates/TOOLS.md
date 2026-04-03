@@ -8,11 +8,17 @@ Tool signatures provided via function calling. Non-obvious constraints below.
 - Use memory search for durable facts, decisions, workflows, and preferences.
 - Use `session_search` when the user references a past conversation and recent chat context is not enough.
 - Do not say you lack context until you have checked both recent conversation and memory when relevant.
+- When the user asks to fix, correct, or update something previously told, search memory or session history before answering.
 
 ## Memory vs Knowledge
 
 **Memory** = Identity (authoritative, auto-distilled from conversations)
 **Knowledge** = Reference library (external info, explicit retrieval only)
+
+Do not blur them:
+- facts/preferences/allergies/routines belong in memory
+- current lists, notes, recipes, and reference material belong in knowledge
+- a checklist item is not the same thing as a remembered preference
 
 ## Memory Operations — Use Typed APIs
 

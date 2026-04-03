@@ -8,6 +8,13 @@ Each skill is a directory containing a `SKILL.md` file with:
 - YAML frontmatter (name, description, metadata)
 - Markdown instructions for the agent
 
+Recommended frontmatter structure:
+- top-level `name` and `description` for discovery
+- optional `metadata.hermitcrab.activation` for deterministic aliases, tags, and keywords
+- optional `metadata.hermitcrab.workflow` for procedural skills that need explicit phase/artifact tracking
+
+HermitCrab treats the filesystem as the source of truth for installed skills. Discovery should stay cheap and structured; large skill bodies are loaded only for selected skills.
+
 ## Attribution
 
 These skills are adapted from [OpenClaw](https://github.com/openclaw/openclaw)'s skill system.

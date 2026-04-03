@@ -1,25 +1,34 @@
-"""Tool registry for dynamic tool management."""
+"""Tool registry for dynamic tool management and runtime authorization."""
 
+from __future__ import annotations
+
+from dataclasses import dataclass
 from typing import Any
 
 from loguru import logger
 
 from hermitcrab.agent.tools.base import Tool
+from hermitcrab.agent.tools.policy import ToolMetadata, ToolPermissionPolicy
+
+
+@dataclass(slots=True)
+class RegisteredTool:
+    """One registered tool plus its static metadata."""
+
+    tool: Tool
+    metadata: ToolMetadata
 
 
 class ToolRegistry:
-    """
-    Registry for agent tools.
+    """Registry for tools plus the policy used to expose and execute them."""
 
-    Allows dynamic registration and execution of tools.
-    """
+    def __init__(self, default_policy: ToolPermissionPolicy | None = None):
+        self._tools: dict[str, RegisteredTool] = {}
+        self._default_policy = default_policy
 
-    def __init__(self):
-        self._tools: dict[str, Tool] = {}
-
-    def register(self, tool: Tool) -> None:
-        """Register a tool."""
-        self._tools[tool.name] = tool
+    def register(self, tool: Tool, metadata: ToolMetadata | None = None) -> None:
+        """Register a tool and its metadata."""
+        self._tools[tool.name] = RegisteredTool(tool=tool, metadata=metadata or tool.metadata)
 
     def unregister(self, name: str) -> None:
         """Unregister a tool by name."""
@@ -27,44 +36,86 @@ class ToolRegistry:
 
     def get(self, name: str) -> Tool | None:
         """Get a tool by name."""
-        return self._tools.get(name)
+        entry = self._tools.get(name)
+        return entry.tool if entry else None
+
+    def get_metadata(self, name: str) -> ToolMetadata | None:
+        """Get tool metadata by name."""
+        entry = self._tools.get(name)
+        return entry.metadata if entry else None
 
     def has(self, name: str) -> bool:
         """Check if a tool is registered."""
         return name in self._tools
 
-    def get_definitions(self) -> list[dict[str, Any]]:
-        """Get all tool definitions in OpenAI format."""
-        return [tool.to_schema() for tool in self._tools.values()]
+    def tool_names(self, policy: ToolPermissionPolicy | None = None) -> list[str]:
+        """Return registered tool names, optionally filtered by policy."""
+        effective_policy = policy or self._default_policy
+        names: list[str] = []
+        for name, entry in self._tools.items():
+            if self._check_policy(name, entry.metadata, effective_policy) is None:
+                names.append(name)
+        return names
 
-    async def execute(self, name: str, params: dict[str, Any]) -> str:
-        """Execute a tool by name with given parameters."""
-        _HINT = "\n\n[Analyze the error above and try a different approach.]"  # noqa: N806
+    def get_definitions(self, policy: ToolPermissionPolicy | None = None) -> list[dict[str, Any]]:
+        """Get tool definitions in OpenAI format, filtered by policy when provided."""
+        effective_policy = policy or self._default_policy
+        definitions: list[dict[str, Any]] = []
+        for name, entry in self._tools.items():
+            if self._check_policy(name, entry.metadata, effective_policy) is None:
+                definitions.append(entry.tool.to_schema())
+        return definitions
 
-        tool = self._tools.get(name)
-        if not tool:
-            return f"Error: Tool '{name}' not found. Available: {', '.join(self.tool_names)}"
+    async def execute(
+        self,
+        name: str,
+        params: dict[str, Any],
+        policy: ToolPermissionPolicy | None = None,
+    ) -> str:
+        """Execute a tool by name with validation and policy enforcement."""
+        hint = "\n\n[Analyze the error above and try a different approach.]"
+
+        entry = self._tools.get(name)
+        if not entry:
+            available = ", ".join(self.tool_names(policy))
+            return (
+                f"Error: Tool '{name}' not found. Available: {available}"
+                if available
+                else (f"Error: Tool '{name}' not found.")
+            )
+
+        denial = self._check_policy(name, entry.metadata, policy or self._default_policy)
+        if denial is not None:
+            logger.warning("Tool policy denied '{}' ({})", name, denial)
+            return f"Error: Tool '{name}' is not allowed: {denial}" + hint
 
         try:
-            logger.info("Tool registry executing '{}' with params keys={}", name, sorted(params.keys()))
-            errors = tool.validate_params(params)
+            logger.info(
+                "Tool registry executing '{}' with params keys={}", name, sorted(params.keys())
+            )
+            errors = entry.tool.validate_params(params)
             if errors:
                 logger.warning("Tool validation failed for '{}': {}", name, errors)
-                return f"Error: Invalid parameters for tool '{name}': " + "; ".join(errors) + _HINT
-            result = await tool.execute(**params)
+                return f"Error: Invalid parameters for tool '{name}': " + "; ".join(errors) + hint
+            result = await entry.tool.execute(**params)
             if isinstance(result, str) and result.startswith("Error"):
                 logger.warning("Tool '{}' returned error result: {}", name, result[:200])
-                return result + _HINT
+                return result + hint
             logger.info("Tool registry completed '{}'", name)
             return result
-        except Exception as e:
+        except Exception as exc:
             logger.exception("Tool registry raised while executing '{}'", name)
-            return f"Error executing {name}: {str(e)}" + _HINT
+            return f"Error executing {name}: {exc}" + hint
 
-    @property
-    def tool_names(self) -> list[str]:
-        """Get list of registered tool names."""
-        return list(self._tools.keys())
+    @staticmethod
+    def _check_policy(
+        name: str,
+        metadata: ToolMetadata,
+        policy: ToolPermissionPolicy | None,
+    ) -> str | None:
+        if policy is None:
+            return None
+        return policy.check(name, metadata)
 
     def __len__(self) -> int:
         return len(self._tools)

@@ -35,7 +35,8 @@ async def test_subagent_spawn_resolves_model_alias_and_reports_result(tmp_path):
         model="coder",
     )
 
-    assert "Subagent [website] started" in result
+    assert "Subagent [website] started in the background" in result
+    assert "`implementation` profile" in result
 
     for _ in range(20):
         if manager.get_running_count() == 0:
@@ -45,6 +46,135 @@ async def test_subagent_spawn_resolves_model_alias_and_reports_result(tmp_path):
     provider.chat_with_retry.assert_awaited()
     assert provider.chat_with_retry.await_args.kwargs["model"] == "ollama/qwen3.5:4b"
     bus.publish_inbound.assert_awaited()
+
+
+def test_subagent_research_profile_hides_write_tools(tmp_path):
+    provider = MagicMock()
+    provider.get_default_model = MagicMock(return_value="anthropic/claude-opus-4-5")
+
+    bus = MessageBus()
+
+    manager = SubagentManager(
+        provider=provider,
+        workspace=tmp_path,
+        bus=bus,
+        model="anthropic/claude-opus-4-5",
+        exec_config=ExecToolConfig(),
+    )
+
+    tools, profile = manager._build_tools("research")
+
+    assert profile.name == "research"
+    assert "write_file" not in tools.tool_names()
+    assert "edit_file" not in tools.tool_names()
+    assert "exec" not in tools.tool_names()
+    assert "read_file" in tools.tool_names()
+    assert "web_search" in tools.tool_names()
+
+
+@pytest.mark.asyncio
+async def test_subagent_research_profile_denies_write_attempt_even_if_model_asks(tmp_path):
+    provider = MagicMock()
+    provider.get_default_model = MagicMock(return_value="anthropic/claude-opus-4-5")
+    provider.chat_with_retry = AsyncMock(
+        side_effect=[
+            LLMResponse(
+                content=None,
+                tool_calls=[
+                    ToolCallRequest(
+                        id="1",
+                        name="write_file",
+                        arguments={"path": "notes.txt", "content": "hello"},
+                    )
+                ],
+            ),
+            LLMResponse(content="I could not write because the profile blocked that action."),
+        ]
+    )
+
+    bus = MessageBus()
+    bus.publish_inbound = AsyncMock()
+
+    manager = SubagentManager(
+        provider=provider,
+        workspace=tmp_path,
+        bus=bus,
+        model="anthropic/claude-opus-4-5",
+        exec_config=ExecToolConfig(),
+    )
+
+    await manager.spawn(
+        task="Research the project and save findings",
+        label="research",
+        origin_channel="cli",
+        origin_chat_id="direct",
+        profile="research",
+    )
+
+    for _ in range(20):
+        if manager.get_running_count() == 0:
+            break
+        await asyncio.sleep(0)
+
+    first_call_tools = provider.chat_with_retry.await_args_list[0].kwargs["tools"]
+    exposed_names = {tool["function"]["name"] for tool in first_call_tools}
+    assert "write_file" not in exposed_names
+    assert "read_file" in exposed_names
+
+    bus.publish_inbound.assert_awaited()
+    published = bus.publish_inbound.await_args.args[0]
+    assert "Profile: research" in published.content
+    assert "could not write" in published.content.lower()
+
+
+@pytest.mark.asyncio
+async def test_subagent_reports_partial_completion_honestly(tmp_path):
+    provider = MagicMock()
+    provider.get_default_model = MagicMock(return_value="anthropic/claude-opus-4-5")
+    provider.chat_with_retry = AsyncMock(
+        side_effect=[
+            LLMResponse(
+                content=None,
+                tool_calls=[
+                    ToolCallRequest(
+                        id="1",
+                        name="write_file",
+                        arguments={"path": "notes.txt", "content": "hello"},
+                    )
+                ],
+            ),
+            LLMResponse(content=""),
+            LLMResponse(content="   "),
+        ]
+    )
+
+    bus = MessageBus()
+    bus.publish_inbound = AsyncMock()
+
+    manager = SubagentManager(
+        provider=provider,
+        workspace=tmp_path,
+        bus=bus,
+        model="anthropic/claude-opus-4-5",
+        exec_config=ExecToolConfig(),
+    )
+
+    await manager.spawn(
+        task="Write a note",
+        label="notes",
+        origin_channel="cli",
+        origin_chat_id="direct",
+    )
+
+    for _ in range(20):
+        if manager.get_running_count() == 0:
+            break
+        await asyncio.sleep(0)
+
+    published = bus.publish_inbound.await_args.args[0]
+    assert "completed partially" in published.content.lower()
+    assert "Exit reason: empty_post_tool_reply" in published.content
+    assert "Files: notes.txt" in published.content
 
 
 @pytest.mark.asyncio

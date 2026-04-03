@@ -13,7 +13,10 @@ def summarize_subagent_completion(content: str) -> str:
 
     header = lines[0]
     label = "Background task"
-    header_match = re.match(r"^\[Subagent '(.+)' (completed successfully|failed)\]$", header)
+    header_match = re.match(
+        r"^\[Subagent '(.+)' (completed successfully|completed partially|failed)\]$",
+        header,
+    )
     if header_match:
         label = header_match.group(1)
         status = header_match.group(2)
@@ -22,9 +25,12 @@ def summarize_subagent_completion(content: str) -> str:
 
     task = ""
     result = ""
+    files = ""
     for idx, line in enumerate(lines):
         if line.startswith("Task:"):
             task = line[5:].strip()
+        elif line.startswith("Files:"):
+            files = line[6:].strip()
         elif line == "Result:":
             result = "\n".join(lines[idx + 1 :]).strip()
             break
@@ -36,14 +42,23 @@ def summarize_subagent_completion(content: str) -> str:
             return f"Background work for {label}{task_snippet} failed. " f"Main blocker: {blocker}"
         return f"Background work for {label}{task_snippet} failed."
 
+    if status == "completed partially":
+        detail = _clean_result_line(result) or files
+        task_snippet = f" for '{task}'" if task else ""
+        if detail:
+            return f"{label} finished partially in the background{task_snippet}. {detail}"
+        return f"{label} finished partially in the background{task_snippet}."
+
     if result:
         summary = _clean_result_line(result)
         if task:
-            return (
-                f"{label} finished in the background. I reviewed the result for '{task}'. "
-                f"{summary}"
-            )
+            return f"{label} finished in the background for '{task}'. {summary}"
         return f"{label} finished in the background. {summary}"
+
+    if files:
+        if task:
+            return f"{label} finished in the background for '{task}'. Main files: {files}"
+        return f"{label} finished in the background. Main files: {files}"
 
     if task:
         return f"{label} finished in the background. The task '{task}' has completed."

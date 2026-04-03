@@ -1,6 +1,7 @@
 from typing import Any
 
 from hermitcrab.agent.tools.base import Tool
+from hermitcrab.agent.tools.policy import ToolMetadata, ToolPermissionLevel, ToolPermissionPolicy
 from hermitcrab.agent.tools.registry import ToolRegistry
 
 
@@ -86,3 +87,51 @@ async def test_registry_returns_validation_error() -> None:
     reg.register(SampleTool())
     result = await reg.execute("sample", {"query": "hi"})
     assert "Invalid parameters" in result
+
+
+async def test_registry_denies_tool_when_policy_blocks_it() -> None:
+    reg = ToolRegistry(
+        default_policy=ToolPermissionPolicy(
+            actor="subagent",
+            allowed_permissions=frozenset({ToolPermissionLevel.READ_ONLY}),
+            allowed_tool_names=frozenset({"sample"}),
+            allow_subagent_tools_only=True,
+            profile_name="explore",
+        )
+    )
+    reg.register(
+        SampleTool(),
+        metadata=ToolMetadata(
+            permission_level=ToolPermissionLevel.COORDINATOR,
+            available_to_subagents=False,
+        ),
+    )
+
+    result = await reg.execute("sample", {"query": "hi", "count": 2})
+
+    assert "not allowed" in result
+    assert "reserved for the main agent" in result
+
+
+def test_registry_filters_definitions_using_policy() -> None:
+    reg = ToolRegistry(
+        default_policy=ToolPermissionPolicy(
+            actor="subagent",
+            allowed_permissions=frozenset({ToolPermissionLevel.READ_ONLY}),
+            allowed_tool_names=frozenset({"sample"}),
+            allow_subagent_tools_only=True,
+            profile_name="explore",
+        )
+    )
+    reg.register(
+        SampleTool(),
+        metadata=ToolMetadata(
+            permission_level=ToolPermissionLevel.READ_ONLY,
+            available_to_subagents=True,
+        ),
+    )
+
+    definitions = reg.get_definitions()
+
+    assert len(definitions) == 1
+    assert definitions[0]["function"]["name"] == "sample"
