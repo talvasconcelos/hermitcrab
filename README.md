@@ -5,12 +5,16 @@
 [![Python ≥3.11](https://img.shields.io/badge/python-≥3.11-blue)](https://python.org)
 [![MIT License](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 
+> Current release line: `0.1.0b1` beta
+
+This is the first beta line: usable, local-first, and already good for real daily workflows, but still actively hardening around edge cases, polish, and long-session reliability.
+
 ### What is HermitCrab, really?
 
 HermitCrab is a **personal AI agent** you run on your own machine.  
 It’s not another cloud wrapper, not a bloated framework, not yet another SaaS subscription trap.  
 
-It’s small (under 6,000 lines of core code), readable, auditable, and built around one simple idea:  
+It’s lean, readable, auditable, and built around one simple idea:  
 **Your AI should remember what matters to you — forever — without turning into a black box.**
 
 Think of it as a **second brain** you can carry in your pocket (or copy to a new laptop/VPS in seconds).  
@@ -18,12 +22,13 @@ Just move the `workspace/` folder and you’re back in business — same memorie
 
 ### Why people may be drawn to it
 
-- Supports **fully offline** operation with local models (Ollama via LiteLLM)  
+- Supports **fully offline** operation with local models (native Ollama or OpenAI-compatible local routes)  
 - Remembers things in **plain, human-readable Markdown files** (Obsidian compatible, git-friendly)  
 - Can **distill** conversations into facts, tasks, decisions, goals, and reflections when that optional background pass is enabled  
 - **Reflects** on itself — spots patterns, mistakes, contradictions, and suggests improvements  
 - Talks via **Nostr** (primary), Telegram, email, or plain CLI — your choice  
 - Stays tiny, fast, and cheap — no 100k+ line monolith
+- Aims to stay powerful for operators while still being approachable for normal household use
 
 **Same crab, new shell.**  
 Move your workspace anywhere. The agent picks up exactly where it left off.
@@ -173,6 +178,15 @@ Move your workspace anywhere. The agent picks up exactly where it left off.
 
 You're now talking to your own persistent, memory-aware agent.
 
+### Useful first commands
+
+```bash
+hermitcrab agent      # interactive local chat
+hermitcrab status     # quick runtime and config status
+hermitcrab doctor     # diagnose config/provider issues
+hermitcrab gateway    # run configured channels
+```
+
 ### How the agent actually thinks & remembers
 
 HermitCrab is **not** a stateless chat loop.  
@@ -278,7 +292,7 @@ Example use cases:
 
 ### Architecture at a glance
 
-Total core agent code: 6,927 lines (run `./core_agent_lines.sh` to verify).
+HermitCrab is intentionally kept lean enough to read, debug, and adapt without inheriting a giant framework.
 
 ```
 hermitcrab/
@@ -311,31 +325,22 @@ Production-minded defaults are in `hermitcrab/config/schema.py` and are written 
 
 | Aspect              | HermitCrab                          | Typical AI Framework / Chatbot      |
 |---------------------|-------------------------------------|-------------------------------------|
-| Core code size      | ~6k lines                           | 50k–300k+ lines                     |
+| Core code size      | Lean Python codebase                | 50k–300k+ lines                     |
 | Memory              | Atomic Markdown                     | Vector DB or forgotten             |
 | Portability         | Copy workspace → works              | Cloud account locked                |
 | Transparency        | Fully auditable                     | Opaque internals                    |
 | Cost                | Local models cheap                  | API calls add up fast               |
 | Self-improvement    | Built-in distillation & reflection  | Rare or manual                      |
 
-### Roadmap (where we're going)
+### Beta focus
 
-**Done**
-- Atomic memory system
-- Journal + distillation
-- Reflection basics
-- Nostr integration
-- Local-first deployment
+For `0.1.0b1`, the priorities are:
 
-**In progress**
-- Observability / metrics
-- Full integration tests
-
-**Planned**
-- Journal search
-- Backup & migration helpers
-- Optional health-check endpoint
-- Web chat companion (static HTML + Nostr)
+- strong local-first UX
+- clean, low-duplication memory
+- reliable tool use and session continuity
+- smooth onboarding and diagnostics
+- a product that feels good for both power users and everyday household use
 
 ### Why I built this
 
@@ -356,7 +361,7 @@ Keep it yours. Keep it local. Keep it simple. 🦀
 ```bash
 pip install hermitcrab-ai
 hermitcrab onboard
-hermitcrab gateway
+hermitcrab agent
 ```
 
 Welcome to your own second brain.
@@ -378,4 +383,5 @@ We stand on the shoulders of giants:
 - Inspired by [OpenClaw](https://github.com/openclaw/openclaw)
 
 **Thank you** to the nanobot team for creating the foundation that made HermitCrab possible.
-- Persisted data lives at `~/.hermitcrab` (mounted into container).
+
+Persisted data lives at `~/.hermitcrab` and can be mounted into containers when you use Docker.
