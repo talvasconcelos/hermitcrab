@@ -64,26 +64,26 @@ Move your workspace anywhere. The agent picks up exactly where it left off.
    
    b. Pull a model:
    ```bash
-   ollama pull lfm2.5-thinking:latest  # Fast thinking model
+   ollama pull gemma4:e4b  # Fast thinking model
    # Or: ollama pull llama3.1:8b      # General purpose
-   # Or: ollama pull qwen2.5-coder:7b # Coding specialist
+   # Or: ollama pull qwen3.5:7b # Coding specialist
    ```
    
    c. Edit `~/.hermitcrab/config.json`:
    ```json
    {
      "providers": {
-       "openai": {
-         "apiKey": "ollama",
-         "apiBase": "http://localhost:11434/v1"
+       "ollama": {
+         "apiKey": "",
+         "apiBase": "http://localhost:11434"
        }
      },
      "models": {
        "main": {
-         "model": "openai/lfm2.5-thinking:latest"
+         "model": "ollama/gemma4:e4b"
        },
        "localCoder": {
-         "model": "ollama/qwen2.5-coder:7b"
+         "model": "ollama/qwen3.5:7b"
        }
      },
      "agents": {
@@ -104,20 +104,20 @@ Move your workspace anywhere. The agent picks up exactly where it left off.
    ```json
    {
      "providers": {
-       "openai": {
-         "apiKey": "ollama",
-         "apiBase": "http://localhost:11434/v1"
+       "ollama": {
+         "apiKey": "",
+         "apiBase": "http://localhost:11434"
        }
      },
      "models": {
        "main": {
-         "model": "openai/kimi-k2.5:cloud"
+         "model": "ollama/glm-5:cloud"
        },
        "coder": {
          "model": "ollama/qwen3.5:4b"
        },
        "fast": {
-         "model": "openai/lfm2.5-thinking:latest",
+         "model": "ollama/gemma4:e2b",
          "reasoningEffort": "medium"
        }
      },
@@ -137,11 +137,11 @@ Move your workspace anywhere. The agent picks up exactly where it left off.
    }
    ```
    Notes:
-   - For Ollama, prefer the `openai` provider pointed at `http://localhost:11434/v1`. In practice this has much better tool-calling reliability than LiteLLM's native `ollama` route.
-   - The `ollama` provider is still available, but it currently has weaker tool coverage and more provider-specific tool-call quirks.
-   - Keep the model name exactly as Ollama exposes it when using the OpenAI-compatible route.
+   - For Ollama, use the dedicated `ollama` provider.
+   - Set `providers.ollama.apiBase` to your Ollama server root, typically `http://localhost:11434` with no `/v1` suffix.
+   - Use `ollama/...` model IDs for local Ollama models and Ollama-routed cloud models.
    - Prefer the top-level `models` section as the canonical place for model definitions.
-   - Ollama's OpenAI-compatible `/v1` route does not currently support per-request context-size overrides; use `OLLAMA_CONTEXT_LENGTH` or custom Modelfile-based models when you need a larger local context window.
+   - Per-model `providerOptions` can be used to tune Ollama behavior such as `num_ctx`, `temperature`, `max_tokens`, and related runtime settings.
    - `agents.modelAliases` is optional shorthand for runtime ergonomics; it is not required if your named model keys are already concise.
    - Subagents can use named models directly, or aliases when you want shorter operator-facing names.
    
