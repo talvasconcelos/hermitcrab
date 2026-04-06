@@ -1307,6 +1307,66 @@ class MemoryStore:
             return content[:max_chars].rstrip() + "\n\n_[Relevant memory truncated]_"
         return content
 
+    def get_relevant_context_for_queries(
+        self,
+        queries: list[str],
+        *,
+        limit: int = 6,
+        max_chars: int | None = None,
+        max_item_chars: int | None = None,
+    ) -> str:
+        """Build relevant context from multiple retrieval queries, deduping by memory ID."""
+        normalized_queries = []
+        seen_queries: set[str] = set()
+        for query in queries:
+            clean_query = query.strip()
+            if not clean_query:
+                continue
+            dedupe_key = clean_query.lower()
+            if dedupe_key in seen_queries:
+                continue
+            seen_queries.add(dedupe_key)
+            normalized_queries.append(clean_query)
+
+        if not normalized_queries:
+            return ""
+
+        scored_results: dict[str, tuple[int, MemoryItem]] = {}
+        for query in normalized_queries:
+            for item in self.search_memory(query=query, limit=limit):
+                score = self._search_match_score(item, item.file_path, query)
+                if score <= 0:
+                    continue
+                existing = scored_results.get(item.id)
+                if existing is None or score > existing[0] or (
+                    score == existing[0] and item.updated_at > existing[1].updated_at
+                ):
+                    scored_results[item.id] = (score, item)
+
+        if not scored_results:
+            return ""
+
+        items = [
+            item
+            for _, item in sorted(
+                scored_results.values(),
+                key=lambda pair: (pair[0], pair[1].updated_at),
+                reverse=True,
+            )
+        ][:limit]
+
+        section_lines: list[str] = []
+        for item in items:
+            formatted = self._format_memory_item(item, item.category)
+            if max_item_chars is not None and len(formatted) > max_item_chars:
+                formatted = formatted[:max_item_chars].rstrip() + "\n...(truncated)"
+            section_lines.append(formatted)
+
+        content = "\n".join(section_lines)
+        if max_chars is not None and len(content) > max_chars:
+            return content[:max_chars].rstrip() + "\n\n_[Relevant memory truncated]_"
+        return content
+
     def _format_memory_item(self, item: MemoryItem, category: MemoryCategory) -> str:
         """Format a single memory item for context display."""
         lines = [f"\n### {item.title}"]

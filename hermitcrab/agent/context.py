@@ -155,9 +155,9 @@ class ContextBuilder:
         relevant_memory = ""
         relevant_memory_tokens = 0
         if available_memory_tokens > 0:
-            memory_query = self._build_memory_query(current_message, history or [])
-            relevant_memory = self.memory.get_relevant_context(
-                memory_query,
+            memory_queries = self._build_memory_queries(current_message, history or [])
+            relevant_memory = self.memory.get_relevant_context_for_queries(
+                memory_queries,
                 limit=max(3, min(8, self.memory_max_items_per_category)),
                 max_chars=max(200, min(available_memory_chars // 2, self.memory_max_chars // 2)),
                 max_item_chars=self.memory_max_item_chars,
@@ -368,13 +368,13 @@ Use subagents for complex, time-consuming, or specialized tasks. For substantial
 
         return messages
 
-    def _build_memory_query(
+    def _build_memory_queries(
         self, current_message: str | None, history: list[dict[str, Any]]
-    ) -> str:
-        """Build a lightweight retrieval query from the active user request and recent user turns."""
-        parts: list[str] = []
+    ) -> list[str]:
+        """Build lightweight retrieval queries from the active request and recent user turns."""
+        queries: list[str] = []
         if current_message and current_message.strip():
-            parts.append(current_message.strip())
+            queries.append(current_message.strip())
 
         recent_user_turns: list[str] = []
         for msg in reversed(history):
@@ -389,10 +389,20 @@ Use subagents for complex, time-consuming, or specialized tasks. For substantial
             if len(recent_user_turns) >= 2:
                 break
 
-        parts.extend(reversed(recent_user_turns))
-        query = " ".join(parts)
-        query = re.sub(r"\s+", " ", query).strip()
-        return query[:400]
+        queries.extend(reversed(recent_user_turns))
+
+        normalized_queries: list[str] = []
+        seen: set[str] = set()
+        for query in queries:
+            normalized = re.sub(r"\s+", " ", query).strip()
+            if not normalized:
+                continue
+            dedupe_key = normalized.lower()
+            if dedupe_key in seen:
+                continue
+            seen.add(dedupe_key)
+            normalized_queries.append(normalized[:400])
+        return normalized_queries
 
     def _build_active_skills_summary(self, skill_names: list[str]) -> str:
         """Build a compact summary for always-active skills without inlining full skill text."""

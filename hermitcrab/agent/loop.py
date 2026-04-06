@@ -51,6 +51,7 @@ from hermitcrab.agent.memory import MemoryStore
 from hermitcrab.agent.message_preparation import (
     clean_snippet,
     is_empty_response,
+    is_placeholder_assistant_reply,
     is_subagent_completion_prompt,
 )
 from hermitcrab.agent.pending_work import (
@@ -1014,8 +1015,11 @@ class AgentLoop:
                 job_class=JobClass.INTERACTIVE_RESPONSE,
             )
             final_content = turn_result.final_content
+            if is_empty_response(final_content) or is_placeholder_assistant_reply(final_content):
+                final_content = self._build_unexpected_empty_turn_fallback(msg.content)
+                if turn_result.outcome == TurnOutcome.COMPLETED:
+                    turn_result.outcome = TurnOutcome.EMPTY_REPLY
 
-            final_content = final_content or self._build_unexpected_empty_turn_fallback(msg.content)
             self._record_final_execution_state(key, final_content, turn_result.outcome)
             preview = final_content[:120] + "..." if len(final_content) > 120 else final_content
             logger.info("Response to {}:{}: {}", msg.channel, msg.sender_id, preview)

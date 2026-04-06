@@ -12,6 +12,7 @@ from typing import Any, AsyncIterator, Awaitable, Callable
 from loguru import logger
 
 from hermitcrab.agent.context import ContextBuilder
+from hermitcrab.agent.message_preparation import is_placeholder_assistant_reply
 from hermitcrab.agent.pending_work import has_structured_payload, is_short_follow_up
 from hermitcrab.agent.tool_call_recovery import coerce_inline_tool_calls, normalize_tool_calls
 from hermitcrab.agent.tools.policy import ToolPermissionLevel
@@ -137,6 +138,10 @@ class TurnRunner:
             return result
         return result[: max_chars - 3].rstrip() + "..."
 
+    def _is_missing_final_response(self, content: str | None) -> bool:
+        """Treat empty or placeholder assistant text as missing final output."""
+        return self.is_empty_response(content) or is_placeholder_assistant_reply(content)
+
     @staticmethod
     def _build_successful_write_fallback(tool_name: str, tool_result: str) -> str | None:
         """Turn successful write-style tool results into user-facing final replies."""
@@ -224,7 +229,9 @@ class TurnRunner:
         return "\n".join(lines)
 
     @staticmethod
-    def _derive_action_request_text(messages: list[dict[str, Any]], current_request: str | None) -> str | None:
+    def _derive_action_request_text(
+        messages: list[dict[str, Any]], current_request: str | None
+    ) -> str | None:
         """Resolve the strongest recent actionable request for this turn."""
         if isinstance(current_request, str) and has_structured_payload(current_request):
             return current_request
@@ -484,24 +491,39 @@ class TurnRunner:
         reasoning_content: str | None = None
         finish_reason = "stop"
         heartbeats_sent = 0
+        pending_event: asyncio.Task[Any] | None = None
 
         while True:
             remaining = self._remaining_seconds(started_at)
             if remaining <= 0:
+                if pending_event is not None and not pending_event.done():
+                    pending_event.cancel()
+                    try:
+                        await pending_event
+                    except (asyncio.CancelledError, StopAsyncIteration):
+                        pass
                 await stream.aclose()
                 raise TimeoutError("turn exceeded max_loop_seconds while streaming provider output")
 
             try:
-                event = await asyncio.wait_for(
-                    stream.__anext__(),
+                if pending_event is None:
+                    pending_event = asyncio.create_task(stream.__anext__())
+                done, _ = await asyncio.wait(
+                    {pending_event},
                     timeout=min(self.PROGRESS_HEARTBEAT_SECONDS, max(0.01, remaining)),
                 )
+                if not done:
+                    raise asyncio.TimeoutError
+                event = pending_event.result()
             except StopAsyncIteration:
                 break
             except asyncio.TimeoutError:
                 if on_progress and heartbeats_sent < self.MAX_IDENTICAL_HEARTBEATS_PER_WAIT:
                     heartbeats_sent += 1
                 continue
+            finally:
+                if pending_event is not None and pending_event.done():
+                    pending_event = None
 
             heartbeats_sent = 0
             if isinstance(event, TextDeltaEvent):
@@ -642,7 +664,6 @@ class TurnRunner:
                 len(response.content or ""),
                 len(response.tool_calls),
             )
-
             if not response.has_tool_calls:
                 content, inline_tool_calls = coerce_inline_tool_calls(
                     response.content, self.tools.has
@@ -778,7 +799,7 @@ class TurnRunner:
             repeated_tool_cycles = 0
             last_tool_signature = None
             final_content = self.strip_think(response.content)
-            if not tools_used and self.is_empty_response(final_content):
+            if not tools_used and self._is_missing_final_response(final_content):
                 empty_response_reprompt_count += 1
                 logger.warning(
                     "Empty response without tool usage; reprompting model (attempt {}, finish_reason={})",
@@ -855,7 +876,7 @@ class TurnRunner:
                             {
                                 "role": "system",
                                 "content": (
-                                "This reply is not authoritative enough yet. If the user asked "
+                                    "This reply is not authoritative enough yet. If the user asked "
                                     "to save, update, correct, or confirm durable memory, use the typed "
                                     "memory tools before answering definitively. If this is about "
                                     "previously stored information, check memory before claiming "
@@ -874,7 +895,7 @@ class TurnRunner:
                     outcome = TurnOutcome.INCOMPLETE_ACTION
                     break
 
-            needs_reprompt = tools_used and self.is_empty_response(final_content)
+            needs_reprompt = tools_used and self._is_missing_final_response(final_content)
             failure_type = "empty_post_tool_response"
             if not needs_reprompt and self._should_reprompt_incomplete_post_tool_response(
                 current_request=action_request_text,

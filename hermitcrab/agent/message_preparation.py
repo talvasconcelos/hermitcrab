@@ -5,6 +5,39 @@ from __future__ import annotations
 import re
 from typing import Any
 
+_PLACEHOLDER_ASSISTANT_REPLIES = {
+    '""',
+    "''",
+    "thinking",
+    "thinking.",
+    "thinking..",
+    "thinking...",
+    "processing",
+    "processing.",
+    "processing..",
+    "processing...",
+    "working on it",
+    "working on it.",
+    "working on it..",
+    "working on it...",
+    "still working on it",
+    "still working on it.",
+    "still working on it..",
+    "still working on it...",
+    "one moment",
+    "one moment.",
+    "one moment..",
+    "one moment...",
+    "just a moment",
+    "just a moment.",
+    "just a moment..",
+    "just a moment...",
+    "please wait",
+    "please wait.",
+    "please wait..",
+    "please wait...",
+}
+
 
 def is_empty_response(text: str | None) -> bool:
     """Treat blank or whitespace-only replies as missing output."""
@@ -20,6 +53,14 @@ def clean_snippet(value: Any, *, max_chars: int = 160) -> str:
     if len(text) > max_chars:
         return text[: max_chars - 3].rstrip() + "..."
     return text
+
+
+def is_placeholder_assistant_reply(text: str | None) -> bool:
+    """Reject short status-only assistant text that should not reach the user as a final answer."""
+    if is_empty_response(text):
+        return False
+    normalized = clean_snippet(text, max_chars=120).lower()
+    return normalized in _PLACEHOLDER_ASSISTANT_REPLIES
 
 
 def is_subagent_completion_prompt(content: str) -> bool:
