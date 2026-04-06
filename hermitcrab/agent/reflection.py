@@ -335,7 +335,7 @@ Rules:
                 result[field] = match.group(1).strip().strip('"')
 
         confidence_match = re.search(
-            r"(?im)^\s*(?:[-*]\s*)?(?:confidence)\s*:\s*([0-9.]+)\s*$",
+            r"(?im)^\s*(?:[-*]\s*)?(?:confidence)\s*:\s*([0-9.]+%?)\s*$",
             content,
         )
         if confidence_match:
@@ -421,7 +421,13 @@ Rules:
     @staticmethod
     def _parse_confidence(value: Any) -> float | None:
         try:
-            confidence = float(value)
+            raw = str(value).strip()
+            if not raw:
+                return None
+            if raw.endswith("%"):
+                confidence = float(raw[:-1].strip()) / 100.0
+            else:
+                confidence = float(raw)
         except (TypeError, ValueError):
             return None
         if confidence < 0.0 or confidence > 1.0:
@@ -438,6 +444,19 @@ Rules:
 
     def _normalize_result_shape(self, result: dict[str, Any]) -> None:
         """Accept legacy reflection keys while preferring the newer schema."""
+        text_fields = (
+            "title",
+            "observation",
+            "impact",
+            "lesson",
+            "recommended_behavior",
+            "evidence",
+            "promote_content",
+        )
+        for field in text_fields:
+            if field in result:
+                result[field] = self._normalize_text_field(result.get(field))
+
         if result.get("content") and not result.get("lesson"):
             result["lesson"] = result["content"]
         legacy_type = str(result.get("type", "")).strip().lower()
@@ -460,16 +479,35 @@ Rules:
             result["impact"] = "This changes how I should behave in similar situations."
         if result.get("confidence") is None:
             result["confidence"] = 0.8 if result.get("should_promote") else 0.7
+        result["scope"] = self._normalize_learning_scope(result, None)
+        result["promotion_target"] = self._normalize_promotion_target(
+            result.get("promotion_target")
+        )
 
     def _normalize_promotion_target(self, value: Any) -> str:
         target = str(value or "none").strip()
         if not target:
             return "none"
+        normalized = re.sub(r"\s+", "", target).lower()
+        alias_map = {
+            "agents": "AGENTS.md",
+            "agents.md": "AGENTS.md",
+            "tools": "TOOLS.md",
+            "tools.md": "TOOLS.md",
+            "soul": "SOUL.md",
+            "soul.md": "SOUL.md",
+            "identity": "IDENTITY.md",
+            "identity.md": "IDENTITY.md",
+            "none": "none",
+        }
+        if normalized in alias_map:
+            return alias_map[normalized]
         if "|" in target:
             for option in target.split("|"):
                 option = option.strip()
-                if option in self.VALID_PROMOTION_TARGETS:
-                    return option
+                normalized_option = self._normalize_promotion_target(option)
+                if normalized_option in self.VALID_PROMOTION_TARGETS:
+                    return normalized_option
             return "none"
         return target if target in self.VALID_PROMOTION_TARGETS else "none"
 
@@ -495,8 +533,26 @@ Rules:
             return self._default_promotion_target(str(result.get("scope", "")))
         return target
 
-    def _normalize_learning_scope(self, result: dict[str, Any], _digest: SessionDigest) -> str:
-        return str(result.get("scope", "")).strip().lower()
+    def _normalize_learning_scope(self, result: dict[str, Any], _digest: SessionDigest | None) -> str:
+        scope = str(result.get("scope", "")).strip().lower().replace(" ", "_")
+        alias_map = {
+            "global": "global_product",
+            "global_product": "global_product",
+            "product": "global_product",
+            "workflow": "global_product",
+            "assistant": "assistant_behavior",
+            "assistant_behavior": "assistant_behavior",
+            "behavior": "assistant_behavior",
+            "tool": "tool_usage",
+            "tools": "tool_usage",
+            "tool_usage": "tool_usage",
+            "preference": "user_preference",
+            "user_preference": "user_preference",
+            "session": "session_tactic",
+            "session_tactic": "session_tactic",
+            "tactic": "session_tactic",
+        }
+        return alias_map.get(scope, scope)
 
     def _infer_bootstrap_target(self, result: dict[str, Any], digest: SessionDigest) -> str:
         scope = str(result.get("scope", "")).strip().lower()
@@ -554,6 +610,18 @@ Rules:
         if stripped.startswith("- "):
             stripped = stripped[2:].strip()
         return f"- {stripped}"
+
+    @staticmethod
+    def _normalize_text_field(value: Any) -> str:
+        text = str(value or "").strip()
+        if not text:
+            return ""
+        if text.startswith(("```", "`")) and text.endswith(("```", "`")):
+            text = text.strip("`").strip()
+        if len(text) >= 2 and text[0] == text[-1] and text[0] in {'"', "'"}:
+            text = text[1:-1].strip()
+        text = re.sub(r"^\s*[-*]\s+", "", text)
+        return " ".join(text.split())
 
     def _looks_like_prompt_placeholder(
         self, title: str, lesson: str, recommended_behavior: str

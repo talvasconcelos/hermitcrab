@@ -261,7 +261,22 @@ class MemoryStore:
         merged_tags = list(dict.fromkeys([*existing.tags, *(tags or [])]))
 
         updated_content = existing.content
-        if len(normalized_new_content) > len(normalized_existing_content):
+        if (
+            normalized_new_content
+            and normalized_existing_content
+            and normalized_new_content != normalized_existing_content
+        ):
+            # Keep the longer version only when one side is clearly an expansion of the other.
+            # Otherwise prefer the newest content so corrections can replace stale facts.
+            if (
+                normalized_existing_content in normalized_new_content
+                or normalized_new_content in normalized_existing_content
+            ):
+                if len(normalized_new_content) > len(normalized_existing_content):
+                    updated_content = content.strip()
+            else:
+                updated_content = content.strip()
+        elif len(normalized_new_content) > len(normalized_existing_content):
             updated_content = content.strip()
 
         updated_title = existing.title

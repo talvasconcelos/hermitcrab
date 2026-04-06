@@ -159,6 +159,10 @@ class JournalBackgroundManager:
             return False
         if cleaned[-1].isalnum():
             return False
+        if JournalBackgroundManager._looks_like_wrong_journal_perspective(cleaned):
+            return False
+        if JournalBackgroundManager._looks_like_generic_journal_body(cleaned):
+            return False
 
         sentence_count = cleaned.count(".") + cleaned.count("!") + cleaned.count("?")
         if sentence_count < 2:
@@ -186,6 +190,34 @@ class JournalBackgroundManager:
                 grounding_hits += 1
         required_hits = 1 if grounding_candidates <= 1 else 2
         return grounding_hits >= required_hits
+
+    @staticmethod
+    def _looks_like_wrong_journal_perspective(content: str) -> bool:
+        """Reject entries that sound like the user narrating instead of the assistant."""
+        normalized = " ".join(content.lower().split())
+        user_perspective_markers = (
+            "i asked for ",
+            "i wanted ",
+            "i needed ",
+            "i told the assistant",
+            "my request was",
+            "my preference is",
+            "my task was",
+        )
+        return any(marker in normalized for marker in user_perspective_markers)
+
+    @staticmethod
+    def _looks_like_generic_journal_body(content: str) -> bool:
+        """Reject low-information filler that still slips past basic grounding checks."""
+        normalized = " ".join(content.lower().split())
+        generic_markers = (
+            "i worked on it",
+            "i helped the user with their request",
+            "i handled the request",
+            "i completed the task",
+            "i worked on the request",
+        )
+        return any(marker in normalized for marker in generic_markers)
 
     async def synthesize_journal_from_messages(
         self,
