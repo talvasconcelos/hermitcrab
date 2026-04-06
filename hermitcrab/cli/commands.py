@@ -494,7 +494,7 @@ def _build_onboard_next_steps() -> list[str]:
                 "  1. Recommended local setup detected: [cyan]ollama[/cyan] is installed",
                 "     Start it with [cyan]ollama serve[/cyan] and pull a model like [cyan]ollama pull qwen3.5:4b[/cyan]",
                 "  2. Review [cyan]~/.hermitcrab/config.json[/cyan] and point your main model at Ollama or your preferred provider",
-                "  3. Verify setup: [cyan]hermitcrab status[/cyan] or [cyan]hermitcrab doctor[/cyan]",
+                "  3. Run a quick readiness check: [cyan]hermitcrab doctor[/cyan]",
                 '  4. Start chatting: [cyan]hermitcrab agent[/cyan] or [cyan]hermitcrab agent -m "Hello!"[/cyan]',
             ]
         )
@@ -505,7 +505,7 @@ def _build_onboard_next_steps() -> list[str]:
             "  1. Choose a provider in [cyan]~/.hermitcrab/config.json[/cyan]",
             "     - Local: install [cyan]Ollama[/cyan] from https://ollama.com and use its local OpenAI-compatible endpoint",
             "     - Cloud: add an API key such as OpenRouter from https://openrouter.ai/keys",
-            "  2. Verify setup: [cyan]hermitcrab status[/cyan] or [cyan]hermitcrab doctor[/cyan]",
+            "  2. Run a quick readiness check: [cyan]hermitcrab doctor[/cyan]",
             '  3. Start chatting: [cyan]hermitcrab agent[/cyan] or [cyan]hermitcrab agent -m "Hello!"[/cyan]',
         ]
     )
@@ -1487,6 +1487,14 @@ def status(
         return
 
     console.print(f"{__logo__} hermitcrab Status\n")
+    if report.overall_state == "ready":
+        console.print("[green]Ready[/green] HermitCrab looks ready for a useful local session.")
+    elif report.overall_state == "warning":
+        console.print("[yellow]Almost ready[/yellow] HermitCrab can run, but setup still has rough edges.")
+    else:
+        console.print("[red]Needs setup[/red] HermitCrab has blockers to fix before it is ready.")
+    console.print()
+
     config_status = "[green]valid[/green]" if report.config_valid else "[red]invalid[/red]"
     if not report.config_exists:
         config_status = "[red]missing[/red]"
@@ -1547,6 +1555,18 @@ def doctor(
         return
 
     console.print(f"{__logo__} hermitcrab Doctor\n")
+    urgent = [item for item in report.findings if item.severity == "error"]
+    if urgent:
+        console.print("[red]Start Here[/red]")
+        for finding in urgent[:3]:
+            console.print(f"- {finding.remediation}")
+        console.print()
+    elif report.status.next_steps:
+        console.print("[green]Start Here[/green]")
+        for step in report.status.next_steps[:3]:
+            console.print(f"- {step}")
+        console.print()
+
     for finding in report.findings:
         if finding.severity == "ok":
             marker = "[green]OK[/green]"

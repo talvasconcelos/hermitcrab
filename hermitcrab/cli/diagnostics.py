@@ -57,6 +57,8 @@ class StatusReport:
     skill_statuses: list[SkillStatus] = field(default_factory=list)
     mcp_servers_configured: int = 0
     mcp_servers_valid: int = 0
+    overall_state: str = "error"
+    ready_for_chat: bool = False
     next_steps: list[str] = field(default_factory=list)
 
     def as_dict(self) -> dict[str, Any]:
@@ -97,6 +99,15 @@ def build_status_report(config_path: Path | None = None) -> StatusReport:
         config_exists=path.exists(),
         config_valid=config_error is None,
         workspace_exists=workspace.exists(),
+        bootstrap_ready=(workspace / "AGENTS.md").exists(),
+        selected_provider=selected_provider,
+        provider_statuses=provider_statuses,
+    )
+    overall_state, ready_for_chat = _derive_status_health(
+        config_exists=path.exists(),
+        config_valid=config_error is None,
+        workspace_exists=workspace.exists(),
+        bootstrap_ready=(workspace / "AGENTS.md").exists(),
         selected_provider=selected_provider,
         provider_statuses=provider_statuses,
     )
@@ -116,6 +127,8 @@ def build_status_report(config_path: Path | None = None) -> StatusReport:
         skill_statuses=skill_statuses,
         mcp_servers_configured=len(config.tools.mcp_servers),
         mcp_servers_valid=mcp_servers_valid,
+        overall_state=overall_state,
+        ready_for_chat=ready_for_chat,
         next_steps=next_steps,
     )
 
@@ -311,6 +324,7 @@ def _build_next_steps(
     config_exists: bool,
     config_valid: bool,
     workspace_exists: bool,
+    bootstrap_ready: bool,
     selected_provider: str | None,
     provider_statuses: list[ProviderStatus],
 ) -> list[str]:
@@ -323,6 +337,8 @@ def _build_next_steps(
         return steps
     if not workspace_exists:
         steps.append("Create the configured workspace or rerun `hermitcrab onboard`.")
+    elif not bootstrap_ready:
+        steps.append("Restore the workspace bootstrap files with `hermitcrab onboard`.")
     selected = next((item for item in provider_statuses if item.selected), None)
     if selected is None or not selected.configured:
         steps.append("Configure the selected model's provider before starting the agent.")
@@ -333,6 +349,27 @@ def _build_next_steps(
     else:
         steps.append("Run `hermitcrab agent` to start a local interactive session.")
     return steps
+
+
+def _derive_status_health(
+    *,
+    config_exists: bool,
+    config_valid: bool,
+    workspace_exists: bool,
+    bootstrap_ready: bool,
+    selected_provider: str | None,
+    provider_statuses: list[ProviderStatus],
+) -> tuple[str, bool]:
+    selected = next((item for item in provider_statuses if item.selected), None)
+    provider_ready = selected is not None and selected.configured
+
+    if not config_exists or not config_valid or not workspace_exists or not provider_ready:
+        return "error", False
+    if not bootstrap_ready:
+        return "warning", True
+    if selected_provider == "ollama" and shutil.which("ollama") is None:
+        return "warning", True
+    return "ready", True
 
 
 def _is_valid_mcp(server: Any) -> bool:
