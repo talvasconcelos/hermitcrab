@@ -1603,8 +1603,14 @@ def people_list(
     if not profiles:
         console.print("No people profiles found.")
         return
+    reminders = _build_reminder_store()
     for item in profiles:
         console.print(store.render_summary(item))
+        _, state = store.build_relationship_state(item.name, reminders=reminders)
+        if state and state.last_interaction_at:
+            console.print(f"  last interaction: {state.last_interaction_at}")
+        if state and state.follow_up_state:
+            console.print(f"  {state.follow_up_state}")
 
 
 @people_app.command("show")
@@ -1633,6 +1639,14 @@ def people_show(
     if item.notes:
         console.print()
         console.print(item.notes)
+    _, state = store.build_relationship_state(item.name, reminders=reminders)
+    if state and (state.last_interaction_at or state.follow_up_state):
+        console.print()
+        console.print("[bold]Relationship state[/bold]")
+        if state.last_interaction_at:
+            console.print(f"Last interaction: {state.last_interaction_at}")
+        if state.follow_up_state:
+            console.print(f"Follow-up state: {state.follow_up_state}")
     _, interactions = store.list_interactions(item.name, limit=5)
     if interactions:
         console.print()

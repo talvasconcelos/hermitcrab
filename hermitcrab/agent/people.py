@@ -127,6 +127,16 @@ class PersonInteraction:
         return post
 
 
+@dataclass(slots=True)
+class PersonRelationshipState:
+    """Derived quick-state for one person profile."""
+
+    person_name: str
+    last_interaction_at: str = ""
+    follow_up_state: str = ""
+    active_follow_up_count: int = 0
+
+
 class PeopleStore:
     """Manage simple people profile artifacts."""
 
@@ -341,6 +351,29 @@ class PeopleStore:
             if len(items) >= max(1, limit):
                 break
         return person, items
+
+    def build_relationship_state(
+        self,
+        query: str,
+        *,
+        reminders: Any | None = None,
+    ) -> tuple[PersonProfile | None, PersonRelationshipState | None]:
+        person, interactions = self.list_interactions(query, limit=1)
+        if person is None:
+            return None, None
+        last_interaction_at = interactions[0].occurred_at if interactions else ""
+        follow_up_state = ""
+        active_follow_up_count = 0
+        if reminders is not None:
+            active_related = [item for item in reminders.list_related_reminders(person.name) if item.status == "active"]
+            active_follow_up_count = len(active_related)
+            follow_up_state = reminders.describe_related_follow_up_state(person.name) or ""
+        return person, PersonRelationshipState(
+            person_name=person.name,
+            last_interaction_at=last_interaction_at,
+            follow_up_state=follow_up_state,
+            active_follow_up_count=active_follow_up_count,
+        )
 
     def render_summary(self, item: PersonProfile) -> str:
         suffix = f", tz={item.timezone}" if item.timezone else ""

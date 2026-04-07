@@ -251,6 +251,41 @@ class ReminderStore:
                 matches.append(item)
         return matches
 
+    def get_next_related_reminder(self, person_name: str) -> ReminderItem | None:
+        now = _utcnow()
+        future_once: list[tuple[datetime, ReminderItem]] = []
+        recurring: list[ReminderItem] = []
+        for item in self.list_related_reminders(person_name):
+            if item.status != "active":
+                continue
+            if item.schedule_kind == "at" and item.at:
+                try:
+                    at_dt = datetime.fromisoformat(item.at)
+                except ValueError:
+                    continue
+                if at_dt >= now:
+                    future_once.append((at_dt, item))
+                continue
+            if item.schedule_kind in {"every", "cron"}:
+                recurring.append(item)
+        if future_once:
+            return sorted(future_once, key=lambda pair: pair[0])[0][1]
+        if recurring:
+            return sorted(recurring, key=lambda item: item.updated_at or item.created_at)[0]
+        return None
+
+    def describe_related_follow_up_state(self, person_name: str) -> str | None:
+        reminders = self.list_related_reminders(person_name)
+        active = [item for item in reminders if item.status == "active"]
+        if not active:
+            return None
+        next_item = self.get_next_related_reminder(person_name)
+        if next_item is None:
+            return f"{len(active)} active follow-up(s)"
+        if next_item.schedule_kind == "at":
+            return f"next follow-up at {next_item.at}"
+        return f"recurring follow-up scheduled: {self.render_schedule(next_item)}"
+
     @staticmethod
     def _validate_schedule(
         *,

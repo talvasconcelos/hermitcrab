@@ -174,7 +174,15 @@ class PersonProfileTool(Tool):
             if not items:
                 return "No people profiles found."
             lines = ["People profiles:", ""]
-            lines.extend(self.people.render_summary(item) for item in items)
+            for item in items:
+                lines.append(self.people.render_summary(item))
+                if self.reminders is not None:
+                    _, state = self.people.build_relationship_state(item.name, reminders=self.reminders)
+                    if state and (state.last_interaction_at or state.follow_up_state):
+                        if state.last_interaction_at:
+                            lines.append(f"  last interaction: {state.last_interaction_at}")
+                        if state.follow_up_state:
+                            lines.append(f"  {state.follow_up_state}")
             return "\n".join(lines)
 
         if action == "show":
@@ -200,6 +208,13 @@ class PersonProfileTool(Tool):
                 lines.append(f"Tags: {', '.join(item.tags)}")
             if item.notes:
                 lines.extend(["", item.notes])
+            _, state = self.people.build_relationship_state(item.name, reminders=self.reminders)
+            if state and (state.last_interaction_at or state.follow_up_state):
+                lines.append("")
+                if state.last_interaction_at:
+                    lines.append(f"Last interaction: {state.last_interaction_at}")
+                if state.follow_up_state:
+                    lines.append(f"Follow-up state: {state.follow_up_state}")
             _, interactions = self.people.list_interactions(item.name, limit=5)
             if interactions:
                 lines.extend(["", "Recent interactions:"])
