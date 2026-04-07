@@ -70,6 +70,7 @@ _DEFAULT_TOOL_METADATA: dict[str, ToolMetadata] = {
     "knowledge_list": ToolMetadata(ToolPermissionLevel.READ_ONLY, False, ("knowledge", "read")),
     "knowledge_stats": ToolMetadata(ToolPermissionLevel.READ_ONLY, False, ("knowledge", "read")),
     "list_show": ToolMetadata(ToolPermissionLevel.READ_ONLY, False, ("lists", "read")),
+    "reminder": ToolMetadata(ToolPermissionLevel.WORKSPACE_WRITE, False, ("reminders", "write")),
     "write_file": ToolMetadata(ToolPermissionLevel.WORKSPACE_WRITE, True, ("filesystem", "write")),
     "edit_file": ToolMetadata(ToolPermissionLevel.WORKSPACE_WRITE, True, ("filesystem", "write")),
     "write_fact": ToolMetadata(ToolPermissionLevel.WORKSPACE_WRITE, False, ("memory", "write")),

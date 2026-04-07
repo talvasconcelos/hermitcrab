@@ -1271,6 +1271,20 @@ def channels_status():
 cron_app = typer.Typer(help="Manage scheduled tasks")
 app.add_typer(cron_app, name="cron")
 
+reminders_app = typer.Typer(help="Manage reminder artifacts")
+app.add_typer(reminders_app, name="reminders")
+
+
+def _build_reminder_store() -> Any:
+    """Build a reminder store backed by the configured workspace and cron store."""
+    from hermitcrab.agent.reminders import ReminderStore
+    from hermitcrab.config.loader import get_data_dir
+    from hermitcrab.cron.service import CronService
+
+    config = _load_runtime_config()
+    cron = CronService(get_data_dir() / "cron" / "jobs.json")
+    return ReminderStore(config.workspace_path, cron)
+
 
 @cron_app.command("list")
 def cron_list(
@@ -1476,6 +1490,88 @@ def cron_run(
             _print_agent_response(result_holder[0], render_markdown=True)
     else:
         console.print(f"[red]Failed to run job {job_id}[/red]")
+
+
+@reminders_app.command("list")
+def reminders_list(
+    all: bool = typer.Option(False, "--all", "-a", help="Include cancelled reminders"),
+):
+    """List reminder artifacts."""
+    store = _build_reminder_store()
+    reminders = store.list_reminders(include_completed=all)
+    if not reminders:
+        console.print("No reminders found.")
+        return
+    for item in reminders:
+        console.print(store.render_summary(item))
+
+
+@reminders_app.command("show")
+def reminders_show(
+    query: str = typer.Argument(..., help="Reminder title or search text"),
+):
+    """Show a reminder artifact."""
+    store = _build_reminder_store()
+    item = store.get_reminder(query)
+    if item is None:
+        console.print(f"[red]Reminder not found: {query}[/red]")
+        raise typer.Exit(1)
+    console.print(f"[bold]{item.title}[/bold]")
+    console.print(f"Status: {item.status}")
+    console.print(f"Schedule: {store.render_schedule(item)}")
+    console.print(f"Path: {item.file_path}")
+    console.print()
+    console.print(item.message)
+
+
+@reminders_app.command("add")
+def reminders_add(
+    title: str = typer.Option(..., "--title", "-t", help="Reminder title"),
+    message: str = typer.Option(..., "--message", "-m", help="Reminder message"),
+    every: int = typer.Option(None, "--every", "-e", help="Repeat every N seconds"),
+    cron_expr: str = typer.Option(None, "--cron", "-c", help="Cron expression"),
+    tz: str | None = typer.Option(None, "--tz", help="IANA timezone for cron schedules"),
+    at: str = typer.Option(None, "--at", help="One-time ISO datetime"),
+):
+    """Add a reminder artifact and compile it into the scheduler."""
+    if sum(value is not None for value in (every, cron_expr, at)) != 1:
+        console.print("[red]Error: specify exactly one of --every, --cron, or --at[/red]")
+        raise typer.Exit(1)
+
+    schedule_kind = "every" if every is not None else ("cron" if cron_expr else "at")
+    store = _build_reminder_store()
+    try:
+        item = store.upsert_reminder(
+            title=title,
+            message=message,
+            schedule_kind=schedule_kind,
+            at=at,
+            every_seconds=every,
+            cron_expr=cron_expr,
+            tz=tz,
+            channel="cli",
+            chat_id="direct",
+        )
+    except ValueError as exc:
+        console.print(f"[red]Error: {exc}[/red]")
+        raise typer.Exit(1) from exc
+
+    console.print(f"[green]✓[/green] Saved reminder '{item.title}'")
+    console.print(f"Schedule: {store.render_schedule(item)}")
+    console.print(f"Path: {item.file_path}")
+
+
+@reminders_app.command("cancel")
+def reminders_cancel(
+    query: str = typer.Argument(..., help="Reminder title or search text"),
+):
+    """Cancel a reminder and remove its scheduled job."""
+    store = _build_reminder_store()
+    item = store.cancel_reminder(query)
+    if item is None:
+        console.print(f"[red]Reminder not found: {query}[/red]")
+        raise typer.Exit(1)
+    console.print(f"[green]✓[/green] Cancelled reminder '{item.title}'")
 
 
 # ============================================================================

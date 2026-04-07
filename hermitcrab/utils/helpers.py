@@ -4,6 +4,7 @@ import json
 import math
 import re
 from dataclasses import dataclass
+from datetime import date, datetime
 from pathlib import Path
 from typing import Any
 
@@ -51,6 +52,17 @@ def safe_filename(name: str) -> str:
     for char in unsafe:
         name = name.replace(char, "_")
     return name.strip()
+
+
+def journal_day_wikilink(value: datetime | date | str) -> str:
+    """Build the canonical daily-journal wikilink for a date-like value."""
+    if isinstance(value, datetime):
+        day = value.date().isoformat()
+    elif isinstance(value, date):
+        day = value.isoformat()
+    else:
+        day = str(value).strip()[:10]
+    return f"[[{day}]]"
 
 
 def estimate_text_tokens(text: str | None) -> int:

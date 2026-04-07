@@ -10,7 +10,7 @@ from pathlib import Path
 import frontmatter
 from loguru import logger
 
-from hermitcrab.utils.helpers import ensure_dir, safe_filename
+from hermitcrab.utils.helpers import ensure_dir, journal_day_wikilink, safe_filename
 
 CHECKBOX_RE = re.compile(r"^\s*[-*]\s+\[(?P<mark>[ xX])\]\s+(?P<text>.+?)\s*$")
 BARE_BULLET_RE = re.compile(r"^\s*[-*]\s+(?P<text>.+?)\s*$")
@@ -213,6 +213,7 @@ class ListStore:
             "type": "checklist",
             "tags": [str(tag).strip() for tag in (tags or []) if str(tag).strip()],
             "updated_at": datetime.now(timezone.utc).strftime("%Y-%m-%d"),
+            "journal": journal_day_wikilink(datetime.now(timezone.utc)),
         }
         lines = [f"- [{'x' if entry.done else ' '}] {entry.text}" for entry in deduped_items]
         post = frontmatter.Post("\n".join(lines) + ("\n" if lines else ""), **metadata)

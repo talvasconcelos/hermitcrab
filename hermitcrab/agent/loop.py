@@ -66,6 +66,7 @@ from hermitcrab.agent.pending_work import (
     snippet,
 )
 from hermitcrab.agent.reflection import ReflectionService
+from hermitcrab.agent.reminders import ReminderStore
 from hermitcrab.agent.session_lifecycle import SessionLifecycleManager
 from hermitcrab.agent.skill_runtime import SkillRuntimeManager
 from hermitcrab.agent.subagent import SubagentManager
@@ -98,6 +99,7 @@ from hermitcrab.agent.tools.memory import (
 from hermitcrab.agent.tools.message import MessageTool
 from hermitcrab.agent.tools.policy import build_main_agent_policy
 from hermitcrab.agent.tools.registry import ToolRegistry
+from hermitcrab.agent.tools.reminders import ReminderTool
 from hermitcrab.agent.tools.session_search import SessionSearchTool
 from hermitcrab.agent.tools.shell import ExecTool
 from hermitcrab.agent.tools.spawn import SpawnTool
@@ -260,6 +262,7 @@ class AgentLoop:
         self.memory = MemoryStore(workspace)
         self.knowledge = KnowledgeStore(workspace)
         self.lists = ListStore(workspace)
+        self.reminders = ReminderStore(workspace, cron_service) if cron_service else None
         self.tools = ToolRegistry(default_policy=build_main_agent_policy())
         self.execution_state = ExecutionStateTracker()
         self.subagents = SubagentManager(
@@ -372,6 +375,8 @@ class AgentLoop:
 
         if self.cron_service:
             self.tools.register(CronTool(self.cron_service))
+        if self.reminders is not None:
+            self.tools.register(ReminderTool(self.reminders))
 
     async def _connect_mcp(self) -> None:
         """Connect to configured MCP servers (one-time, lazy)."""
@@ -407,6 +412,9 @@ class AgentLoop:
         if cron_tool := self.tools.get("cron"):
             if isinstance(cron_tool, CronTool):
                 cron_tool.set_context(channel, chat_id)
+        if reminder_tool := self.tools.get("reminder"):
+            if isinstance(reminder_tool, ReminderTool):
+                reminder_tool.set_context(channel, chat_id)
 
     @staticmethod
     def _strip_think(text: str | None) -> str | None:

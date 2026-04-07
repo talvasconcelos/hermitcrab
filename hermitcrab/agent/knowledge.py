@@ -28,7 +28,7 @@ from typing import Any
 import frontmatter
 from loguru import logger
 
-from hermitcrab.utils.helpers import ensure_dir, safe_filename
+from hermitcrab.utils.helpers import ensure_dir, journal_day_wikilink, safe_filename
 
 
 @dataclass
@@ -477,6 +477,7 @@ class KnowledgeStore:
             "title": title,
             "type": item_type,
             "ingested_at": datetime.now(timezone.utc).strftime("%Y-%m-%d"),
+            "journal": journal_day_wikilink(datetime.now(timezone.utc)),
         }
 
         if source:

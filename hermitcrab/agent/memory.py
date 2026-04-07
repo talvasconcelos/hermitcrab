@@ -33,7 +33,7 @@ from typing import Any
 import frontmatter
 from loguru import logger
 
-from hermitcrab.utils.helpers import ensure_dir
+from hermitcrab.utils.helpers import ensure_dir, journal_day_wikilink
 
 
 class MemoryCategory(str, Enum):
@@ -82,6 +82,7 @@ class MemoryItem:
                 "title": self.title,
                 "created_at": self.created_at.strftime("%Y-%m-%dT%H-%M-%S"),
                 "updated_at": self.updated_at.strftime("%Y-%m-%dT%H-%M-%S"),
+                "journal": journal_day_wikilink(self.created_at),
                 "type": self.category.value,
                 "tags": self.tags,
             }
