@@ -169,6 +169,26 @@ class PeopleStore:
         slug = safe_filename(person_name).strip().lower().replace(" ", "-")
         return self.interactions_dir / f"{stamp}--{slug}.md"
 
+    def _verify_profile_write(self, item: PersonProfile) -> None:
+        loaded = PersonProfile.from_file(item.file_path)
+        if loaded is None:
+            raise ValueError(f"failed to reload people profile after write: {item.file_path}")
+        if self._normalize(loaded.name) != self._normalize(item.name):
+            raise ValueError(f"people profile write verification failed for {item.file_path}")
+        if loaded.role != item.role or loaded.status != item.status:
+            raise ValueError(f"people profile metadata verification failed for {item.file_path}")
+        if loaded.is_primary != item.is_primary:
+            raise ValueError(f"people profile primary flag verification failed for {item.file_path}")
+
+    def _verify_interaction_write(self, item: PersonInteraction) -> None:
+        loaded = PersonInteraction.from_file(item.file_path)
+        if loaded is None:
+            raise ValueError(f"failed to reload interaction after write: {item.file_path}")
+        if self._normalize(loaded.person_name) != self._normalize(item.person_name):
+            raise ValueError(f"interaction person verification failed for {item.file_path}")
+        if loaded.occurred_at != item.occurred_at or loaded.summary != item.summary:
+            raise ValueError(f"interaction content verification failed for {item.file_path}")
+
     def get_profile(self, query: str) -> PersonProfile | None:
         normalized = self._normalize(query)
         exact: PersonProfile | None = None
@@ -224,6 +244,7 @@ class PeopleStore:
 
     def _write_profile(self, item: PersonProfile) -> None:
         item.file_path.write_text(frontmatter.dumps(item.to_post()), encoding="utf-8")
+        self._verify_profile_write(item)
 
     def _set_primary(self, item: PersonProfile) -> None:
         current = self.get_primary_profile()
@@ -328,6 +349,7 @@ class PeopleStore:
             created_at=_utcnow().isoformat(),
         )
         interaction.file_path.write_text(frontmatter.dumps(interaction.to_post()), encoding="utf-8")
+        self._verify_interaction_write(interaction)
         return person, interaction
 
     def list_interactions(

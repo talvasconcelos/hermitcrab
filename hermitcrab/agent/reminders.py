@@ -112,6 +112,19 @@ class ReminderStore:
     def _path_for_title(self, title: str) -> Path:
         return self.reminders_dir / f"{self._slug_for_title(title)}.md"
 
+    def _verify_reminder_write(self, item: ReminderItem) -> None:
+        loaded = ReminderItem.from_file(item.file_path)
+        if loaded is None:
+            raise ValueError(f"failed to reload reminder after write: {item.file_path}")
+        if self._normalize(loaded.title) != self._normalize(item.title):
+            raise ValueError(f"reminder title verification failed for {item.file_path}")
+        if loaded.schedule_kind != item.schedule_kind or loaded.status != item.status:
+            raise ValueError(f"reminder metadata verification failed for {item.file_path}")
+        if loaded.related_people != item.related_people:
+            raise ValueError(f"reminder related-people verification failed for {item.file_path}")
+        if item.status == "active" and item.cron_job_id and loaded.cron_job_id != item.cron_job_id:
+            raise ValueError(f"reminder cron linkage verification failed for {item.file_path}")
+
     def get_reminder(self, title_or_query: str) -> ReminderItem | None:
         normalized = self._normalize(title_or_query)
         exact: ReminderItem | None = None
@@ -206,6 +219,7 @@ class ReminderStore:
             updated_at=now,
         )
         item.file_path.write_text(frontmatter.dumps(item.to_post()), encoding="utf-8")
+        self._verify_reminder_write(item)
         return item
 
     def cancel_reminder(self, title_or_query: str) -> ReminderItem | None:
@@ -218,6 +232,7 @@ class ReminderStore:
         item.status = "cancelled"
         item.updated_at = _utcnow().isoformat()
         item.file_path.write_text(frontmatter.dumps(item.to_post()), encoding="utf-8")
+        self._verify_reminder_write(item)
         return item
 
     def render_summary(self, item: ReminderItem) -> str:
