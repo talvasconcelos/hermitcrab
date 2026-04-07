@@ -46,6 +46,30 @@ def is_short_follow_up(text: str | None) -> bool:
     return bool(raw) and len(raw) <= 120 and not has_structured_payload(raw)
 
 
+def looks_like_confirmation(text: str | None) -> bool:
+    """Detect short follow-ups that are likely approval/confirmation replies."""
+    normalized = normalize_text(text).lower()
+    return normalized in {
+        "yes",
+        "yes please",
+        "yes do it",
+        "yes delete them",
+        "yes remove them",
+        "ok",
+        "ok do it",
+        "okay",
+        "okay do it",
+        "please do",
+        "go ahead",
+        "go ahead and do it",
+        "do it",
+        "delete them",
+        "remove them",
+        "proceed",
+        "approved",
+    }
+
+
 def _keywords(text: str | None) -> set[str]:
     return {token for token in re.findall(r"\w+", (text or "").lower()) if len(token) >= 4}
 
@@ -134,6 +158,8 @@ def should_resume_pending_work(pending: PendingWork, text: str | None) -> bool:
     """Decide whether coordinator-owned pending work should be re-injected."""
     if not isinstance(text, str) or not text.strip():
         return False
+    if "approval" in pending.last_failure.lower() and looks_like_confirmation(text):
+        return True
     if has_structured_payload(text):
         return False
     if not relates_to_pending_work(pending, text):

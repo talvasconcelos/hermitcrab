@@ -332,6 +332,27 @@ class TurnRunner:
         return None
 
     @staticmethod
+    def _needs_destructive_approval(result: str | None) -> bool:
+        return (
+            isinstance(result, str)
+            and "destructive command requires explicit approval" in result.lower()
+        )
+
+    @staticmethod
+    def _build_destructive_approval_request(tool_name: str, arguments: dict[str, Any]) -> str | None:
+        """Turn blocked destructive actions into an explicit user confirmation request."""
+        if tool_name != "exec":
+            return None
+        command = arguments.get("command")
+        if not isinstance(command, str) or not command.strip():
+            return "I can do that, but it is a destructive action and I need your approval first. Reply yes to continue."
+        return (
+            "I can do that, but deleting or otherwise destructively changing files needs your approval first.\n\n"
+            f"Planned command:\n`{command.strip()}`\n\n"
+            "Reply with `yes` if you want me to run it."
+        )
+
+    @staticmethod
     def _response_looks_like_blocker_or_final(content: str | None) -> bool:
         """Allow obvious blockers or substantive final answers through unchanged."""
         text = (content or "").strip()
@@ -870,6 +891,13 @@ class TurnRunner:
                     )
                     tool_results.append((tool_call.name, result))
                     executed_count += 1
+                    if self._needs_destructive_approval(result):
+                        final_content = self._build_destructive_approval_request(
+                            tool_call.name,
+                            tool_call.arguments if isinstance(tool_call.arguments, dict) else {},
+                        )
+                        outcome = TurnOutcome.BLOCKED
+                        break
                     if tool_call.name == "spawn" and spawned_result is None:
                         spawned_result = result
 
