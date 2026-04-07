@@ -294,9 +294,11 @@ class ListStore:
         )
         return updated, removed, unmatched
 
-    def delete_list(self, list_name: str) -> StoredList:
+    def delete_list(self, list_name: str, *, missing_ok: bool = True) -> StoredList | None:
         existing = self.get_list(list_name)
         if existing is None:
+            if missing_ok:
+                return None
             raise ValueError(f"List not found: {list_name}")
         existing.file_path.unlink(missing_ok=False)
         return existing

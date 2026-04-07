@@ -258,5 +258,7 @@ class DeleteListTool(Tool):
         }
 
     async def execute(self, list_name: str, **kwargs: Any) -> str:
-        deleted = self.lists.delete_list(list_name)
+        deleted = self.lists.delete_list(list_name, missing_ok=True)
+        if deleted is None:
+            return f"Checklist not found: {list_name}"
         return f"Deleted checklist: {deleted.title}\nPath: {deleted.file_path}"

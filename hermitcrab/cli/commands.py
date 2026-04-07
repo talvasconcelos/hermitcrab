@@ -512,6 +512,17 @@ def _build_onboard_next_steps() -> list[str]:
     return lines
 
 
+def _build_interactive_intro() -> str:
+    """Build the interactive CLI intro shown on startup."""
+    return (
+        f"{__logo__} Interactive mode "
+        "(type [bold]exit[/bold] or [bold]Ctrl+C[/bold] to quit; press [bold]Esc[/bold] "
+        "while working to stop the current task)\n"
+        "  [dim]/help shows chat commands. Lines prefixed with ↳ are live progress updates while "
+        "HermitCrab is gathering context, resuming work, or running tools.[/dim]\n"
+    )
+
+
 def _make_provider(config: Config):
     """Create the appropriate LLM provider from config."""
     from hermitcrab.providers.custom_provider import CustomProvider
@@ -1068,9 +1079,7 @@ def agent(
             raise typer.Exit(1)
 
         _init_prompt_session()
-        console.print(
-            f"{__logo__} Interactive mode (type [bold]exit[/bold] or [bold]Ctrl+C[/bold] to quit; press [bold]Esc[/bold] while working to stop the current task)\n"
-        )
+        console.print(_build_interactive_intro())
 
         if ":" in session_id:
             cli_channel, cli_chat_id = session_id.split(":", 1)
@@ -1537,8 +1546,12 @@ def status(
     )
 
     if report.next_steps:
+        console.print("\n[bold]Try This Next[/bold]")
+        console.print(f"- {report.next_steps[0]}")
+
+    if len(report.next_steps) > 1:
         console.print("\n[bold]Next Steps[/bold]")
-        for step in report.next_steps:
+        for step in report.next_steps[1:]:
             console.print(f"- {step}")
 
 
@@ -1565,6 +1578,11 @@ def doctor(
         console.print("[green]Start Here[/green]")
         for step in report.status.next_steps[:3]:
             console.print(f"- {step}")
+        console.print()
+
+    if report.status.ready_for_chat and report.status.next_steps:
+        console.print("[bold]Try This Next[/bold]")
+        console.print(f"- {report.status.next_steps[0]}")
         console.print()
 
     for finding in report.findings:

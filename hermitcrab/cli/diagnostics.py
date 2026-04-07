@@ -341,12 +341,32 @@ def _build_next_steps(
         steps.append("Restore the workspace bootstrap files with `hermitcrab onboard`.")
     selected = next((item for item in provider_statuses if item.selected), None)
     if selected is None or not selected.configured:
-        steps.append("Configure the selected model's provider before starting the agent.")
+        if selected_provider == "ollama":
+            steps.append(
+                "Install or start Ollama, pull the selected model, then run `hermitcrab doctor`."
+            )
+        elif selected_provider:
+            steps.append(
+                "Add credentials or endpoint settings for the selected provider in "
+                "`~/.hermitcrab/config.json`, then run `hermitcrab doctor`."
+            )
+        else:
+            steps.append(
+                "Choose a configured model/provider in `~/.hermitcrab/config.json`, then run "
+                "`hermitcrab doctor`."
+            )
     elif selected_provider == "ollama":
+        if shutil.which("ollama") is None:
+            steps.append(
+                "Install Ollama from https://ollama.com, then run `hermitcrab doctor`."
+            )
+            return steps
         steps.append(
             "If you have not started it yet, run `ollama serve` before `hermitcrab agent`."
         )
+        steps.append('Try a one-shot smoke test with `hermitcrab agent -m "Hello!"`.')
     else:
+        steps.append('Try a one-shot smoke test with `hermitcrab agent -m "Hello!"`.')
         steps.append("Run `hermitcrab agent` to start a local interactive session.")
     return steps
 

@@ -3,10 +3,13 @@
 import asyncio
 import os
 import re
+import shlex
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from hermitcrab.agent.tools.base import Tool
+
+CommandRisk = Literal["read_only", "workspace_write", "destructive"]
 
 
 class ExecTool(Tool):
@@ -23,15 +26,10 @@ class ExecTool(Tool):
         self.timeout = timeout
         self.working_dir = working_dir
         self.deny_patterns = deny_patterns or [
-            r"\brm\s+-[rf]{1,2}\b",          # rm -r, rm -rf, rm -fr
-            r"\bdel\s+/[fq]\b",              # del /f, del /q
-            r"\brmdir\s+/s\b",               # rmdir /s
-            r"(?:^|[;&|]\s*)format\b",       # format (as standalone command only)
-            r"\b(mkfs|diskpart)\b",          # disk operations
-            r"\bdd\s+if=",                   # dd
-            r">\s*/dev/sd",                  # write to disk
+            r"\bdd\s+if=",  # dd
+            r">\s*/dev/sd",  # write to disk
             r"\b(shutdown|reboot|poweroff)\b",  # system power
-            r":\(\)\s*\{.*\};\s*:",          # fork bomb
+            r":\(\)\s*\{.*\};\s*:",  # fork bomb
         ]
         self.allow_patterns = allow_patterns or []
         self.restrict_to_workspace = restrict_to_workspace
@@ -146,13 +144,17 @@ class ExecTool(Tool):
         return result
 
     def _guard_command(self, command: str, cwd: str) -> str | None:
-        """Best-effort safety guard for potentially destructive commands."""
+        """Best-effort safety guard with explicit risk classification."""
         cmd = command.strip()
         lower = cmd.lower()
 
         for pattern in self.deny_patterns:
             if re.search(pattern, lower):
                 return "Error: Command blocked by safety guard (dangerous pattern detected)"
+
+        risk = self._classify_command_risk(cmd)
+        if risk == "destructive":
+            return "Error: Command blocked by safety guard (destructive command requires explicit approval)"
 
         if self.allow_patterns:
             if not any(re.search(p, lower) for p in self.allow_patterns):
@@ -179,3 +181,123 @@ class ExecTool(Tool):
                     return "Error: Command blocked by safety guard (path outside working dir)"
 
         return None
+
+    @classmethod
+    def _classify_command_risk(cls, command: str) -> CommandRisk:
+        """Classify a shell command by its likely mutation risk."""
+        try:
+            tokens = shlex.split(command, posix=True)
+        except ValueError:
+            tokens = command.split()
+
+        if not tokens:
+            return "read_only"
+
+        first = Path(tokens[0]).name.lower()
+        lowered = command.lower()
+
+        if cls._looks_destructive(first, tokens, lowered):
+            return "destructive"
+        if cls._looks_read_only(first, lowered):
+            return "read_only"
+        return "workspace_write"
+
+    @staticmethod
+    def _looks_destructive(first: str, tokens: list[str], lowered: str) -> bool:
+        if first in {
+            "rm",
+            "rmdir",
+            "del",
+            "erase",
+            "format",
+            "mkfs",
+            "diskpart",
+            "shutdown",
+            "reboot",
+            "poweroff",
+            "chmod",
+            "chown",
+        }:
+            return True
+
+        if first == "mv":
+            return True
+
+        if first == "git":
+            destructive_git_patterns = (
+                "git reset",
+                "git checkout --",
+                "git clean",
+                "git restore",
+                "git revert --no-edit",
+            )
+            if any(pattern in lowered for pattern in destructive_git_patterns):
+                return True
+
+        if any(operator in lowered for operator in (" > ", " >> ")):
+            return True
+
+        if len(tokens) >= 2 and first in {"python", "python3"} and tokens[1] == "-c":
+            return True
+
+        return False
+
+    @staticmethod
+    def _looks_read_only(first: str, lowered: str) -> bool:
+        return first in {
+            "cat",
+            "head",
+            "tail",
+            "less",
+            "more",
+            "wc",
+            "ls",
+            "find",
+            "grep",
+            "rg",
+            "awk",
+            "sed",
+            "echo",
+            "printf",
+            "which",
+            "where",
+            "whoami",
+            "pwd",
+            "env",
+            "printenv",
+            "date",
+            "cal",
+            "df",
+            "du",
+            "free",
+            "uptime",
+            "uname",
+            "file",
+            "stat",
+            "diff",
+            "sort",
+            "uniq",
+            "tr",
+            "cut",
+            "paste",
+            "test",
+            "true",
+            "false",
+            "type",
+            "readlink",
+            "realpath",
+            "basename",
+            "dirname",
+            "sha256sum",
+            "md5sum",
+            "b3sum",
+            "xxd",
+            "hexdump",
+            "od",
+            "strings",
+            "tree",
+            "jq",
+            "yq",
+            "git",
+            "gh",
+        } and "-i " not in lowered and "--in-place" not in lowered

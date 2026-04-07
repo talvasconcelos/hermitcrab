@@ -7,6 +7,7 @@ from typing import Any
 
 from loguru import logger
 
+from hermitcrab.agent.tool_call_recovery import normalize_tool_argument_values
 from hermitcrab.agent.tools.base import Tool
 from hermitcrab.agent.tools.policy import ToolMetadata, ToolPermissionPolicy
 
@@ -93,6 +94,7 @@ class ToolRegistry:
             logger.info(
                 "Tool registry executing '{}' with params keys={}", name, sorted(params.keys())
             )
+            params = self._normalize_params(entry.tool, params)
             errors = entry.tool.validate_params(params)
             if errors:
                 logger.warning("Tool validation failed for '{}': {}", name, errors)
@@ -116,6 +118,84 @@ class ToolRegistry:
         if policy is None:
             return None
         return policy.check(name, metadata)
+
+    @classmethod
+    def _normalize_params(cls, tool: Tool, params: dict[str, Any]) -> dict[str, Any]:
+        schema = tool.parameters or {}
+        properties = schema.get("properties", {})
+        normalized: dict[str, Any] = {}
+        for key, value in params.items():
+            item_schema = properties.get(key, {})
+            normalized[key] = cls._coerce_value(normalize_tool_argument_values(value), item_schema)
+        return normalized
+
+    @classmethod
+    def _coerce_value(cls, value: Any, schema: dict[str, Any]) -> Any:
+        expected = schema.get("type")
+        if isinstance(expected, list):
+            for option in expected:
+                coerced = cls._coerce_value(value, {**schema, "type": option})
+                if cls._matches_type(coerced, option):
+                    return coerced
+            return value
+
+        if expected == "integer" and isinstance(value, str):
+            return cls._coerce_number(value, integer_only=True)
+        if expected == "number" and isinstance(value, str):
+            return cls._coerce_number(value, integer_only=False)
+        if expected == "boolean" and isinstance(value, str):
+            return cls._coerce_boolean(value)
+        if expected == "array":
+            item_schema = schema.get("items", {})
+            if isinstance(value, str):
+                return [cls._coerce_value(value, item_schema)]
+            if isinstance(value, list):
+                return [cls._coerce_value(item, item_schema) for item in value]
+        if expected == "object" and isinstance(value, dict):
+            properties = schema.get("properties", {})
+            return {
+                key: cls._coerce_value(item, properties.get(key, {}))
+                for key, item in value.items()
+            }
+        return value
+
+    @staticmethod
+    def _matches_type(value: Any, expected: str) -> bool:
+        if expected == "integer":
+            return isinstance(value, int) and not isinstance(value, bool)
+        if expected == "number":
+            return isinstance(value, (int, float)) and not isinstance(value, bool)
+        if expected == "boolean":
+            return isinstance(value, bool)
+        if expected == "array":
+            return isinstance(value, list)
+        if expected == "object":
+            return isinstance(value, dict)
+        if expected == "string":
+            return isinstance(value, str)
+        return False
+
+    @staticmethod
+    def _coerce_number(value: str, *, integer_only: bool) -> Any:
+        text = value.strip()
+        if not text:
+            return value
+        try:
+            parsed = float(text)
+        except ValueError:
+            return value
+        if integer_only:
+            return int(parsed) if parsed.is_integer() else value
+        return int(parsed) if parsed.is_integer() else parsed
+
+    @staticmethod
+    def _coerce_boolean(value: str) -> Any:
+        lowered = value.strip().lower()
+        if lowered == "true":
+            return True
+        if lowered == "false":
+            return False
+        return value
 
     def __len__(self) -> int:
         return len(self._tools)

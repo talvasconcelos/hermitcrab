@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 import time
 from dataclasses import dataclass
 from enum import Enum
@@ -34,6 +35,7 @@ class TurnRunnerConfig:
 
 class TurnOutcome(str, Enum):
     COMPLETED = "completed"
+    BLOCKED = "blocked"
     EMPTY_REPLY = "empty_reply"
     INCOMPLETE_ACTION = "incomplete_action"
     TOOL_FALLBACK = "tool_fallback"
@@ -268,6 +270,68 @@ class TurnRunner:
         return has_structured_payload(text)
 
     @staticmethod
+    def _normalize_grounding_text(text: str | None) -> str:
+        """Canonicalize free text for grounding checks across minor formatting differences."""
+        return " ".join(re.findall(r"[a-z0-9]+", (text or "").lower()))
+
+    @classmethod
+    def _value_is_grounded_in_request(cls, value: str | None, request_text: str | None) -> bool:
+        """Check whether a tool argument is directly grounded in the user's request text."""
+        grounded_value = cls._normalize_grounding_text(value)
+        grounded_request = cls._normalize_grounding_text(request_text)
+        if not grounded_value or not grounded_request:
+            return False
+        if grounded_value in grounded_request:
+            return True
+
+        value_tokens = set(grounded_value.split())
+        request_tokens = set(grounded_request.split())
+        return bool(value_tokens) and value_tokens.issubset(request_tokens)
+
+    @classmethod
+    def _build_ambiguous_list_mutation_clarification(
+        cls,
+        *,
+        request_text: str | None,
+        tool_calls: list[Any],
+    ) -> str | None:
+        """Require clarification before mutating checklist state from underspecified requests."""
+        if not (isinstance(request_text, str) and is_short_follow_up(request_text)):
+            return None
+        if has_structured_payload(request_text):
+            return None
+        if request_text.strip().endswith("?"):
+            return None
+
+        mutating_list_tools = {
+            "list_add_items",
+            "list_set_item_status",
+            "list_remove_items",
+            "list_delete",
+        }
+        for tool_call in tool_calls:
+            if tool_call.name not in mutating_list_tools:
+                continue
+            arguments = tool_call.arguments if isinstance(tool_call.arguments, dict) else {}
+            list_name = arguments.get("list_name")
+            if not isinstance(list_name, str) or not list_name.strip():
+                return "Which checklist do you want me to update?"
+            if cls._value_is_grounded_in_request(list_name, request_text):
+                continue
+
+            items = arguments.get("items")
+            if isinstance(items, list):
+                grounded_items = [item for item in items if isinstance(item, str) and item.strip()]
+            else:
+                grounded_items = []
+            item_hint = ""
+            if grounded_items:
+                preview = ", ".join(grounded_items[:2])
+                item_hint = f" for {preview}"
+            return f"Which checklist do you want me to update{item_hint}?"
+        return None
+
+    @staticmethod
     def _response_looks_like_blocker_or_final(content: str | None) -> bool:
         """Allow obvious blockers or substantive final answers through unchanged."""
         text = (content or "").strip()
@@ -492,6 +556,7 @@ class TurnRunner:
         finish_reason = "stop"
         heartbeats_sent = 0
         pending_event: asyncio.Task[Any] | None = None
+        saw_tool_call = False
 
         while True:
             remaining = self._remaining_seconds(started_at)
@@ -508,9 +573,14 @@ class TurnRunner:
             try:
                 if pending_event is None:
                     pending_event = asyncio.create_task(stream.__anext__())
+                wait_timeout = (
+                    min(0.05, max(0.01, remaining))
+                    if saw_tool_call
+                    else min(self.PROGRESS_HEARTBEAT_SECONDS, max(0.01, remaining))
+                )
                 done, _ = await asyncio.wait(
                     {pending_event},
-                    timeout=min(self.PROGRESS_HEARTBEAT_SECONDS, max(0.01, remaining)),
+                    timeout=wait_timeout,
                 )
                 if not done:
                     raise asyncio.TimeoutError
@@ -518,6 +588,8 @@ class TurnRunner:
             except StopAsyncIteration:
                 break
             except asyncio.TimeoutError:
+                if saw_tool_call:
+                    break
                 if on_progress and heartbeats_sent < self.MAX_IDENTICAL_HEARTBEATS_PER_WAIT:
                     heartbeats_sent += 1
                 continue
@@ -532,11 +604,25 @@ class TurnRunner:
                 continue
             if isinstance(event, ToolCallEvent):
                 tool_calls.append(event.tool_call)
+                saw_tool_call = True
                 continue
             if isinstance(event, ResponseDoneEvent):
                 finish_reason = event.finish_reason or finish_reason
                 usage = event.usage or usage
                 reasoning_content = event.reasoning_content or reasoning_content
+                if saw_tool_call:
+                    break
+
+        if pending_event is not None and not pending_event.done():
+            pending_event.cancel()
+            try:
+                await pending_event
+            except (asyncio.CancelledError, StopAsyncIteration):
+                pass
+        await stream.aclose()
+
+        if saw_tool_call and finish_reason == "stop":
+            finish_reason = "tool_calls"
 
         return LLMResponse(
             content="".join(response_text_parts) or None,
@@ -678,6 +764,18 @@ class TurnRunner:
                     response.tool_calls = inline_tool_calls
 
             if response.has_tool_calls:
+                clarification = self._build_ambiguous_list_mutation_clarification(
+                    request_text=action_request_text,
+                    tool_calls=response.tool_calls,
+                )
+                if clarification:
+                    logger.info(
+                        "Blocked ambiguous checklist mutation and requested clarification"
+                    )
+                    final_content = clarification
+                    outcome = TurnOutcome.BLOCKED
+                    break
+
                 tool_signature = self._tool_cycle_signature(response.tool_calls)
                 if tool_signature == last_tool_signature:
                     repeated_tool_cycles += 1

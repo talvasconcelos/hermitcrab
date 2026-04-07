@@ -29,6 +29,7 @@ import inspect
 import json
 import re
 from contextlib import AsyncExitStack
+from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Awaitable, Callable
@@ -134,6 +135,15 @@ class JobClass(str, Enum):
 
 # Session inactivity timeout (30 minutes)
 INACTIVITY_TIMEOUT_S = 30 * 60
+
+
+@dataclass(slots=True)
+class InteractiveTurnBuildResult:
+    """Prepared interactive-turn inputs plus coordinator-side startup signals."""
+
+    messages: list[dict[str, Any]]
+    save_skip: int
+    resumed_pending_work: PendingWork | None = None
 
 
 class AgentLoop:
@@ -1002,15 +1012,21 @@ class AgentLoop:
                     key,
                     max_messages=min(12, self.memory_window),
                 )
-            initial_messages, save_skip = self._build_interactive_messages(
+            build_result = self._build_interactive_messages(
                 msg,
                 scratchpad_path,
                 history_for_prompt,
                 session,
             )
             progress_callback = on_progress or self._build_bus_progress_callback(msg, key)
+            if build_result.resumed_pending_work is not None:
+                await self._announce_resumed_work(
+                    key,
+                    build_result.resumed_pending_work,
+                    progress_callback,
+                )
             turn_result = await self._run_agent_loop(
-                initial_messages,
+                build_result.messages,
                 on_progress=progress_callback,
                 job_class=JobClass.INTERACTIVE_RESPONSE,
             )
@@ -1024,7 +1040,7 @@ class AgentLoop:
             preview = final_content[:120] + "..." if len(final_content) > 120 else final_content
             logger.info("Response to {}:{}: {}", msg.channel, msg.sender_id, preview)
 
-            self._save_turn(session, turn_result.messages, save_skip)
+            self._save_turn(session, turn_result.messages, build_result.save_skip)
             self.skill_runtime.update_after_turn(
                 session.metadata,
                 result_messages=turn_result.messages,
@@ -1128,7 +1144,7 @@ class AgentLoop:
         scratchpad_path: Path,
         history: list[dict[str, Any]],
         session: Session,
-    ) -> tuple[list[dict[str, Any]], int]:
+    ) -> InteractiveTurnBuildResult:
         """Build the interactive message list and insert deterministic hints when needed."""
         self.skill_runtime.maybe_activate(
             session.metadata,
@@ -1145,6 +1161,7 @@ class AgentLoop:
         )
         internal_skip = 1 + len(history)
         pending = PendingWork.from_metadata(session.metadata)
+        resumed_pending_work: PendingWork | None = None
         user_index = next(
             (
                 idx
@@ -1165,6 +1182,7 @@ class AgentLoop:
             internal_skip += 1
             user_index += 1
         if pending and should_resume_pending_work(pending, msg.content):
+            resumed_pending_work = pending
             if user_index is not None:
                 messages.insert(
                     user_index,
@@ -1190,10 +1208,30 @@ class AgentLoop:
                     {
                         "role": "system",
                         "content": skill_hint,
-                    },
-                )
+                        },
+                    )
                 internal_skip += 1
-        return messages, internal_skip
+        return InteractiveTurnBuildResult(
+            messages=messages,
+            save_skip=internal_skip,
+            resumed_pending_work=resumed_pending_work,
+        )
+
+    async def _announce_resumed_work(
+        self,
+        session_key: str,
+        pending: PendingWork,
+        progress_callback: Callable[[str], Awaitable[None]] | None,
+    ) -> None:
+        """Surface coordinator-owned pending work before the next turn runs."""
+        detail = clean_snippet(pending.origin_request, max_chars=80) or "resuming unfinished work"
+        self.execution_state.set(session_key, ExecutionPhase.RESUMING, detail)
+        if progress_callback is None:
+            return
+        await progress_callback(
+            "Resuming unfinished work from this conversation: "
+            f"{clean_snippet(pending.origin_request, max_chars=120)}"
+        )
 
     def _update_pending_work(
         self,
@@ -1223,6 +1261,7 @@ class AgentLoop:
             return
 
         unresolved = {
+            TurnOutcome.BLOCKED,
             TurnOutcome.EMPTY_REPLY,
             TurnOutcome.INCOMPLETE_ACTION,
             TurnOutcome.TOOL_FALLBACK,
@@ -1296,6 +1335,13 @@ class AgentLoop:
             "Subagent [" in final_content and "started" in final_content
         ):
             self.execution_state.set(session_key, ExecutionPhase.DELEGATED, "subagent spawned")
+            return
+        if outcome == TurnOutcome.BLOCKED:
+            self.execution_state.set(
+                session_key,
+                ExecutionPhase.BLOCKED,
+                clean_snippet(final_content, max_chars=80),
+            )
             return
         if outcome in {
             TurnOutcome.EMPTY_REPLY,

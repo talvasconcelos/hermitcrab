@@ -10,6 +10,7 @@ import json_repair
 from hermitcrab.providers.base import ToolCallRequest
 
 ToolLookup = Callable[[str], bool]
+_BOUNDARY_WRAPPERS = ('<|"|', '<|', '|>', '```json', '```')
 
 
 def normalize_tool_calls(tool_calls: list[ToolCallRequest]) -> list[ToolCallRequest]:
@@ -22,10 +23,38 @@ def normalize_tool_calls(tool_calls: list[ToolCallRequest]) -> list[ToolCallRequ
                 arguments = json_repair.loads(arguments)
             except Exception:
                 pass
+        arguments = normalize_tool_argument_values(arguments)
         normalized.append(
             ToolCallRequest(id=tool_call.id, name=tool_call.name, arguments=arguments)
         )
     return normalized
+
+
+def normalize_tool_argument_values(value: object) -> object:
+    """Recursively clean malformed scalar values inside tool arguments."""
+    if isinstance(value, dict):
+        return {str(key): normalize_tool_argument_values(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [normalize_tool_argument_values(item) for item in value]
+    if isinstance(value, str):
+        return _strip_argument_wrappers(value)
+    return value
+
+
+def _strip_argument_wrappers(value: str) -> str:
+    """Remove known wrapper fragments that some frontier models leak into args."""
+    text = value.strip()
+    changed = True
+    while text and changed:
+        changed = False
+        for marker in _BOUNDARY_WRAPPERS:
+            if text.startswith(marker):
+                text = text[len(marker):].strip()
+                changed = True
+            if text.endswith(marker):
+                text = text[: -len(marker)].strip()
+                changed = True
+    return text
 
 
 def coerce_inline_tool_calls(
