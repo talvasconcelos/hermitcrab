@@ -44,6 +44,8 @@ class PersonProfileTool(Tool):
                         "create",
                         "list",
                         "show",
+                        "log_interaction",
+                        "list_interactions",
                         "update",
                         "deactivate",
                         "set_primary",
@@ -91,6 +93,24 @@ class PersonProfileTool(Tool):
                     "description": "Optional organizing tags",
                 },
                 "notes": {"type": "string", "description": "Freeform profile notes"},
+                "summary": {"type": "string", "description": "Short interaction summary"},
+                "occurred_at": {
+                    "type": "string",
+                    "description": "When the interaction happened, usually an ISO datetime",
+                },
+                "channel_name": {
+                    "type": "string",
+                    "description": "Optional interaction channel label such as email or phone",
+                },
+                "interaction_tags": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Optional interaction tags",
+                },
+                "limit": {
+                    "type": "integer",
+                    "description": "Maximum number of interactions to list",
+                },
                 "include_inactive": {
                     "type": "boolean",
                     "description": "Include inactive people profiles when listing",
@@ -134,6 +154,11 @@ class PersonProfileTool(Tool):
         aliases: list[str] | None = None,
         tags: list[str] | None = None,
         notes: str = "",
+        summary: str = "",
+        occurred_at: str = "",
+        channel_name: str = "",
+        interaction_tags: list[str] | None = None,
+        limit: int = 10,
         include_inactive: bool = False,
         title: str = "",
         message: str = "",
@@ -175,6 +200,10 @@ class PersonProfileTool(Tool):
                 lines.append(f"Tags: {', '.join(item.tags)}")
             if item.notes:
                 lines.extend(["", item.notes])
+            _, interactions = self.people.list_interactions(item.name, limit=5)
+            if interactions:
+                lines.extend(["", "Recent interactions:"])
+                lines.extend(self.people.render_interaction_summary(interaction) for interaction in interactions)
             if self.reminders is not None:
                 related = self.reminders.list_related_reminders(item.name)
                 if related:
@@ -203,6 +232,41 @@ class PersonProfileTool(Tool):
                 return f"Error: {exc}"
             verb = "Updated" if action == "update" else "Created"
             return f"{verb} people profile: {item.name}\nPath: {item.file_path}"
+
+        if action == "log_interaction":
+            lookup = query.strip() or name.strip()
+            if not lookup:
+                return "Error: query is required for log_interaction"
+            if not summary.strip():
+                return "Error: summary is required for log_interaction"
+            try:
+                person, interaction = self.people.add_interaction(
+                    query=lookup,
+                    summary=summary.strip(),
+                    occurred_at=occurred_at or None,
+                    channel=channel_name or None,
+                    tags=interaction_tags,
+                )
+            except ValueError as exc:
+                return f"Error: {exc}"
+            return (
+                f"Logged interaction for {person.name}\n"
+                f"When: {interaction.occurred_at}\n"
+                f"Path: {interaction.file_path}"
+            )
+
+        if action == "list_interactions":
+            lookup = query.strip() or name.strip()
+            if not lookup:
+                return "Error: query is required for list_interactions"
+            person, interactions = self.people.list_interactions(lookup, limit=limit)
+            if person is None:
+                return f"People profile not found: {lookup}"
+            if not interactions:
+                return f"No interactions found for {person.name}."
+            lines = [f"Interactions for {person.name}:", ""]
+            lines.extend(self.people.render_interaction_summary(interaction) for interaction in interactions)
+            return "\n".join(lines)
 
         if action == "deactivate":
             lookup = query.strip() or name.strip()

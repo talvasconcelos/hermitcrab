@@ -77,6 +77,56 @@ class PersonProfile:
         return post
 
 
+@dataclass(slots=True)
+class PersonInteraction:
+    """One interaction note linked to a person profile."""
+
+    file_path: Path
+    person_name: str
+    summary: str
+    occurred_at: str
+    channel: str = ""
+    tags: list[str] = field(default_factory=list)
+    created_at: str = ""
+    metadata: dict[str, Any] = field(default_factory=dict)
+
+    @classmethod
+    def from_file(cls, file_path: Path) -> PersonInteraction | None:
+        try:
+            post = frontmatter.load(file_path)
+        except Exception:
+            return None
+        meta = post.metadata or {}
+        return cls(
+            file_path=file_path,
+            person_name=str(meta.get("person_name") or ""),
+            summary=(post.content or "").strip(),
+            occurred_at=str(meta.get("occurred_at") or meta.get("created_at") or ""),
+            channel=str(meta.get("channel") or ""),
+            tags=[str(item).strip() for item in meta.get("tags", []) if str(item).strip()],
+            created_at=str(meta.get("created_at") or ""),
+            metadata=meta,
+        )
+
+    def to_post(self) -> frontmatter.Post:
+        post = frontmatter.Post(self.summary)
+        post.metadata.update(
+            {
+                "title": f"Interaction with {self.person_name}",
+                "type": "person_interaction",
+                "person_name": self.person_name,
+                "occurred_at": self.occurred_at,
+                "created_at": self.created_at,
+                "journal": journal_day_wikilink(self.occurred_at or self.created_at),
+            }
+        )
+        if self.channel:
+            post.metadata["channel"] = self.channel
+        if self.tags:
+            post.metadata["tags"] = self.tags
+        return post
+
+
 class PeopleStore:
     """Manage simple people profile artifacts."""
 
@@ -87,6 +137,7 @@ class PeopleStore:
         self.workspace = workspace
         self.people_dir = ensure_dir(workspace / "knowledge" / "notes" / "people")
         self.profiles_dir = ensure_dir(self.people_dir / "profiles")
+        self.interactions_dir = ensure_dir(self.people_dir / "interactions")
 
     @staticmethod
     def _normalize(text: str) -> str:
@@ -102,6 +153,11 @@ class PeopleStore:
             self._normalize(item.file_path.stem.replace("-", " ")),
             *(self._normalize(alias) for alias in item.aliases),
         }
+
+    def _interaction_path(self, person_name: str, occurred_at: str) -> Path:
+        stamp = safe_filename(occurred_at.replace(":", "-")).strip().lower()
+        slug = safe_filename(person_name).strip().lower().replace(" ", "-")
+        return self.interactions_dir / f"{stamp}--{slug}.md"
 
     def get_profile(self, query: str) -> PersonProfile | None:
         normalized = self._normalize(query)
@@ -239,7 +295,58 @@ class PeopleStore:
         self._write_profile(item)
         return item
 
+    def add_interaction(
+        self,
+        *,
+        query: str,
+        summary: str,
+        occurred_at: str | None = None,
+        channel: str | None = None,
+        tags: list[str] | None = None,
+    ) -> tuple[PersonProfile, PersonInteraction]:
+        person = self.get_profile(query)
+        if person is None:
+            raise ValueError(f"People profile not found: {query}")
+        occurred = (occurred_at or _utcnow().isoformat()).strip()
+        interaction = PersonInteraction(
+            file_path=self._interaction_path(person.name, occurred),
+            person_name=person.name,
+            summary=summary.strip(),
+            occurred_at=occurred,
+            channel=(channel or "").strip(),
+            tags=[str(item).strip() for item in (tags or []) if str(item).strip()],
+            created_at=_utcnow().isoformat(),
+        )
+        interaction.file_path.write_text(frontmatter.dumps(interaction.to_post()), encoding="utf-8")
+        return person, interaction
+
+    def list_interactions(
+        self,
+        query: str,
+        *,
+        limit: int = 10,
+    ) -> tuple[PersonProfile | None, list[PersonInteraction]]:
+        person = self.get_profile(query)
+        if person is None:
+            return None, []
+        items: list[PersonInteraction] = []
+        normalized = self._normalize(person.name)
+        for file_path in sorted(self.interactions_dir.glob("*.md"), reverse=True):
+            interaction = PersonInteraction.from_file(file_path)
+            if interaction is None:
+                continue
+            if self._normalize(interaction.person_name) != normalized:
+                continue
+            items.append(interaction)
+            if len(items) >= max(1, limit):
+                break
+        return person, items
+
     def render_summary(self, item: PersonProfile) -> str:
         suffix = f", tz={item.timezone}" if item.timezone else ""
         primary = ", primary" if item.is_primary else ""
         return f"- {item.name} [{item.role}, {item.status}{primary}{suffix}]"
+
+    def render_interaction_summary(self, item: PersonInteraction) -> str:
+        channel = f" via {item.channel}" if item.channel else ""
+        return f"- {item.occurred_at}{channel}: {item.summary}"

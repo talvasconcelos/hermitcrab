@@ -1633,6 +1633,12 @@ def people_show(
     if item.notes:
         console.print()
         console.print(item.notes)
+    _, interactions = store.list_interactions(item.name, limit=5)
+    if interactions:
+        console.print()
+        console.print("[bold]Recent interactions[/bold]")
+        for interaction in interactions:
+            console.print(store.render_interaction_summary(interaction))
     related_reminders = reminders.list_related_reminders(item.name)
     if related_reminders:
         console.print()
@@ -1783,6 +1789,51 @@ def people_follow_up(
     console.print(f"[green]✓[/green] Saved follow-up '{item.title}' for {person.name}")
     console.print(f"Schedule: {reminders.render_schedule(item)}")
     console.print(f"Path: {item.file_path}")
+
+
+@people_app.command("log")
+def people_log_interaction(
+    query: str = typer.Argument(..., help="Person profile name or alias"),
+    summary: str = typer.Option(..., "--summary", "-s", help="Short interaction summary"),
+    occurred_at: str = typer.Option("", "--at", help="When it happened, ideally ISO datetime"),
+    channel: str = typer.Option("", "--channel", "-c", help="Interaction channel label"),
+    tag: list[str] = typer.Option([], "--tag", help="Optional interaction tags"),
+):
+    """Log one interaction note for a person profile."""
+    store = _build_people_store()
+    try:
+        person, interaction = store.add_interaction(
+            query=query,
+            summary=summary,
+            occurred_at=occurred_at or None,
+            channel=channel or None,
+            tags=tag,
+        )
+    except ValueError as exc:
+        console.print(f"[red]Error: {exc}[/red]")
+        raise typer.Exit(1) from exc
+    console.print(f"[green]✓[/green] Logged interaction for '{person.name}'")
+    console.print(f"When: {interaction.occurred_at}")
+    console.print(f"Path: {interaction.file_path}")
+
+
+@people_app.command("history")
+def people_history(
+    query: str = typer.Argument(..., help="Person profile name or alias"),
+    limit: int = typer.Option(10, "--limit", "-n", help="Maximum interactions to show"),
+):
+    """Show recent interaction history for a person profile."""
+    store = _build_people_store()
+    person, interactions = store.list_interactions(query, limit=limit)
+    if person is None:
+        console.print(f"[red]People profile not found: {query}[/red]")
+        raise typer.Exit(1)
+    if not interactions:
+        console.print(f"No interactions found for {person.name}.")
+        return
+    console.print(f"[bold]Interactions for {person.name}[/bold]")
+    for interaction in interactions:
+        console.print(store.render_interaction_summary(interaction))
 
 
 # ============================================================================
