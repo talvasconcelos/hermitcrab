@@ -1622,6 +1622,8 @@ def people_show(
     console.print(f"Role: {item.role}")
     console.print(f"Status: {item.status}")
     console.print(f"Path: {item.file_path}")
+    if item.is_primary:
+        console.print("Primary: yes")
     if item.timezone:
         console.print(f"Timezone: {item.timezone}")
     if item.aliases:
@@ -1648,6 +1650,7 @@ def people_add(
         "-r",
         help="owner|family|child|member|guest|contact|client|collaborator",
     ),
+    primary: bool = typer.Option(False, "--primary", help="Mark as the primary person profile"),
     timezone: str = typer.Option("", "--tz", help="Optional IANA timezone"),
     alias: list[str] = typer.Option([], "--alias", help="Nickname or alternate name"),
     tag: list[str] = typer.Option([], "--tag", help="Optional organizing tag"),
@@ -1660,6 +1663,7 @@ def people_add(
             name=name,
             role=role,
             timezone=timezone or None,
+            make_primary=primary,
             aliases=alias,
             tags=tag,
             notes=notes or None,
@@ -1682,6 +1686,11 @@ def people_update(
         help="owner|family|child|member|guest|contact|client|collaborator",
     ),
     status: str = typer.Option("active", "--status", help="active|inactive"),
+    primary: bool | None = typer.Option(
+        None,
+        "--primary/--no-primary",
+        help="Set or clear the primary person flag",
+    ),
     timezone: str = typer.Option("", "--tz", help="Optional IANA timezone"),
     alias: list[str] = typer.Option([], "--alias", help="Nickname or alternate name"),
     tag: list[str] = typer.Option([], "--tag", help="Optional organizing tag"),
@@ -1695,6 +1704,7 @@ def people_update(
             role=role,
             status=status,
             timezone=timezone or None,
+            make_primary=primary,
             aliases=alias,
             tags=tag,
             notes=notes or None,
@@ -1718,6 +1728,20 @@ def people_deactivate(
         console.print(f"[red]People profile not found: {query}[/red]")
         raise typer.Exit(1)
     console.print(f"[green]✓[/green] Deactivated people profile '{item.name}'")
+    console.print(f"Path: {item.file_path}")
+
+
+@people_app.command("set-primary")
+def people_set_primary(
+    query: str = typer.Argument(..., help="Profile name or alias"),
+):
+    """Mark one profile as the workspace's primary person."""
+    store = _build_people_store()
+    item = store.set_primary_profile(query)
+    if item is None:
+        console.print(f"[red]People profile not found: {query}[/red]")
+        raise typer.Exit(1)
+    console.print(f"[green]✓[/green] Set primary person '{item.name}'")
     console.print(f"Path: {item.file_path}")
 
 

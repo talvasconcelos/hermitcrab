@@ -40,7 +40,15 @@ class PersonProfileTool(Tool):
             "properties": {
                 "action": {
                     "type": "string",
-                    "enum": ["create", "list", "show", "update", "deactivate", "follow_up"],
+                    "enum": [
+                        "create",
+                        "list",
+                        "show",
+                        "update",
+                        "deactivate",
+                        "set_primary",
+                        "follow_up",
+                    ],
                     "description": "People profile action",
                 },
                 "name": {"type": "string", "description": "Profile name"},
@@ -67,6 +75,10 @@ class PersonProfileTool(Tool):
                 "timezone": {
                     "type": "string",
                     "description": "Optional IANA timezone for the person",
+                },
+                "make_primary": {
+                    "type": "boolean",
+                    "description": "Mark this profile as the workspace's primary person",
                 },
                 "aliases": {
                     "type": "array",
@@ -118,6 +130,7 @@ class PersonProfileTool(Tool):
         role: str = "",
         status: str = "active",
         timezone: str = "",
+        make_primary: bool | None = None,
         aliases: list[str] | None = None,
         tags: list[str] | None = None,
         notes: str = "",
@@ -152,6 +165,8 @@ class PersonProfileTool(Tool):
                 f"Status: {item.status}",
                 f"Path: {item.file_path}",
             ]
+            if item.is_primary:
+                lines.append("Primary: yes")
             if item.timezone:
                 lines.append(f"Timezone: {item.timezone}")
             if item.aliases:
@@ -178,6 +193,7 @@ class PersonProfileTool(Tool):
                     role=role,
                     status=status,
                     timezone=timezone or None,
+                    make_primary=make_primary,
                     aliases=aliases,
                     tags=tags,
                     notes=notes or None,
@@ -196,6 +212,15 @@ class PersonProfileTool(Tool):
             if item is None:
                 return f"People profile not found: {lookup}"
             return f"Deactivated people profile: {item.name}\nPath: {item.file_path}"
+
+        if action == "set_primary":
+            lookup = query.strip() or name.strip()
+            if not lookup:
+                return "Error: query is required for set_primary"
+            item = self.people.set_primary_profile(lookup)
+            if item is None:
+                return f"People profile not found: {lookup}"
+            return f"Set primary person: {item.name}\nPath: {item.file_path}"
 
         if action == "follow_up":
             if self.reminders is None:
