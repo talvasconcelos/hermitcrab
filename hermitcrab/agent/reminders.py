@@ -32,6 +32,7 @@ class ReminderItem:
     tz: str = ""
     enabled: bool = True
     status: str = "active"
+    related_people: list[str] = field(default_factory=list)
     cron_job_id: str = ""
     created_at: str = ""
     updated_at: str = ""
@@ -57,6 +58,9 @@ class ReminderItem:
             tz=str(meta.get("tz") or ""),
             enabled=bool(meta.get("enabled", True)),
             status=str(meta.get("status") or "active"),
+            related_people=[
+                str(item).strip() for item in meta.get("related_people", []) if str(item).strip()
+            ],
             cron_job_id=str(meta.get("cron_job_id") or ""),
             created_at=str(meta.get("created_at") or ""),
             updated_at=str(meta.get("updated_at") or ""),
@@ -72,6 +76,7 @@ class ReminderItem:
                 "schedule_kind": self.schedule_kind,
                 "enabled": self.enabled,
                 "status": self.status,
+                "related_people": self.related_people,
                 "cron_job_id": self.cron_job_id,
                 "created_at": self.created_at,
                 "updated_at": self.updated_at,
@@ -151,6 +156,7 @@ class ReminderStore:
         every_seconds: int | None = None,
         cron_expr: str | None = None,
         tz: str | None = None,
+        related_people: list[str] | None = None,
         existing_query: str | None = None,
     ) -> ReminderItem:
         self._validate_schedule(
@@ -194,6 +200,7 @@ class ReminderStore:
             tz=tz or "",
             enabled=True,
             status="active",
+            related_people=[str(item).strip() for item in (related_people or []) if str(item).strip()],
             cron_job_id=cron_job.id,
             created_at=(existing.created_at if existing and existing.created_at else now),
             updated_at=now,
@@ -228,6 +235,21 @@ class ReminderStore:
                 f"{item.cron_expr} ({item.tz})" if item.tz else item.cron_expr
             )
         return item.schedule_kind
+
+    def list_related_reminders(
+        self,
+        person_name: str,
+        *,
+        include_completed: bool = False,
+    ) -> list[ReminderItem]:
+        normalized = self._normalize(person_name)
+        if not normalized:
+            return []
+        matches: list[ReminderItem] = []
+        for item in self.list_reminders(include_completed=include_completed):
+            if any(self._normalize(name) == normalized for name in item.related_people):
+                matches.append(item)
+        return matches
 
     @staticmethod
     def _validate_schedule(

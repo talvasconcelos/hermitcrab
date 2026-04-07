@@ -65,6 +65,7 @@ from hermitcrab.agent.pending_work import (
     should_resume_pending_work,
     snippet,
 )
+from hermitcrab.agent.people import PeopleStore
 from hermitcrab.agent.reflection import ReflectionService
 from hermitcrab.agent.reminders import ReminderStore
 from hermitcrab.agent.session_lifecycle import SessionLifecycleManager
@@ -97,6 +98,7 @@ from hermitcrab.agent.tools.memory import (
     WriteTaskTool,
 )
 from hermitcrab.agent.tools.message import MessageTool
+from hermitcrab.agent.tools.people import PersonProfileTool
 from hermitcrab.agent.tools.policy import build_main_agent_policy
 from hermitcrab.agent.tools.registry import ToolRegistry
 from hermitcrab.agent.tools.reminders import ReminderTool
@@ -262,6 +264,7 @@ class AgentLoop:
         self.memory = MemoryStore(workspace)
         self.knowledge = KnowledgeStore(workspace)
         self.lists = ListStore(workspace)
+        self.people = PeopleStore(workspace)
         self.reminders = ReminderStore(workspace, cron_service) if cron_service else None
         self.tools = ToolRegistry(default_policy=build_main_agent_policy())
         self.execution_state = ExecutionStateTracker()
@@ -372,6 +375,7 @@ class AgentLoop:
         self.tools.register(SetListItemStatusTool(self.lists))
         self.tools.register(RemoveListItemsTool(self.lists))
         self.tools.register(DeleteListTool(self.lists))
+        self.tools.register(PersonProfileTool(self.people, self.reminders))
 
         if self.cron_service:
             self.tools.register(CronTool(self.cron_service))
@@ -415,6 +419,9 @@ class AgentLoop:
         if reminder_tool := self.tools.get("reminder"):
             if isinstance(reminder_tool, ReminderTool):
                 reminder_tool.set_context(channel, chat_id)
+        if person_tool := self.tools.get("person_profile"):
+            if isinstance(person_tool, PersonProfileTool):
+                person_tool.set_context(channel, chat_id)
 
     @staticmethod
     def _strip_think(text: str | None) -> str | None:

@@ -1274,6 +1274,9 @@ app.add_typer(cron_app, name="cron")
 reminders_app = typer.Typer(help="Manage reminder artifacts")
 app.add_typer(reminders_app, name="reminders")
 
+people_app = typer.Typer(help="Manage people profiles")
+app.add_typer(people_app, name="people")
+
 
 def _build_reminder_store() -> Any:
     """Build a reminder store backed by the configured workspace and cron store."""
@@ -1284,6 +1287,26 @@ def _build_reminder_store() -> Any:
     config = _load_runtime_config()
     cron = CronService(get_data_dir() / "cron" / "jobs.json")
     return ReminderStore(config.workspace_path, cron)
+
+
+def _build_people_store() -> Any:
+    """Build the people profile store in the configured workspace."""
+    from hermitcrab.agent.people import PeopleStore
+
+    config = _load_runtime_config()
+    return PeopleStore(config.workspace_path)
+
+
+def _require_one_schedule_option(
+    every: int | None,
+    cron_expr: str | None,
+    at: str | None,
+) -> str:
+    """Return schedule kind when exactly one schedule option was provided."""
+    if sum(value is not None for value in (every, cron_expr, at)) != 1:
+        console.print("[red]Error: specify exactly one of --every, --cron, or --at[/red]")
+        raise typer.Exit(1)
+    return "every" if every is not None else ("cron" if cron_expr else "at")
 
 
 @cron_app.command("list")
@@ -1534,11 +1557,7 @@ def reminders_add(
     at: str = typer.Option(None, "--at", help="One-time ISO datetime"),
 ):
     """Add a reminder artifact and compile it into the scheduler."""
-    if sum(value is not None for value in (every, cron_expr, at)) != 1:
-        console.print("[red]Error: specify exactly one of --every, --cron, or --at[/red]")
-        raise typer.Exit(1)
-
-    schedule_kind = "every" if every is not None else ("cron" if cron_expr else "at")
+    schedule_kind = _require_one_schedule_option(every, cron_expr, at)
     store = _build_reminder_store()
     try:
         item = store.upsert_reminder(
@@ -1572,6 +1591,174 @@ def reminders_cancel(
         console.print(f"[red]Reminder not found: {query}[/red]")
         raise typer.Exit(1)
     console.print(f"[green]✓[/green] Cancelled reminder '{item.title}'")
+
+
+@people_app.command("list")
+def people_list(
+    all: bool = typer.Option(False, "--all", "-a", help="Include inactive profiles"),
+):
+    """List people profiles."""
+    store = _build_people_store()
+    profiles = store.list_profiles(include_inactive=all)
+    if not profiles:
+        console.print("No people profiles found.")
+        return
+    for item in profiles:
+        console.print(store.render_summary(item))
+
+
+@people_app.command("show")
+def people_show(
+    query: str = typer.Argument(..., help="People profile name or alias"),
+):
+    """Show one people profile."""
+    store = _build_people_store()
+    reminders = _build_reminder_store()
+    item = store.get_profile(query)
+    if item is None:
+        console.print(f"[red]People profile not found: {query}[/red]")
+        raise typer.Exit(1)
+    console.print(f"[bold]{item.name}[/bold]")
+    console.print(f"Role: {item.role}")
+    console.print(f"Status: {item.status}")
+    console.print(f"Path: {item.file_path}")
+    if item.timezone:
+        console.print(f"Timezone: {item.timezone}")
+    if item.aliases:
+        console.print(f"Aliases: {', '.join(item.aliases)}")
+    if item.tags:
+        console.print(f"Tags: {', '.join(item.tags)}")
+    if item.notes:
+        console.print()
+        console.print(item.notes)
+    related_reminders = reminders.list_related_reminders(item.name)
+    if related_reminders:
+        console.print()
+        console.print("[bold]Follow-ups[/bold]")
+        for reminder in related_reminders:
+            console.print(reminders.render_summary(reminder))
+
+
+@people_app.command("add")
+def people_add(
+    name: str = typer.Option(..., "--name", "-n", help="Profile name"),
+    role: str = typer.Option(
+        ...,
+        "--role",
+        "-r",
+        help="owner|family|child|member|guest|contact|client|collaborator",
+    ),
+    timezone: str = typer.Option("", "--tz", help="Optional IANA timezone"),
+    alias: list[str] = typer.Option([], "--alias", help="Nickname or alternate name"),
+    tag: list[str] = typer.Option([], "--tag", help="Optional organizing tag"),
+    notes: str = typer.Option("", "--notes", help="Freeform profile notes"),
+):
+    """Add a people profile."""
+    store = _build_people_store()
+    try:
+        item = store.upsert_profile(
+            name=name,
+            role=role,
+            timezone=timezone or None,
+            aliases=alias,
+            tags=tag,
+            notes=notes or None,
+        )
+    except ValueError as exc:
+        console.print(f"[red]Error: {exc}[/red]")
+        raise typer.Exit(1) from exc
+    console.print(f"[green]✓[/green] Saved people profile '{item.name}'")
+    console.print(f"Path: {item.file_path}")
+
+
+@people_app.command("update")
+def people_update(
+    query: str = typer.Argument(..., help="Existing profile name or alias"),
+    name: str = typer.Option(..., "--name", "-n", help="Profile name"),
+    role: str = typer.Option(
+        ...,
+        "--role",
+        "-r",
+        help="owner|family|child|member|guest|contact|client|collaborator",
+    ),
+    status: str = typer.Option("active", "--status", help="active|inactive"),
+    timezone: str = typer.Option("", "--tz", help="Optional IANA timezone"),
+    alias: list[str] = typer.Option([], "--alias", help="Nickname or alternate name"),
+    tag: list[str] = typer.Option([], "--tag", help="Optional organizing tag"),
+    notes: str = typer.Option("", "--notes", help="Freeform profile notes"),
+):
+    """Update an existing people profile."""
+    store = _build_people_store()
+    try:
+        item = store.upsert_profile(
+            name=name,
+            role=role,
+            status=status,
+            timezone=timezone or None,
+            aliases=alias,
+            tags=tag,
+            notes=notes or None,
+            existing_query=query,
+        )
+    except ValueError as exc:
+        console.print(f"[red]Error: {exc}[/red]")
+        raise typer.Exit(1) from exc
+    console.print(f"[green]✓[/green] Updated people profile '{item.name}'")
+    console.print(f"Path: {item.file_path}")
+
+
+@people_app.command("deactivate")
+def people_deactivate(
+    query: str = typer.Argument(..., help="Profile name or alias"),
+):
+    """Mark a people profile as inactive."""
+    store = _build_people_store()
+    item = store.deactivate_profile(query)
+    if item is None:
+        console.print(f"[red]People profile not found: {query}[/red]")
+        raise typer.Exit(1)
+    console.print(f"[green]✓[/green] Deactivated people profile '{item.name}'")
+    console.print(f"Path: {item.file_path}")
+
+
+@people_app.command("follow-up")
+def people_follow_up(
+    query: str = typer.Argument(..., help="Person profile name or alias"),
+    message: str = typer.Option(..., "--message", "-m", help="Follow-up reminder message"),
+    title: str = typer.Option("", "--title", "-t", help="Optional follow-up reminder title"),
+    every: int = typer.Option(None, "--every", "-e", help="Repeat every N seconds"),
+    cron_expr: str = typer.Option(None, "--cron", "-c", help="Cron expression"),
+    tz: str | None = typer.Option(None, "--tz", help="IANA timezone for cron schedules"),
+    at: str = typer.Option(None, "--at", help="One-time ISO datetime"),
+):
+    """Create a reminder linked to a person profile."""
+    people = _build_people_store()
+    person = people.get_profile(query)
+    if person is None:
+        console.print(f"[red]People profile not found: {query}[/red]")
+        raise typer.Exit(1)
+    schedule_kind = _require_one_schedule_option(every, cron_expr, at)
+    reminders = _build_reminder_store()
+    reminder_title = title or f"Follow up with {person.name}"
+    try:
+        item = reminders.upsert_reminder(
+            title=reminder_title,
+            message=message,
+            schedule_kind=schedule_kind,
+            at=at,
+            every_seconds=every,
+            cron_expr=cron_expr,
+            tz=tz,
+            related_people=[person.name],
+            channel="cli",
+            chat_id="direct",
+        )
+    except ValueError as exc:
+        console.print(f"[red]Error: {exc}[/red]")
+        raise typer.Exit(1) from exc
+    console.print(f"[green]✓[/green] Saved follow-up '{item.title}' for {person.name}")
+    console.print(f"Schedule: {reminders.render_schedule(item)}")
+    console.print(f"Path: {item.file_path}")
 
 
 # ============================================================================
