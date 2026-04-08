@@ -33,6 +33,5 @@ CODEX_AUDIT
 .codex
 
 # Internal smoke harness
-scripts/smoke_cli_runner.py
-scripts/smoke_cli_prompts*.json
+smoke_test/
 tmp/smoke/
