@@ -174,7 +174,7 @@ class SessionManager:
         safe_key = safe_filename(key.replace(":", "_"))
         return sorted(
             self.archive_dir.glob(f"{safe_key}-*.jsonl"),
-            key=lambda path: path.name,
+            key=self._archive_sort_key,
             reverse=True,
         )
 
@@ -456,6 +456,19 @@ class SessionManager:
     @staticmethod
     def _normalize_query(query: str | None) -> str:
         return " ".join((query or "").strip().lower().split())
+
+    @staticmethod
+    def _archive_sort_key(path: Path) -> tuple[datetime, float, str]:
+        """Sort archives by embedded timestamp instead of lexical reason labels."""
+        mtime = path.stat().st_mtime
+        match = re.search(r"-(\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2})\.jsonl$", path.name)
+        if match:
+            try:
+                timestamp = datetime.strptime(match.group(1), "%Y-%m-%dT%H-%M-%S")
+                return timestamp, mtime, path.name
+            except ValueError:
+                pass
+        return datetime.fromtimestamp(mtime), mtime, path.name
 
     @staticmethod
     def _query_signals_resume(normalized_query: str) -> bool:
