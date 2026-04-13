@@ -9,6 +9,7 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
 
+from hermitcrab.agent.audit import AuditSummary, AuditTrail
 from hermitcrab.agent.skills import SkillsLoader
 from hermitcrab.config.loader import get_config_path
 from hermitcrab.config.schema import Config
@@ -55,6 +56,7 @@ class StatusReport:
     selected_provider: str | None
     provider_statuses: list[ProviderStatus] = field(default_factory=list)
     skill_statuses: list[SkillStatus] = field(default_factory=list)
+    audit: AuditSummary | None = None
     mcp_servers_configured: int = 0
     mcp_servers_valid: int = 0
     overall_state: str = "error"
@@ -94,6 +96,7 @@ def build_status_report(config_path: Path | None = None) -> StatusReport:
     mcp_servers_valid = sum(
         1 for server in config.tools.mcp_servers.values() if _is_valid_mcp(server)
     )
+    audit = AuditTrail(workspace).summarize()
 
     next_steps = _build_next_steps(
         config_exists=path.exists(),
@@ -125,6 +128,7 @@ def build_status_report(config_path: Path | None = None) -> StatusReport:
         selected_provider=selected_provider,
         provider_statuses=provider_statuses,
         skill_statuses=skill_statuses,
+        audit=audit,
         mcp_servers_configured=len(config.tools.mcp_servers),
         mcp_servers_valid=mcp_servers_valid,
         overall_state=overall_state,

@@ -1964,6 +1964,16 @@ def status(
         f"  [dim](valid: {report.mcp_servers_valid})[/dim]"
     )
 
+    if report.audit is not None:
+        console.print("\n[bold]Audit[/bold]")
+        audit_state = "[green]present[/green]" if report.audit.exists else "[dim]not started[/dim]"
+        console.print(f"- Log: {report.audit.path} {audit_state}")
+        if report.audit.exists:
+            console.print(f"- Events: {report.audit.event_count}")
+            if report.audit.last_event:
+                stamp = f" at {report.audit.last_timestamp}" if report.audit.last_timestamp else ""
+                console.print(f"- Latest: {report.audit.last_event}{stamp}")
+
     if report.next_steps:
         console.print("\n[bold]Try This Next[/bold]")
         console.print(f"- {report.next_steps[0]}")

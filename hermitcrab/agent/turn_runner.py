@@ -72,6 +72,7 @@ class TurnRunner:
         strip_think: Callable[[str | None], str | None],
         tool_hint: Callable[[list[Any]], str],
         is_empty_response: Callable[[str | None], bool],
+        audit_event: Callable[..., None] | None = None,
     ):
         self.context = context
         self.tools = tools
@@ -82,6 +83,7 @@ class TurnRunner:
         self.strip_think = strip_think
         self.tool_hint = tool_hint
         self.is_empty_response = is_empty_response
+        self.audit_event = audit_event
 
     def _remaining_seconds(self, started_at: float) -> float:
         return self.config.max_loop_seconds - (time.monotonic() - started_at)
@@ -912,6 +914,16 @@ class TurnRunner:
                     tool_results.append((tool_call.name, result))
                     executed_count += 1
                     if self._needs_destructive_approval(result):
+                        if self.audit_event is not None:
+                            self.audit_event(
+                                "tool.approval_required",
+                                tool_name=tool_call.name,
+                                tool_arguments=(
+                                    sorted(tool_call.arguments.keys())
+                                    if isinstance(tool_call.arguments, dict)
+                                    else []
+                                ),
+                            )
                         final_content = self._build_destructive_approval_request(
                             tool_call.name,
                             tool_call.arguments if isinstance(tool_call.arguments, dict) else {},

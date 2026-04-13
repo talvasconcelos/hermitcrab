@@ -37,6 +37,7 @@ from typing import TYPE_CHECKING, Any, Awaitable, Callable
 
 from loguru import logger
 
+from hermitcrab.agent.audit import AuditTrail
 from hermitcrab.agent.background_jobs import BackgroundJobManager, SessionDigest
 from hermitcrab.agent.background_messages import (
     fallback_system_task_summary,
@@ -213,6 +214,7 @@ class AgentLoop:
         self.channels_config = channels_config
         self.provider = provider
         self.workspace = workspace
+        self.audit = AuditTrail(workspace)
         self.model = model or provider.get_default_model()
         self.max_iterations = max_iterations
         self.temperature = temperature
@@ -792,6 +794,28 @@ class AgentLoop:
             return {}
         label = selection if not resolved_model or resolved_model == selection else f"{selection} -> {resolved_model}"
         return {"_active_model_label": label}
+
+    def _audit_event(
+        self,
+        event: str,
+        *,
+        session_key: str | None = None,
+        msg: InboundMessage | None = None,
+        **data: Any,
+    ) -> None:
+        """Append one small structured audit entry without breaking user flows."""
+        payload: dict[str, Any] = dict(data)
+        if session_key:
+            payload["session_key"] = session_key
+        if msg is not None:
+            payload["channel"] = msg.channel
+            payload["chat_id"] = msg.chat_id
+            if msg.metadata and msg.metadata.get("message_id") is not None:
+                payload["message_id"] = msg.metadata.get("message_id")
+        try:
+            self.audit.record(event, **payload)
+        except OSError as exc:
+            logger.warning("Failed to append audit event {}: {}", event, exc)
 
     async def _chat_with_retry(
         self,
@@ -1483,9 +1507,16 @@ class AgentLoop:
         cmd = parts[0].lower() if parts else ""
         arg = parts[1].strip() if len(parts) > 1 else ""
         if cmd == "/new":
+            previous_model = self._resolve_interactive_model(session)[0]
             messages_snapshot = list(session.messages)
             await self._on_session_end(
                 session, reason="explicit", messages_snapshot=messages_snapshot
+            )
+            self._audit_event(
+                "session.reset",
+                session_key=session_key,
+                msg=msg,
+                previous_model=previous_model,
             )
             self.execution_state.set(
                 session_key, ExecutionPhase.WAITING_BACKGROUND, "starting new session"
@@ -1524,8 +1555,17 @@ class AgentLoop:
                 )
 
             if arg.lower() == "default":
+                previous_selection, previous_model = self._resolve_interactive_model(session)
                 session.metadata.pop("active_model", None)
                 self.sessions.save(session)
+                self._audit_event(
+                    "model.reset",
+                    session_key=session_key,
+                    msg=msg,
+                    previous_selection=previous_selection,
+                    previous_model=previous_model,
+                    active_model=self._resolve_interactive_model(session)[1],
+                )
                 return self._reply(
                     msg,
                     "Reset this conversation to the default interactive model.",
@@ -1540,6 +1580,13 @@ class AgentLoop:
             assert selection is not None
             session.metadata["active_model"] = selection
             self.sessions.save(session)
+            self._audit_event(
+                "model.switch",
+                session_key=session_key,
+                msg=msg,
+                selection=selection,
+                active_model=detail,
+            )
             if detail != selection:
                 return self._reply(
                     msg,
@@ -1820,6 +1867,7 @@ class AgentLoop:
             strip_think=self._strip_think,
             tool_hint=self._tool_hint,
             is_empty_response=is_empty_response,
+            audit_event=self._audit_event,
         )
 
     class _SessionScope:
