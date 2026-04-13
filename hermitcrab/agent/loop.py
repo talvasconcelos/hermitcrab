@@ -632,19 +632,21 @@ class AgentLoop:
     def _build_models_response(self, session: Session) -> str:
         """Render available interactive model choices from configured defaults, names, and aliases."""
         current_selection, current_model = self._resolve_interactive_model(session)
-        lines = ["Available interactive models:"]
         seen: set[str] = set()
 
-        def _append(label: str, value: str, resolved_value: str | None, *, current: bool = False) -> None:
+        def _format_choice(value: str, resolved_value: str | None) -> str:
+            if resolved_value and resolved_value != value:
+                return f"`{value}` -> `{resolved_value}`"
+            return f"`{value}`"
+
+        def _remember(value: str) -> bool:
             key = value.strip().lower()
             if not key or key in seen:
-                return
+                return False
             seen.add(key)
-            suffix = " [current]" if current else ""
-            if resolved_value and resolved_value != value:
-                lines.append(f"- {label}: `{value}` -> `{resolved_value}`{suffix}")
-            else:
-                lines.append(f"- {label}: `{value}`{suffix}")
+            return True
+
+        lines = ["Interactive models for this conversation:"]
 
         primary = self._get_model_for_job(JobClass.INTERACTIVE_RESPONSE)
         if primary:
@@ -653,24 +655,54 @@ class AgentLoop:
                 self.model_aliases,
                 self.named_models,
             ).model
-            _append("default", primary, primary_resolved, current=(current_selection == primary))
+        else:
+            primary_resolved = None
 
+        if current_selection is not None:
+            lines.append("")
+            lines.append("Current:")
+            lines.append(f"- {_format_choice(current_selection, current_model)}")
+            if current_selection != primary and primary is not None:
+                lines.append(f"- Reset to default with `/model {primary}`")
+
+        if primary is not None and _remember(primary):
+            lines.append("")
+            lines.append("Default:")
+            lines.append(f"- {_format_choice(primary, primary_resolved)}")
+
+        named_lines: list[str] = []
         for name in sorted(self.named_models):
             resolved = resolve_model_alias_config(name, self.model_aliases, self.named_models)
-            _append(f"named `{name}`", name, resolved.model, current=(current_selection == name))
+            if _remember(name):
+                named_lines.append(f"- `{name}` -> `{resolved.model or name}`")
 
+        alias_lines: list[str] = []
         for alias in sorted(self.model_aliases):
             resolved = resolve_model_alias_config(alias, self.model_aliases, self.named_models)
-            _append(f"alias `{alias}`", alias, resolved.model, current=(current_selection == alias))
+            if _remember(alias):
+                alias_lines.append(f"- `{alias}` -> `{resolved.model or alias}`")
 
-        if current_selection and current_selection.lower() not in seen:
-            _append("current", current_selection, current_model, current=True)
+        if named_lines:
+            lines.append("")
+            lines.append("Named models:")
+            lines.extend(named_lines)
+
+        if alias_lines:
+            lines.append("")
+            lines.append("Aliases:")
+            lines.extend(alias_lines)
+
+        if current_selection and _remember(current_selection):
+            lines.append("")
+            lines.append("Other:")
+            lines.append(f"- {_format_choice(current_selection, current_model)}")
 
         lines.extend(
             [
                 "",
                 "Use `/model <name>` to switch this conversation only.",
                 "You can use a named model, a configured alias, or a full model id like `openai-oauth/gpt-5.4`.",
+                "Use `/model` with no argument to see the active model.",
             ]
         )
         return "\n".join(lines)
