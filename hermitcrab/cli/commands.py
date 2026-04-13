@@ -342,6 +342,43 @@ def _print_agent_response(
         return
 
 
+async def _consume_outbound_loop(
+    bus: Any,
+    agent_loop: Any,
+    turn_done: asyncio.Event,
+    turn_response: list[str],
+    *,
+    render_markdown: bool,
+) -> None:
+    """Consume outbound bus messages, render progress, and collect turn responses."""
+    while True:
+        try:
+            msg = await asyncio.wait_for(bus.consume_outbound(), timeout=1.0)
+            if msg.metadata.get("_progress"):
+                if not msg.content or not msg.content.strip():
+                    continue
+                is_tool_hint = msg.metadata.get("_tool_hint", False)
+                if _should_render_progress(
+                    agent_loop.channels_config,
+                    is_tool_hint=is_tool_hint,
+                ):
+                    console.print(f"  [dim]↳ {msg.content}[/dim]")
+            elif not turn_done.is_set():
+                if msg.content:
+                    turn_response.append(msg.content)
+                turn_done.set()
+            elif msg.content:
+                _print_agent_response(
+                    msg.content,
+                    render_markdown=render_markdown,
+                    prompt_safe=True,
+                )
+        except asyncio.TimeoutError:
+            continue
+        except asyncio.CancelledError:
+            break
+
+
 def _load_runtime_config() -> Config:
     """Load config strictly for runtime commands that should fail clearly."""
     from hermitcrab.config.loader import ConfigLoadError, load_config
@@ -701,8 +738,6 @@ def gateway(
     from hermitcrab.agent.loop import AgentLoop
     from hermitcrab.bus.queue import MessageBus
     from hermitcrab.channels.manager import ChannelManager
-    from hermitcrab.config.loader import get_data_dir
-    from hermitcrab.cron.service import CronService
     from hermitcrab.cron.types import CronJob
     from hermitcrab.heartbeat.service import HeartbeatService
     from hermitcrab.reminders.service import ReminderService
@@ -722,8 +757,7 @@ def gateway(
     session_manager = SessionManager(config.workspace_path)
 
     # Create cron service first (callback set after agent creation)
-    cron_store_path = get_data_dir() / "cron" / "jobs.json"
-    cron = CronService(cron_store_path)
+    cron = _build_cron_service()
 
     # Create agent with cron service
     agent = AgentLoop(
@@ -931,36 +965,11 @@ def _run_nostr_mode(
         turn_done.set()
         turn_response: list[str] = []
 
-        async def _consume_outbound():
-            """Consume outbound messages and print responses."""
-            while True:
-                try:
-                    msg = await asyncio.wait_for(bus.consume_outbound(), timeout=1.0)
-                    if msg.metadata.get("_progress"):
-                        if not msg.content or not msg.content.strip():
-                            continue
-                        is_tool_hint = msg.metadata.get("_tool_hint", False)
-                        if _should_render_progress(
-                            agent_loop.channels_config,
-                            is_tool_hint=is_tool_hint,
-                        ):
-                            console.print(f"  [dim]↳ {msg.content}[/dim]")
-                    elif not turn_done.is_set():
-                        if msg.content:
-                            turn_response.append(msg.content)
-                        turn_done.set()
-                    elif msg.content:
-                        _print_agent_response(
-                            msg.content,
-                            render_markdown=markdown,
-                            prompt_safe=True,
-                        )
-                except asyncio.TimeoutError:
-                    continue
-                except asyncio.CancelledError:
-                    break
-
-        outbound_task = asyncio.create_task(_consume_outbound())
+        outbound_task = asyncio.create_task(
+            _consume_outbound_loop(
+                bus, agent_loop, turn_done, turn_response, render_markdown=markdown
+            )
+        )
 
         try:
             while True:
@@ -1028,8 +1037,6 @@ def agent(
 
     from hermitcrab.agent.loop import AgentLoop
     from hermitcrab.bus.queue import MessageBus
-    from hermitcrab.config.loader import get_data_dir
-    from hermitcrab.cron.service import CronService
     from hermitcrab.session.timeout_service import SessionTimeoutService
 
     config = _load_runtime_config()
@@ -1038,8 +1045,7 @@ def agent(
     provider = _make_provider(config)
 
     # Create cron service for tool usage (no callback needed for CLI unless running)
-    cron_store_path = get_data_dir() / "cron" / "jobs.json"
-    cron = CronService(cron_store_path)
+    cron = _build_cron_service()
 
     if logs:
         logger.enable("hermitcrab")
@@ -1129,35 +1135,11 @@ def agent(
             turn_done.set()
             turn_response: list[str] = []
 
-            async def _consume_outbound():
-                while True:
-                    try:
-                        msg = await asyncio.wait_for(bus.consume_outbound(), timeout=1.0)
-                        if msg.metadata.get("_progress"):
-                            if not msg.content or not msg.content.strip():
-                                continue
-                            is_tool_hint = msg.metadata.get("_tool_hint", False)
-                            if _should_render_progress(
-                                agent_loop.channels_config,
-                                is_tool_hint=is_tool_hint,
-                            ):
-                                console.print(f"  [dim]↳ {msg.content}[/dim]")
-                        elif not turn_done.is_set():
-                            if msg.content:
-                                turn_response.append(msg.content)
-                            turn_done.set()
-                        elif msg.content:
-                            _print_agent_response(
-                                msg.content,
-                                render_markdown=markdown,
-                                prompt_safe=True,
-                            )
-                    except asyncio.TimeoutError:
-                        continue
-                    except asyncio.CancelledError:
-                        break
-
-            outbound_task = asyncio.create_task(_consume_outbound())
+            outbound_task = asyncio.create_task(
+                _consume_outbound_loop(
+                    bus, agent_loop, turn_done, turn_response, render_markdown=markdown
+                )
+            )
 
             try:
                 while True:
@@ -1307,6 +1289,14 @@ people_app = typer.Typer(help="Manage people profiles")
 app.add_typer(people_app, name="people")
 
 
+def _build_cron_service():
+    """Build the CronService in the configured data directory."""
+    from hermitcrab.config.loader import get_data_dir
+    from hermitcrab.cron.service import CronService
+
+    return CronService(get_data_dir() / "cron" / "jobs.json")
+
+
 def _build_reminder_store() -> Any:
     """Build the reminder store in the configured workspace."""
     from hermitcrab.agent.reminders import ReminderStore
@@ -1344,11 +1334,7 @@ def cron_list(
     all: bool = typer.Option(False, "--all", "-a", help="Include disabled jobs"),
 ):
     """List scheduled jobs."""
-    from hermitcrab.config.loader import get_data_dir
-    from hermitcrab.cron.service import CronService
-
-    store_path = get_data_dir() / "cron" / "jobs.json"
-    service = CronService(store_path)
+    service = _build_cron_service()
 
     jobs = service.list_jobs(include_disabled=all)
 
@@ -1414,8 +1400,6 @@ def cron_add(
     ),
 ):
     """Add a scheduled job."""
-    from hermitcrab.config.loader import get_data_dir
-    from hermitcrab.cron.service import CronService
     from hermitcrab.cron.types import CronSchedule
 
     if tz and not cron_expr:
@@ -1436,8 +1420,7 @@ def cron_add(
         console.print("[red]Error: Must specify --every, --cron, or --at[/red]")
         raise typer.Exit(1)
 
-    store_path = get_data_dir() / "cron" / "jobs.json"
-    service = CronService(store_path)
+    service = _build_cron_service()
 
     try:
         job = service.add_job(
@@ -1460,11 +1443,7 @@ def cron_remove(
     job_id: str = typer.Argument(..., help="Job ID to remove"),
 ):
     """Remove a scheduled job."""
-    from hermitcrab.config.loader import get_data_dir
-    from hermitcrab.cron.service import CronService
-
-    store_path = get_data_dir() / "cron" / "jobs.json"
-    service = CronService(store_path)
+    service = _build_cron_service()
 
     if service.remove_job(job_id):
         console.print(f"[green]✓[/green] Removed job {job_id}")
@@ -1478,11 +1457,7 @@ def cron_enable(
     disable: bool = typer.Option(False, "--disable", help="Disable instead of enable"),
 ):
     """Enable or disable a job."""
-    from hermitcrab.config.loader import get_data_dir
-    from hermitcrab.cron.service import CronService
-
-    store_path = get_data_dir() / "cron" / "jobs.json"
-    service = CronService(store_path)
+    service = _build_cron_service()
 
     job = service.enable_job(job_id, enabled=not disable)
     if job:
@@ -1502,8 +1477,6 @@ def cron_run(
 
     from hermitcrab.agent.loop import AgentLoop
     from hermitcrab.bus.queue import MessageBus
-    from hermitcrab.config.loader import get_data_dir
-    from hermitcrab.cron.service import CronService
     from hermitcrab.cron.types import CronJob
 
     logger.disable("hermitcrab")
@@ -1517,8 +1490,7 @@ def cron_run(
         **_build_agent_loop_kwargs(config, provider),
     )
 
-    store_path = get_data_dir() / "cron" / "jobs.json"
-    service = CronService(store_path)
+    service = _build_cron_service()
 
     result_holder = []
 

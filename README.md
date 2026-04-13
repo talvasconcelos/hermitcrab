@@ -5,9 +5,9 @@
 [![Python ≥3.11](https://img.shields.io/badge/python-≥3.11-blue)](https://python.org)
 [![MIT License](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 
-> Current release line: `0.1.0b1` beta
+> Current release line: `0.1.0b2` beta
 
-This is the first beta line: usable, local-first, and already good for real daily workflows, but still actively hardening around edge cases, polish, and long-session reliability.
+This is the current beta line: usable, local-first, and already good for real daily workflows, with beta2 focused on cleaner long-session behavior, stronger workspace trust, better setup/diagnostics, and practical reminders and people context.
 
 ### What is HermitCrab, really?
 
@@ -197,6 +197,15 @@ The installer itself is meant to be generic for Unix-like systems; the `systemd 
 
 You're now talking to your own persistent, memory-aware agent.
 
+### What's new in beta2
+
+- One-command installer for a clean local setup under `~/.local/share/hermitcrab`
+- Stronger onboarding and diagnostics for getting providers and runtime config working
+- Filesystem-backed reminder artifacts and more reliable reminder delivery
+- A first `people` primitive with profiles, linked follow-ups, interaction history, primary-person handling, and duplicate guards
+- Tighter prompt history, session cognition, and resume ordering for long-lived conversations
+- Harder edges around destructive shell actions and other trust-sensitive flows
+
 ### Useful first commands
 
 ```bash
@@ -255,7 +264,7 @@ Distillation is conservative and optional by design. Explicit memory writes rema
 
 ### Channels — where you talk to your crab
 
-- **Nostr** (default / primary) — encrypted DMs (NIP-04 + NIP-17 groups coming)  
+- **Nostr** (default / primary) — encrypted DMs today; modern NIP-17/group work is planned for beta3  
 - **Telegram** — classic bot  
 - **Email** — IMAP/SMTP  
 - **CLI** — quick local chats
@@ -353,12 +362,12 @@ Production-minded defaults are in `hermitcrab/config/schema.py` and are written 
 
 ### Beta focus
 
-For `0.1.0b1`, the priorities are:
+For `0.1.0b2`, the priorities are:
 
-- strong local-first UX
-- clean, low-duplication memory
-- reliable tool use and session continuity
-- smooth onboarding and diagnostics
+- dependable long-session behavior
+- trustworthy workspace writes and conservative artifact handling
+- mainstream-user usefulness for reminders, follow-ups, people context, and recall
+- smoother onboarding, setup, and diagnostics
 - a product that feels good for both power users and everyday household use
 
 ### Why I built this
