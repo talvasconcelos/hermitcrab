@@ -66,6 +66,7 @@ from hermitcrab.agent.pending_work import (
     snippet,
 )
 from hermitcrab.agent.people import PeopleStore
+from hermitcrab.agent.prompt_history import build_prompt_history
 from hermitcrab.agent.reflection import ReflectionService
 from hermitcrab.agent.reminders import ReminderStore
 from hermitcrab.agent.session_lifecycle import SessionLifecycleManager
@@ -265,7 +266,10 @@ class AgentLoop:
         self.knowledge = KnowledgeStore(workspace)
         self.lists = ListStore(workspace)
         self.people = PeopleStore(workspace)
-        self.reminders = ReminderStore(workspace, cron_service) if cron_service else None
+        self.reminders = ReminderStore(
+            workspace,
+            legacy_cron_store_path=(cron_service.store_path if cron_service else None),
+        )
         self.tools = ToolRegistry(default_policy=build_main_agent_policy())
         self.execution_state = ExecutionStateTracker()
         self.subagents = SubagentManager(
@@ -403,7 +407,14 @@ class AgentLoop:
         finally:
             self._mcp_connecting = False
 
-    def _set_tool_context(self, channel: str, chat_id: str, message_id: str | None = None) -> None:
+    def _set_tool_context(
+        self,
+        channel: str,
+        chat_id: str,
+        message_id: str | None = None,
+        *,
+        spawn_brief: str | None = None,
+    ) -> None:
         """Update context for all tools that need routing info."""
         if message_tool := self.tools.get("message"):
             if isinstance(message_tool, MessageTool):
@@ -411,17 +422,52 @@ class AgentLoop:
 
         if spawn_tool := self.tools.get("spawn"):
             if isinstance(spawn_tool, SpawnTool):
-                spawn_tool.set_context(channel, chat_id)
+                spawn_tool.set_context(channel, chat_id, brief=spawn_brief)
 
         if cron_tool := self.tools.get("cron"):
             if isinstance(cron_tool, CronTool):
                 cron_tool.set_context(channel, chat_id)
         if reminder_tool := self.tools.get("reminder"):
             if isinstance(reminder_tool, ReminderTool):
-                reminder_tool.set_context(channel, chat_id)
+                delivery_channel, delivery_chat_id = self._resolve_reminder_delivery_target(
+                    channel,
+                    chat_id,
+                )
+                reminder_tool.set_context(
+                    channel,
+                    chat_id,
+                    delivery_channel=delivery_channel,
+                    delivery_chat_id=delivery_chat_id,
+                )
         if person_tool := self.tools.get("person_profile"):
             if isinstance(person_tool, PersonProfileTool):
                 person_tool.set_context(channel, chat_id)
+
+    def _resolve_reminder_delivery_target(self, channel: str, chat_id: str) -> tuple[str, str]:
+        """Prefer the latest active external session when reminders are created from CLI."""
+        if channel not in {"cli", "system"} and chat_id:
+            return channel, chat_id
+
+        enabled_external_channels: set[str] = set()
+        if self.channels_config is not None:
+            for name in ("telegram", "email", "nostr"):
+                cfg = getattr(self.channels_config, name, None)
+                if getattr(cfg, "enabled", False):
+                    enabled_external_channels.add(name)
+
+        for item in self.sessions.list_sessions():
+            key = str(item.get("key") or "")
+            if ":" not in key:
+                continue
+            session_channel, session_chat_id = key.split(":", 1)
+            if session_channel in {"cli", "system", "cron", "heartbeat"}:
+                continue
+            if enabled_external_channels and session_channel not in enabled_external_channels:
+                continue
+            if session_chat_id:
+                return session_channel, session_chat_id
+
+        return channel, chat_id
 
     @staticmethod
     def _strip_think(text: str | None) -> str | None:
@@ -451,6 +497,65 @@ class AgentLoop:
             )
 
         return ", ".join(_fmt(tc) for tc in tool_calls)
+
+    @staticmethod
+    def _extract_brief_paths(text: str) -> list[str]:
+        """Extract likely file or workspace paths from compact text."""
+        candidates = re.findall(r"(?:~?/[\w./-]+|[\w.-]+\.(?:py|md|json|yaml|yml|toml|txt))", text)
+        paths: list[str] = []
+        seen: set[str] = set()
+        for candidate in candidates:
+            value = clean_snippet(candidate, max_chars=120)
+            if value in seen:
+                continue
+            seen.add(value)
+            paths.append(value)
+            if len(paths) >= 4:
+                break
+        return paths
+
+    def _build_subagent_brief(
+        self,
+        current_message: str,
+        history: list[dict[str, Any]],
+        session: Session,
+    ) -> str:
+        """Build a compact, deterministic handoff brief for delegated work."""
+        lines = [f"- Current request: {clean_snippet(current_message, max_chars=240)}"]
+
+        recent_visible = [
+            message
+            for message in history
+            if message.get("role") in {"user", "assistant"}
+            and isinstance(message.get("content"), str)
+            and message["content"].strip()
+        ]
+        if recent_visible:
+            lines.append("- Recent visible context:")
+            for message in recent_visible[-3:]:
+                role = str(message.get("role") or "unknown")
+                content = clean_snippet(message.get("content"), max_chars=180)
+                lines.append(f"  - {role}: {content}")
+
+        pending = PendingWork.from_metadata(session.metadata)
+        if pending:
+            lines.append(f"- Pending work origin: {snippet(pending.origin_request, max_chars=180)}")
+            if pending.last_failure:
+                lines.append(f"- Previous blocker: {snippet(pending.last_failure, max_chars=180)}")
+
+        path_text = " ".join(
+            str(message.get("content") or "")
+            for message in recent_visible[-4:]
+            if isinstance(message.get("content"), str)
+        )
+        paths = self._extract_brief_paths(f"{current_message} {path_text}")
+        if paths:
+            lines.append(f"- Referenced paths: {', '.join(paths)}")
+
+        lines.append(
+            "- Use this brief as local task context only; do not assume access to the full parent conversation."
+        )
+        return "\n".join(lines)
 
     def _get_model_for_job(self, job_class: JobClass) -> str | None:
         """
@@ -1015,18 +1120,25 @@ class AgentLoop:
             if slash_response is not None:
                 return slash_response
 
-            self._set_tool_context(msg.channel, msg.chat_id, msg.metadata.get("message_id"))
+            history = session.get_history(max_messages=self.memory_window)
+            history_for_prompt = build_prompt_history(history)
+            if not history_for_prompt:
+                archived_history = self.sessions.get_resume_history(
+                    key,
+                    query=msg.content,
+                    max_messages=min(24, self.memory_window),
+                )
+                history_for_prompt = build_prompt_history(archived_history)
+            spawn_brief = self._build_subagent_brief(msg.content, history_for_prompt, session)
+            self._set_tool_context(
+                msg.channel,
+                msg.chat_id,
+                msg.metadata.get("message_id"),
+                spawn_brief=spawn_brief,
+            )
             if message_tool := self.tools.get("message"):
                 if isinstance(message_tool, MessageTool):
                     message_tool.start_turn()
-
-            history = session.get_history(max_messages=self.memory_window)
-            history_for_prompt = history
-            if not history_for_prompt:
-                history_for_prompt = self.sessions.get_recent_archived_history(
-                    key,
-                    max_messages=min(12, self.memory_window),
-                )
             build_result = self._build_interactive_messages(
                 msg,
                 scratchpad_path,
@@ -1097,9 +1209,8 @@ class AgentLoop:
         session: Session,
     ) -> OutboundMessage:
         """Run reflection on demand for the current conversation."""
-        before = len(self.memory.list_memories("reflections"))
         try:
-            await self._background_jobs.reflect_on_session_from_messages(
+            outcome = await self._background_jobs.reflect_on_session_from_messages(
                 list(session.messages),
                 session_key,
             )
@@ -1108,13 +1219,35 @@ class AgentLoop:
             return self._reply(msg, "Reflection failed for this conversation.")
 
         after_items = self.memory.list_memories("reflections")
-        if len(after_items) > before and after_items:
+        if outcome.status == "saved" and after_items:
             latest = after_items[0]
             return self._reply(
                 msg,
                 "Reflection complete.\n"
                 f"Saved: {latest.title}\n"
                 f"Path: {latest.file_path}",
+            )
+
+        if outcome.status == "failed":
+            return self._reply(
+                msg,
+                "Reflection failed for this conversation.\n"
+                f"Reason: {outcome.reason}",
+            )
+
+        if outcome.reason == "duplicate_or_contradictory":
+            detail = f"\nExisting reflection: {outcome.title}" if outcome.title else ""
+            return self._reply(
+                msg,
+                "Reflection complete. No new reflection was saved because the learning "
+                f"already appears to be covered.{detail}",
+            )
+
+        if outcome.reason not in {"No new insights", "no_insights"}:
+            return self._reply(
+                msg,
+                "Reflection complete. No new reflection was saved.\n"
+                f"Reason: {outcome.reason}",
             )
 
         return self._reply(msg, "Reflection complete. No new reflection was saved.")
@@ -1159,7 +1292,7 @@ class AgentLoop:
         scratchpad_path: Path,
         history: list[dict[str, Any]],
         session: Session,
-    ) -> InteractiveTurnBuildResult:
+        ) -> InteractiveTurnBuildResult:
         """Build the interactive message list and insert deterministic hints when needed."""
         self.skill_runtime.maybe_activate(
             session.metadata,

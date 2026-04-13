@@ -72,6 +72,41 @@ def is_subagent_completion_prompt(content: str) -> bool:
     )
 
 
+def parse_subagent_completion_prompt(content: str) -> dict[str, str] | None:
+    """Extract structured fields from a synthetic subagent completion prompt."""
+    if not is_subagent_completion_prompt(content):
+        return None
+
+    header_match = re.search(
+        r"^\[Subagent '(.+)' (completed successfully|completed partially|failed)\]\s*$",
+        content,
+        flags=re.MULTILINE,
+    )
+    if not header_match:
+        return None
+
+    def _field(label: str) -> str:
+        match = re.search(rf"(?m)^{re.escape(label)}:\s*(.+)$", content)
+        return match.group(1).strip() if match else ""
+
+    result_match = re.search(
+        r"(?ms)^Result:\s*\n(.*?)\n\s*Write a user-facing completion update\.\s*$",
+        content,
+    )
+    result = result_match.group(1).strip() if result_match else ""
+
+    return {
+        "label": header_match.group(1).strip(),
+        "status": header_match.group(2).strip(),
+        "task": _field("Task"),
+        "profile": _field("Profile"),
+        "exit_reason": _field("Exit reason"),
+        "tools_used": _field("Tools used"),
+        "files": _field("Files"),
+        "result": result,
+    }
+
+
 def extract_subagent_task(content: str) -> str:
     """Extract delegated task text from a synthetic subagent completion prompt."""
     match = re.search(r"\nTask:\s*(.*?)\n\nResult:\n", content, flags=re.DOTALL)

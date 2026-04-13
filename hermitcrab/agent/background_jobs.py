@@ -165,12 +165,12 @@ class BackgroundJobManager:
         )
 
     async def reflect_on_session(self, session: Any) -> None:
-        await self._journal_manager.reflect_on_session(session)
+        return await self._journal_manager.reflect_on_session(session)
 
     async def reflect_on_session_from_messages(
         self, messages: list[dict[str, Any]], session_key: str
     ) -> None:
-        await self._journal_manager.reflect_on_session_from_messages(messages, session_key)
+        return await self._journal_manager.reflect_on_session_from_messages(messages, session_key)
 
     def save_turn(
         self,

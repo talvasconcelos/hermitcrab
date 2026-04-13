@@ -396,7 +396,7 @@ class WriteTaskTool(Tool):
         return (
             "Save a task to memory (action items, todos, things to do). "
             "Use only when someone should actually do or track the item. "
-            "Do not use for reference lists, shopping lists, checklists, or notes that should live in knowledge. "
+            "Do not use for reference notes or checklists/shopping lists that should live in the first-class lists surface. "
             "Use wikilinks [[Like This]] to connect to related [[Goals]], [[Decisions]], or other [[Tasks]]. "
             "Example: 'Implement feature X for [[Project Alpha]] to achieve [[Q2 Goals]].'"
         )

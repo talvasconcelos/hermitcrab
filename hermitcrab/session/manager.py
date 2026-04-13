@@ -1,6 +1,7 @@
 """Session management for conversation history."""
 
 import json
+import re
 import shutil
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
@@ -10,6 +11,17 @@ from typing import Any
 from loguru import logger
 
 from hermitcrab.utils.helpers import ensure_dir, safe_filename
+
+
+def _clean_snippet(value: Any, *, max_chars: int = 160) -> str:
+    """Normalize text snippets locally to avoid importing the agent package."""
+    if value is None:
+        return ""
+    text = str(value).strip().replace("\n", " ")
+    text = re.sub(r"\s+", " ", text)
+    if len(text) > max_chars:
+        return text[: max_chars - 3].rstrip() + "..."
+    return text
 
 
 @dataclass
@@ -105,6 +117,28 @@ class Session:
             out.append(entry)
         return out
 
+    def get_recent_visible_dialogue(
+        self,
+        *,
+        max_messages: int = 6,
+        max_chars: int = 240,
+    ) -> list[dict[str, str]]:
+        """Return recent user/assistant turns with tool scaffolding removed."""
+        visible: list[dict[str, str]] = []
+        for message in reversed(self.messages):
+            role = str(message.get("role") or "")
+            if role not in {"user", "assistant"}:
+                continue
+            if role == "assistant" and message.get("tool_calls"):
+                continue
+            content = message.get("content")
+            if not isinstance(content, str) or not content.strip():
+                continue
+            visible.append({"role": role, "content": _clean_snippet(content, max_chars=max_chars)})
+            if len(visible) >= max_messages:
+                break
+        return list(reversed(visible))
+
     def clear(self) -> None:
         """Clear all messages and reset session to initial state."""
         self.messages = []
@@ -140,7 +174,7 @@ class SessionManager:
         safe_key = safe_filename(key.replace(":", "_"))
         return sorted(
             self.archive_dir.glob(f"{safe_key}-*.jsonl"),
-            key=lambda path: path.name,
+            key=self._archive_sort_key,
             reverse=True,
         )
 
@@ -297,6 +331,45 @@ class SessionManager:
                 return history
         return []
 
+    def get_resume_history(
+        self,
+        key: str,
+        *,
+        query: str | None,
+        max_messages: int = 24,
+        recent_max_age: timedelta = timedelta(days=3),
+        relevance_max_age: timedelta = timedelta(days=30),
+    ) -> list[dict[str, Any]]:
+        """Return archived same-chat history that is recent or relevant to the new turn."""
+        now = datetime.now(timezone.utc)
+        normalized_query = self._normalize_query(query)
+
+        for path in self._archived_session_paths(key):
+            try:
+                session = self._load_from_path(path, key=key)
+            except Exception:
+                logger.exception("Failed to load archived resume context from {}", path)
+                continue
+
+            age = now - session.updated_at.astimezone(timezone.utc)
+            if age > relevance_max_age:
+                return []
+
+            history = session.get_history(max_messages=max_messages)
+            if not history:
+                continue
+
+            if age <= recent_max_age:
+                return history
+
+            if self._query_signals_resume(normalized_query):
+                return history
+
+            if normalized_query and self._history_matches_query(history, normalized_query):
+                return history
+
+        return []
+
     def search_history(
         self,
         query: str,
@@ -379,6 +452,69 @@ class SessionManager:
             if len(excerpts) >= 2:
                 break
         return excerpts
+
+    @staticmethod
+    def _normalize_query(query: str | None) -> str:
+        return " ".join((query or "").strip().lower().split())
+
+    @staticmethod
+    def _archive_sort_key(path: Path) -> tuple[datetime, float, str]:
+        """Sort archives by embedded timestamp instead of lexical reason labels."""
+        mtime = path.stat().st_mtime
+        match = re.search(r"-(\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2})\.jsonl$", path.name)
+        if match:
+            try:
+                timestamp = datetime.strptime(match.group(1), "%Y-%m-%dT%H-%M-%S")
+                return timestamp, mtime, path.name
+            except ValueError:
+                pass
+        return datetime.fromtimestamp(mtime), mtime, path.name
+
+    @staticmethod
+    def _query_signals_resume(normalized_query: str) -> bool:
+        if not normalized_query:
+            return False
+        if len(normalized_query) <= 24:
+            return normalized_query in {
+                "so",
+                "so?",
+                "and",
+                "and?",
+                "continue",
+                "continue.",
+                "go on",
+                "what now",
+                "where were we",
+                "where were we?",
+                "what were we doing",
+                "what were we doing?",
+                "pick this back up",
+                "resume",
+                "resume?",
+            }
+        return False
+
+    @staticmethod
+    def _history_matches_query(history: list[dict[str, Any]], normalized_query: str) -> bool:
+        query_tokens = {
+            token
+            for token in re.findall(r"[a-z0-9]+", normalized_query)
+            if len(token) >= 4
+        }
+        if not query_tokens:
+            return False
+
+        history_text = " ".join(
+            str(message.get("content") or "")
+            for message in history
+            if message.get("role") in {"user", "assistant", "tool"}
+        ).lower()
+        history_tokens = {
+            token
+            for token in re.findall(r"[a-z0-9]+", history_text)
+            if len(token) >= 4
+        }
+        return len(query_tokens & history_tokens) >= 1
 
     def list_sessions(self) -> list[dict[str, Any]]:
         """

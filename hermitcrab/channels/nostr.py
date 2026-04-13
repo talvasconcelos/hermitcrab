@@ -18,6 +18,27 @@ from hermitcrab.channels.base import BaseChannel
 from hermitcrab.config.schema import NostrConfig
 
 
+def _split_message(content: str, max_len: int = 1800) -> list[str]:
+    """Split long outbound messages into relay/client-friendlier chunks."""
+    if len(content) <= max_len:
+        return [content]
+
+    chunks: list[str] = []
+    while content:
+        if len(content) <= max_len:
+            chunks.append(content)
+            break
+        cut = content[:max_len]
+        pos = cut.rfind("\n")
+        if pos == -1:
+            pos = cut.rfind(" ")
+        if pos == -1:
+            pos = max_len
+        chunks.append(content[:pos])
+        content = content[pos:].lstrip()
+    return chunks
+
+
 class NostrChannel(BaseChannel):
     """Nostr channel for NIP-04 encrypted DMs using WebSocket connections."""
 
@@ -386,21 +407,34 @@ class NostrChannel(BaseChannel):
             return
 
         try:
-            dm = self.EncryptedDirectMessage()
-            dm.encrypt(private_key_hex=self._hex_priv, recipient_pubkey=recipient_pubkey, cleartext_content=content)
-            event = dm.to_event()
-            event.sign(self._hex_priv)
-            publish_msg = event.to_message()
+            chunks = _split_message(content)
+            for index, chunk in enumerate(chunks, start=1):
+                dm = self.EncryptedDirectMessage()
+                dm.encrypt(
+                    private_key_hex=self._hex_priv,
+                    recipient_pubkey=recipient_pubkey,
+                    cleartext_content=chunk,
+                )
+                event = dm.to_event()
+                event.sign(self._hex_priv)
+                publish_msg = event.to_message()
 
-            for relay_url, ws in await self._connection_snapshot():
-                try:
-                    await ws.send(publish_msg)
-                except Exception as e:
-                    logger.warning("Failed to publish to {}: {}", relay_url, e)
-                    await self._remove_connection_if_same(relay_url, ws)
+                for relay_url, ws in await self._connection_snapshot():
+                    try:
+                        await ws.send(publish_msg)
+                    except Exception as e:
+                        logger.warning("Failed to publish to {}: {}", relay_url, e)
+                        await self._remove_connection_if_same(relay_url, ws)
 
-            logger.info("Sent DM to {}... (event={}...)", recipient_pubkey[:8], event.id[:8] if event.id else "unknown")
-            await asyncio.sleep(1)
+                logger.info(
+                    "Sent DM chunk {}/{} to {}... (event={}..., chars={})",
+                    index,
+                    len(chunks),
+                    recipient_pubkey[:8],
+                    event.id[:8] if event.id else "unknown",
+                    len(chunk),
+                )
+                await asyncio.sleep(1)
         except Exception as e:
             logger.error("Failed to send Nostr DM: {}", e)
 

@@ -126,6 +126,14 @@ class PersonProfileTool(Tool):
                     "type": "string",
                     "description": "One-time ISO datetime for a follow-up reminder",
                 },
+                "event_at": {
+                    "type": "string",
+                    "description": "Actual event ISO datetime when using a lead-time follow-up",
+                },
+                "remind_offset_minutes": {
+                    "type": "integer",
+                    "description": "Minutes before event_at to trigger the follow-up reminder",
+                },
                 "every_seconds": {
                     "type": "integer",
                     "description": "Recurring interval in seconds for a follow-up reminder",
@@ -164,6 +172,8 @@ class PersonProfileTool(Tool):
         message: str = "",
         schedule_kind: str = "",
         at: str = "",
+        event_at: str = "",
+        remind_offset_minutes: int | None = None,
         every_seconds: int | None = None,
         cron_expr: str = "",
         tz: str = "",
@@ -311,20 +321,32 @@ class PersonProfileTool(Tool):
                 return "Error: query is required for follow_up"
             person = self.people.get_profile(lookup)
             if person is None:
-                return f"People profile not found: {lookup}"
-            if not message.strip():
-                return "Error: message is required for follow_up"
+                person = self.people.upsert_profile(
+                    name=lookup,
+                    role="contact",
+                    status="active",
+                    existing_query=lookup,
+                )
+            schedule_kind = schedule_kind.strip() or self._infer_follow_up_schedule_kind(
+                at=at,
+                event_at=event_at,
+                every_seconds=every_seconds,
+                cron_expr=cron_expr,
+            )
             if not schedule_kind:
-                return "Error: schedule_kind is required for follow_up"
+                return "Error: follow_up requires a schedule (at, event_at, every_seconds, or cron_expr)"
             reminder_title = title.strip() or f"Follow up with {person.name}"
+            reminder_message = message.strip() or reminder_title
             try:
                 reminder = self.reminders.upsert_reminder(
                     title=reminder_title,
-                    message=message.strip(),
+                    message=reminder_message,
                     schedule_kind=schedule_kind,
                     channel=self._channel,
                     chat_id=self._chat_id,
                     at=at or None,
+                    event_at=event_at or None,
+                    remind_offset_minutes=remind_offset_minutes,
                     every_seconds=every_seconds,
                     cron_expr=cron_expr or None,
                     tz=tz or None,
@@ -340,3 +362,19 @@ class PersonProfileTool(Tool):
             )
 
         return f"Error: Unknown action: {action}"
+
+    @staticmethod
+    def _infer_follow_up_schedule_kind(
+        *,
+        at: str,
+        event_at: str,
+        every_seconds: int | None,
+        cron_expr: str,
+    ) -> str:
+        if at.strip() or event_at.strip():
+            return "at"
+        if every_seconds is not None:
+            return "every"
+        if cron_expr.strip():
+            return "cron"
+        return ""

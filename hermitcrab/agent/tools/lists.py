@@ -21,7 +21,7 @@ class ShowListTool(Tool):
     @property
     def description(self) -> str:
         return (
-            "Show a generic user list stored in knowledge, such as groceries, car parts, gift ideas, "
+            "Show a generic user list stored in the first-class lists surface, such as groceries, car parts, gift ideas, "
             "packing lists, school supplies, or errands. These are stored as updateable checklists. "
             "Use for requests like 'what's still needed', "
             "'show my list', or 'I'm at the supermarket, what do I need?'."
@@ -90,7 +90,7 @@ class AddListItemsTool(Tool):
     @property
     def description(self) -> str:
         return (
-            "Add items to a generic checklist in knowledge. Creates the checklist if it does not exist yet. "
+            "Add items to a generic checklist in the first-class lists surface. Creates the checklist if it does not exist yet. "
             "Use for groceries, gift ideas, BBQ supplies, car parts, packing lists, and similar updateable lists."
         )
 
@@ -243,7 +243,7 @@ class DeleteListTool(Tool):
     @property
     def description(self) -> str:
         return (
-            "Delete a generic checklist from knowledge when the user explicitly says the whole list is done, "
+            "Delete a generic checklist from the first-class lists surface when the user explicitly says the whole list is done, "
             "obsolete, or should be removed."
         )
 

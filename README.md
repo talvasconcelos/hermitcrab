@@ -33,7 +33,26 @@ Just move the `workspace/` folder and you’re back in business — same memorie
 **Same crab, new shell.**  
 Move your workspace anywhere. The agent picks up exactly where it left off.
 
-### Quick Start (3 commands)
+### Quick Start
+
+**Easy install**
+
+This avoids global `pip` and installs HermitCrab into its own virtual environment under `~/.local/share/hermitcrab`:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/talvasconcelos/hermitcrab/main/scripts/install.sh | bash
+```
+
+Optional: also install and enable a user-level gateway service:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/talvasconcelos/hermitcrab/main/scripts/install.sh | bash -s -- --systemd-user --enable-service --start-service
+```
+
+The service runs `hermitcrab gateway` via `systemd --user`, which is the right long-running mode for channels, reminders, and heartbeat-driven work.
+The installer itself is meant to be generic for Unix-like systems; the `systemd --user` service step is Linux-specific.
+
+**Manual install (3 commands)**
 
 1. **Install**  
    ```bash
@@ -359,8 +378,8 @@ Keep it yours. Keep it local. Keep it simple. 🦀
 ### Get started
 
 ```bash
-pip install hermitcrab-ai
-hermitcrab onboard
+curl -fsSL https://raw.githubusercontent.com/talvasconcelos/hermitcrab/main/scripts/install.sh | bash
+hermitcrab doctor
 hermitcrab agent
 ```
 

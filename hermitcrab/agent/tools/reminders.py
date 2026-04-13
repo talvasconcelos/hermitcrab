@@ -15,10 +15,21 @@ class ReminderTool(Tool):
         self.reminders = reminders
         self._channel = ""
         self._chat_id = ""
+        self._delivery_channel = ""
+        self._delivery_chat_id = ""
 
-    def set_context(self, channel: str, chat_id: str) -> None:
+    def set_context(
+        self,
+        channel: str,
+        chat_id: str,
+        *,
+        delivery_channel: str | None = None,
+        delivery_chat_id: str | None = None,
+    ) -> None:
         self._channel = channel
         self._chat_id = chat_id
+        self._delivery_channel = delivery_channel or channel
+        self._delivery_chat_id = delivery_chat_id or chat_id
 
     @property
     def name(self) -> str:
@@ -28,7 +39,9 @@ class ReminderTool(Tool):
     def description(self) -> str:
         return (
             "Manage first-class reminders and simple recurring events. Use this instead of raw cron "
-            "for user-facing reminders, recurring schedules, inspection, updates, and cancellation."
+            "for user-facing reminders, recurring schedules, inspection, updates, and cancellation. "
+            "When the user gives an event time and wants advance notice, prefer event_at plus "
+            "remind_offset_minutes instead of firing exactly at the event time."
         )
 
     @property
@@ -55,6 +68,14 @@ class ReminderTool(Tool):
                 "at": {
                     "type": "string",
                     "description": "One-time ISO datetime, e.g. 2026-04-09T09:00:00",
+                },
+                "event_at": {
+                    "type": "string",
+                    "description": "Actual event ISO datetime when using a lead-time reminder, e.g. meeting starts at 12:00",
+                },
+                "remind_offset_minutes": {
+                    "type": "integer",
+                    "description": "Minutes before event_at to trigger the reminder, e.g. 10 for 'remind me 10 minutes earlier'",
                 },
                 "every_seconds": {
                     "type": "integer",
@@ -84,6 +105,8 @@ class ReminderTool(Tool):
         message: str = "",
         schedule_kind: str = "",
         at: str = "",
+        event_at: str = "",
+        remind_offset_minutes: int | None = None,
         every_seconds: int | None = None,
         cron_expr: str = "",
         tz: str = "",
@@ -103,6 +126,8 @@ class ReminderTool(Tool):
                 message=message,
                 schedule_kind=schedule_kind,
                 at=at,
+                event_at=event_at,
+                remind_offset_minutes=remind_offset_minutes,
                 every_seconds=every_seconds,
                 cron_expr=cron_expr,
                 tz=tz,
@@ -149,6 +174,8 @@ class ReminderTool(Tool):
         message: str,
         schedule_kind: str,
         at: str,
+        event_at: str,
+        remind_offset_minutes: int | None,
         every_seconds: int | None,
         cron_expr: str,
         tz: str,
@@ -166,9 +193,11 @@ class ReminderTool(Tool):
                 title=title.strip(),
                 message=message.strip(),
                 schedule_kind=schedule_kind,
-                channel=self._channel,
-                chat_id=self._chat_id,
+                channel=self._delivery_channel or self._channel,
+                chat_id=self._delivery_chat_id or self._chat_id,
                 at=at or None,
+                event_at=event_at or None,
+                remind_offset_minutes=remind_offset_minutes,
                 every_seconds=every_seconds,
                 cron_expr=cron_expr or None,
                 tz=tz or None,

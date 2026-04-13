@@ -102,6 +102,9 @@ class ContextBuilder:
         fixed_tokens = estimate_text_tokens(fixed_prompt)
 
         optional_parts: list[str] = []
+        subagent_models = self._build_subagent_models_section()
+        if subagent_models:
+            optional_parts.append(subagent_models)
         active_skills_summary = self._build_active_skills_summary(always_skills)
         if active_skills_summary:
             optional_parts.append(f"# Active Skills\n\n{active_skills_summary}")
@@ -141,8 +144,11 @@ class ContextBuilder:
 
         fixed_prompt = "\n\n---\n\n".join(fixed_parts)
         fixed_tokens = estimate_text_tokens(fixed_prompt)
+        memory_floor_tokens = 0
+        if current_message and fixed_tokens <= self.prompt_token_budget + 160:
+            memory_floor_tokens = min(80, self.prompt_token_budget // 10)
         available_memory_tokens = max(
-            0,
+            memory_floor_tokens,
             self.prompt_token_budget
             - fixed_tokens
             - reserved_history_tokens
@@ -216,42 +222,10 @@ class ContextBuilder:
         """Get the core identity section."""
         now = datetime.now().strftime("%Y-%m-%d %H:%M (%A)")
         tz = _time.strftime("%Z") or "UTC"
-        workspace_path = str(self.workspace.expanduser().resolve())
+        workspace_root = self.workspace.expanduser().resolve()
+        workspace_path = str(workspace_root)
         system = platform.system()
         runtime = f"{'macOS' if system == 'Darwin' else system} {platform.machine()}, Python {platform.python_version()}"
-
-        # Format named models and aliases for subagent selection hints.
-        named_section = ""
-        if self.named_models:
-            named_lines = []
-            for name, model in self.named_models.items():
-                details = model.model
-                if model.reasoning_effort is not None:
-                    details += f" (reasoning: {model.reasoning_effort})"
-                named_lines.append(f"- **{name}**: {details}")
-            named_section = "\n".join(named_lines)
-        else:
-            named_section = "- No named models configured"
-
-        aliases_section = ""
-        if self.model_aliases:
-            alias_lines = []
-            for alias, model in self.model_aliases.items():
-                if isinstance(model, ModelAliasConfig):
-                    details = model.model
-                    if model.model in self.named_models:
-                        details = f"{model.model} -> {self.named_models[model.model].model}"
-                    if model.effective_reasoning_effort() == "none":
-                        details += " (thinking disabled)"
-                    alias_lines.append(f"- **{alias}**: {details}")
-                else:
-                    details = model
-                    if model in self.named_models:
-                        details = f"{model} -> {self.named_models[model].model}"
-                    alias_lines.append(f"- **{alias}**: {details}")
-            aliases_section = "\n".join(alias_lines)
-        else:
-            aliases_section = "- No custom aliases configured"
 
         return f"""# hermitcrab
 
@@ -265,6 +239,15 @@ class ContextBuilder:
 Your workspace is at: {workspace_path}
 - Custom skills: {workspace_path}/skills/{{skill-name}}/SKILL.md
 - Bootstrap files in the workspace define repo policy, file placement, and long-term memory rules.
+
+## Surroundings
+- Workspace surfaces by purpose:
+  memory={workspace_root / "memory"} | knowledge={workspace_root / "knowledge"} | lists={workspace_root / "lists"} | people={workspace_root / "people"} | reminders={workspace_root / "reminders"} | sessions={workspace_root / "sessions"} | scratchpads={workspace_root / "scratchpads"} | prompts={workspace_root / "prompts"} | skills={workspace_root / "skills"}
+- `scratchpads/` is transient working state. `sessions/` is conversation history. The other stores are durable and should be treated as authoritative for their own type of state.
+
+## Operating Stance
+- Inspect real workspace artifacts, prompts, bootstrap files, and relevant code paths before claiming state or diagnosing a HermitCrab problem.
+- Use the authoritative store for the type of state involved instead of blurring reminders, lists, people, knowledge, memory, and scratchpad notes.
 
 Reply directly for normal conversation. Only use `message` to send to a specific chat channel.
 
@@ -288,20 +271,50 @@ Reply directly for normal conversation. Only use `message` to send to a specific
 - Retrieved memory snippets in prompt context are helpful, but they are not authoritative proof of a write or update in this turn.
 - If you claim a durable fact is already stored, verify it with a memory read/search tool. If you claim you saved or updated memory, do it with the typed memory write tools in the same turn.
 
-## Models For Subagents
-You can spawn subagents with configured named models, optional aliases, or full model names. Choose the right model for the job:
-
-Named models:
-{named_section}
-
-Aliases:
-{aliases_section}
-
-To spawn a subagent with a specific model:
-- spawn(task="...", label="...", model="fast_model")
-- spawn(task="...", label="...", model="qwen")
-
 Use subagents for complex, time-consuming, or specialized tasks. For substantial coding or multi-file implementation work, prefer `spawn()` and stay responsive as the coordinator. When delegating, be explicit about the desired outcome, files to inspect or edit, constraints, and what the subagent should report back."""
+
+    def _build_subagent_models_section(self) -> str:
+        """Build optional named-model guidance for subagent selection."""
+        if self.named_models:
+            named_lines = []
+            for name, model in self.named_models.items():
+                details = model.model
+                if model.reasoning_effort is not None:
+                    details += f" (reasoning: {model.reasoning_effort})"
+                named_lines.append(f"- **{name}**: {details}")
+            named_section = "\n".join(named_lines)
+        else:
+            named_section = "- No named models configured"
+
+        if self.model_aliases:
+            alias_lines = []
+            for alias, model in self.model_aliases.items():
+                if isinstance(model, ModelAliasConfig):
+                    details = model.model
+                    if model.model in self.named_models:
+                        details = f"{model.model} -> {self.named_models[model.model].model}"
+                    if model.effective_reasoning_effort() == "none":
+                        details += " (thinking disabled)"
+                    alias_lines.append(f"- **{alias}**: {details}")
+                else:
+                    details = model
+                    if model in self.named_models:
+                        details = f"{model} -> {self.named_models[model].model}"
+                    alias_lines.append(f"- **{alias}**: {details}")
+            aliases_section = "\n".join(alias_lines)
+        else:
+            aliases_section = "- No custom aliases configured"
+
+        return (
+            "# Models For Subagents\n\n"
+            "You can spawn subagents with configured named models, optional aliases, or full "
+            "model names. Choose the right model for the job.\n\n"
+            f"Named models:\n{named_section}\n\n"
+            f"Aliases:\n{aliases_section}\n\n"
+            "To spawn a subagent with a specific model:\n"
+            '- spawn(task="...", label="...", model="fast_model")\n'
+            '- spawn(task="...", label="...", model="qwen")'
+        )
 
     def _load_bootstrap_files(self) -> str:
         """Load all bootstrap files from workspace."""

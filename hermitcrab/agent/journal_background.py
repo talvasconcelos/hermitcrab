@@ -233,7 +233,7 @@ class JournalBackgroundManager:
         await self.synthesize_journal(_SessionSnapshot(messages, session_key), journal_job_class)
 
     async def reflect_on_session(self, session: Any) -> None:
-        await self.reflection_service.reflect_on_session(
+        return await self.reflection_service.reflect_on_session(
             messages=session.messages,
             session_key=session.key,
             digest=self.digest_builder.build_session_digest(session.messages, session.key),
@@ -242,7 +242,7 @@ class JournalBackgroundManager:
     async def reflect_on_session_from_messages(
         self, messages: list[dict[str, Any]], session_key: str
     ) -> None:
-        await self.reflection_service.reflect_on_session(
+        return await self.reflection_service.reflect_on_session(
             messages=messages,
             session_key=session_key,
             digest=self.digest_builder.build_session_digest(messages, session_key),

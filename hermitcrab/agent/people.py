@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import shutil
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -145,9 +146,27 @@ class PeopleStore:
 
     def __init__(self, workspace: Path):
         self.workspace = workspace
-        self.people_dir = ensure_dir(workspace / "knowledge" / "notes" / "people")
+        self.legacy_people_dir = workspace / "knowledge" / "notes" / "people"
+        self.people_dir = ensure_dir(workspace / "people")
         self.profiles_dir = ensure_dir(self.people_dir / "profiles")
         self.interactions_dir = ensure_dir(self.people_dir / "interactions")
+        self._migrate_legacy_people_files()
+
+    def _migrate_legacy_people_files(self) -> None:
+        if not self.legacy_people_dir.exists():
+            return
+
+        for old_path in sorted((self.legacy_people_dir / "profiles").glob("*.md")):
+            new_path = self.profiles_dir / old_path.name
+            if new_path.exists():
+                continue
+            shutil.move(str(old_path), str(new_path))
+
+        for old_path in sorted((self.legacy_people_dir / "interactions").glob("*.md")):
+            new_path = self.interactions_dir / old_path.name
+            if new_path.exists():
+                continue
+            shutil.move(str(old_path), str(new_path))
 
     @staticmethod
     def _normalize(text: str) -> str:

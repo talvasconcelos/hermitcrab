@@ -95,6 +95,7 @@ class SubagentManager:
         origin_chat_id: str = "direct",
         model: str | None = None,
         profile: str | None = None,
+        brief: str | None = None,
     ) -> str:
         """
         Spawn a subagent to execute a task in the background.
@@ -140,6 +141,7 @@ class SubagentManager:
                 resolved_model,
                 resolved_reasoning_effort,
                 profile=profile,
+                brief=brief,
             )
         )
         self._track_task(task_id, bg_task, origin_channel, origin_chat_id)
@@ -256,6 +258,7 @@ class SubagentManager:
         model: str | None = None,
         reasoning_effort: str | None = None,
         profile: str | None = None,
+        brief: str | None = None,
     ) -> None:
         """Execute the subagent task and announce the result."""
         logger.info("Subagent [{}] starting task: {}", task_id, label)
@@ -267,7 +270,7 @@ class SubagentManager:
             tools, resolved_profile = self._build_tools(profile)
 
             # Build messages with subagent-specific prompt
-            system_prompt = self._build_subagent_prompt(task, resolved_profile, tools)
+            system_prompt = self._build_subagent_prompt(task, resolved_profile, tools, brief=brief)
             messages: list[dict[str, Any]] = [
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": task},
@@ -494,12 +497,22 @@ Requirements:
             "Subagent [{}] announced result to {}:{}", task_id, origin["channel"], origin["chat_id"]
         )
 
-    def _build_subagent_prompt(self, task: str, profile: Any, tools: ToolRegistry) -> str:
+    def _build_subagent_prompt(
+        self,
+        task: str,
+        profile: Any,
+        tools: ToolRegistry,
+        *,
+        brief: str | None = None,
+    ) -> str:
         """Build a focused system prompt for the subagent."""
         now = datetime.now().strftime("%Y-%m-%d %H:%M (%A)")
         tz = _time.strftime("%Z") or "UTC"
         allowed_tools = ", ".join(f"`{name}`" for name in tools.tool_names()) or "none"
         guidance = "\n".join(f"- {line}" for line in profile.guidance) or "- None"
+        brief_section = ""
+        if brief and brief.strip():
+            brief_section = f"\n## Delegation Brief\n{brief.strip()}\n"
 
         return f"""# Subagent
 
@@ -516,6 +529,7 @@ You are a subagent spawned by the main agent to complete a specific task.
 
 ## Profile Guidance
 {guidance}
+{brief_section}
 
 ## Rules
 1. Stay focused on the assigned task only.

@@ -12,6 +12,7 @@ Output: 0-1 reflection file + optional bootstrap update.
 from __future__ import annotations
 
 import re
+from dataclasses import dataclass
 from difflib import SequenceMatcher
 from importlib.resources import files as package_files
 from pathlib import Path
@@ -23,6 +24,14 @@ from loguru import logger
 if TYPE_CHECKING:
     from hermitcrab.agent.loop import SessionDigest
     from hermitcrab.agent.memory import MemoryStore
+
+
+@dataclass(slots=True)
+class ReflectionOutcome:
+    status: str
+    reason: str
+    title: str | None = None
+    file_path: str | None = None
 
 
 class ReflectionService:
@@ -130,7 +139,7 @@ Rules:
         messages: list[dict],
         session_key: str,
         digest: SessionDigest,
-    ) -> None:
+    ) -> ReflectionOutcome:
         """
         Reflect on a session and extract learnings.
 
@@ -143,7 +152,7 @@ Rules:
             # Skip empty sessions
             if not messages:
                 logger.debug("Reflection skipped: empty session {}", session_key)
-                return
+                return ReflectionOutcome(status="skipped", reason="empty_session")
 
             # 1. Load recent reflections for dedup context
             recent = self.memory.list_memories("reflections")[:10]
@@ -190,13 +199,15 @@ Rules:
                 result = self._parse_response(repaired.content)
 
             if result.get("skip"):
-                logger.debug("Reflection skipped: {}", result.get("reason", "no insights"))
-                return
+                reason = str(result.get("reason", "no_insights"))
+                logger.debug("Reflection skipped: {}", reason)
+                return ReflectionOutcome(status="skipped", reason=reason)
 
             # 5. Validate required fields
-            if not self._is_valid_result(result, digest):
-                logger.warning("Reflection rejected by validation: {}", result)
-                return
+            valid, reason = self._validate_result(result, digest)
+            if not valid:
+                logger.debug("Reflection rejected by validation (reason={}): {}", reason, result)
+                return ReflectionOutcome(status="skipped", reason=reason)
 
             if not result.get("evidence"):
                 result["evidence"] = self._build_fallback_evidence(digest)
@@ -205,19 +216,30 @@ Rules:
                 logger.info(
                     "Reflection skipped after duplicate/contradiction guard: {}", result["title"]
                 )
-                return
+                return ReflectionOutcome(
+                    status="skipped",
+                    reason="duplicate_or_contradictory",
+                    title=result.get("title"),
+                )
 
             # 6. Write reflection
-            self._write_reflection(result, session_key)
+            item = self._write_reflection(result, session_key)
 
             # 7. Auto-promote if flagged
             if self.auto_promote and result.get("should_promote") and result.get("promote_content"):
                 await self._promote(result)
 
             logger.info("Reflection complete: {}", result.get("title", "unknown"))
+            return ReflectionOutcome(
+                status="saved",
+                reason="saved",
+                title=item.title,
+                file_path=str(item.file_path),
+            )
 
         except Exception as e:
             logger.warning("Reflection failed (non-fatal): {}", e)
+            return ReflectionOutcome(status="failed", reason=str(e))
 
     def _format_digest(self, digest: SessionDigest) -> str:
         """Format deterministic digest data for reflection."""
@@ -350,8 +372,8 @@ Rules:
 
         return result or None
 
-    def _is_valid_result(self, result: dict[str, Any], digest: SessionDigest) -> bool:
-        """Reject malformed or low-value reflections."""
+    def _validate_result(self, result: dict[str, Any], digest: SessionDigest) -> tuple[bool, str]:
+        """Reject malformed or low-value reflections and report the reason."""
         self._normalize_result_shape(result)
 
         required = (
@@ -363,16 +385,16 @@ Rules:
             "scope",
         )
         if any(not str(result.get(field, "")).strip() for field in required):
-            return False
+            return False, "missing_required_fields"
 
         scope = str(result.get("scope", "")).strip().lower()
         if scope not in self.VALID_SCOPES:
-            return False
+            return False, "invalid_scope"
         result["scope"] = scope
 
         confidence = self._parse_confidence(result.get("confidence"))
         if confidence is None or confidence < 0.55:
-            return False
+            return False, "low_or_invalid_confidence"
         result["confidence"] = confidence
 
         title = str(result.get("title", "")).strip()
@@ -387,24 +409,31 @@ Rules:
         normalized_title = self._normalize_text(title)
 
         if len([token for token in normalized_title.split() if len(token) >= 4]) < 2:
-            return False
+            return False, "weak_title"
 
         if self._looks_like_prompt_placeholder(title, lesson, recommended_behavior):
-            return False
+            return False, "prompt_placeholder"
 
         if self._looks_like_failure_report(scope, normalized, digest):
-            return False
+            return False, "failure_report"
 
         result["should_promote"] = self._coerce_bool(result.get("should_promote", False))
         result["scope"] = self._normalize_learning_scope(result, digest)
         result["promotion_target"] = self._resolve_promotion_target(result, digest)
         if result["promotion_target"] not in self.VALID_PROMOTION_TARGETS:
-            return False
+            return False, "invalid_promotion_target"
         if not self._promotion_is_viable(result):
             result["should_promote"] = False
             result["promotion_target"] = "none"
 
-        return self._is_grounded_in_digest(result, digest)
+        if not self._is_grounded_in_digest(result, digest):
+            return False, "not_grounded_in_digest"
+        return True, "ok"
+
+    def _is_valid_result(self, result: dict[str, Any], digest: SessionDigest) -> bool:
+        """Backward-compatible validation hook used by tests and call sites."""
+        valid, _reason = self._validate_result(result, digest)
+        return valid
 
     def _build_fallback_evidence(self, digest: SessionDigest) -> str:
         """Create deterministic evidence text when the model omits it."""
@@ -649,6 +678,8 @@ Rules:
     ) -> bool:
         if scope == "tool_usage":
             return False
+        if digest.user_corrections:
+            return False
         if digest.failures and not (digest.user_corrections or digest.outcomes):
             return True
         failure_tokens = {"tool", "error", "provider", "missing", "failed", "file", "response"}
@@ -696,7 +727,7 @@ Rules:
         threshold = max(1, min(3, len(content_tokens) // 3 or 1))
         return matched >= threshold
 
-    def _write_reflection(self, result: dict, session_key: str) -> None:
+    def _write_reflection(self, result: dict, session_key: str):
         """Write reflection to memory."""
         reflection_scope = result.get("scope", "assistant_behavior")
         tags = [reflection_scope, "reflection", "learning"]
@@ -715,7 +746,7 @@ Rules:
                 f"Marked for promotion to {result.get('promotion_target', 'unknown')}"
             )
 
-        self.memory.write_reflection(
+        return self.memory.write_reflection(
             title=result["title"],
             content=content,
             tags=tags,
