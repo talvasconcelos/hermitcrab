@@ -82,3 +82,26 @@ class AuditTrail:
             last_event=last_event,
             last_timestamp=last_timestamp,
         )
+
+    def read_recent(self, limit: int = 20) -> list[dict[str, Any]]:
+        """Return the most recent audit entries, oldest-to-newest within the returned window."""
+        if limit <= 0 or not self.path.exists():
+            return []
+
+        entries: list[dict[str, Any]] = []
+        try:
+            with self.path.open("r", encoding="utf-8") as handle:
+                for raw_line in handle:
+                    line = raw_line.strip()
+                    if not line:
+                        continue
+                    try:
+                        payload = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    if isinstance(payload, dict):
+                        entries.append(payload)
+        except OSError:
+            return []
+
+        return entries[-limit:]

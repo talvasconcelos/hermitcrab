@@ -1,6 +1,7 @@
 """CLI commands for hermitcrab."""
 
 import asyncio
+import json
 import os
 import re
 import select
@@ -2026,6 +2027,39 @@ def doctor(
         console.print(f"{marker} {finding.title}")
         console.print(f"  {finding.detail}")
         console.print(f"  Fix: {finding.remediation}\n")
+
+
+@app.command()
+def audit(
+    limit: int = typer.Option(20, "--limit", "-n", help="Maximum audit entries to show"),
+    as_json: bool = typer.Option(False, "--json", help="Print audit entries as JSON"),
+):
+    """Show recent durable audit trail events."""
+    from hermitcrab.agent.audit import AuditTrail
+
+    config = _load_runtime_config()
+    trail = AuditTrail(config.workspace_path)
+    entries = trail.read_recent(limit)
+
+    if as_json:
+        typer.echo(json.dumps(entries, indent=2, ensure_ascii=False) + "\n", nl=False)
+        return
+
+    console.print(f"{__logo__} hermitcrab Audit\n")
+    console.print(f"Log: {trail.path}")
+    if not entries:
+        console.print("No audit events recorded yet.")
+        return
+
+    for item in entries:
+        event = str(item.get("event") or "unknown")
+        timestamp = str(item.get("ts") or "unknown")
+        console.print(f"[bold]{event}[/bold] [dim]{timestamp}[/dim]")
+        for key, value in item.items():
+            if key in {"event", "ts"}:
+                continue
+            console.print(f"- {key}: {value}")
+        console.print()
 
 
 # ============================================================================
