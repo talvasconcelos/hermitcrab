@@ -664,7 +664,7 @@ class AgentLoop:
             lines.append("Current:")
             lines.append(f"- {_format_choice(current_selection, current_model)}")
             if current_selection != primary and primary is not None:
-                lines.append(f"- Reset to default with `/model {primary}`")
+                lines.append("- Reset to default with `/model default`")
 
         if primary is not None and _remember(primary):
             lines.append("")
@@ -710,6 +710,7 @@ class AgentLoop:
                 "Use `/model <name>` to switch this conversation only.",
                 "You can use a named model, a configured alias, or a full model id like `openai-oauth/gpt-5.4`.",
                 "Use `/model` with no argument to see the active model.",
+                "Use `/model default` to clear the conversation override.",
             ]
         )
         return "\n".join(lines)
@@ -1499,6 +1500,7 @@ class AgentLoop:
                 "/models — List interactive model choices\n"
                 "/model — Show the current conversation model\n"
                 "/model <name> — Switch the current conversation model\n"
+                "/model default — Reset to the default conversation model\n"
                 "/reflect — Run reflection on this conversation\n"
                 "/help — Show chat commands\n\n"
                 "For CLI commands like status, doctor, or onboard, run them in the shell "
@@ -1518,6 +1520,15 @@ class AgentLoop:
                 return self._reply(
                     msg,
                     self._build_model_status_response(session),
+                    metadata=self._active_model_reply_metadata(session),
+                )
+
+            if arg.lower() == "default":
+                session.metadata.pop("active_model", None)
+                self.sessions.save(session)
+                return self._reply(
+                    msg,
+                    "Reset this conversation to the default interactive model.",
                     metadata=self._active_model_reply_metadata(session),
                 )
 
