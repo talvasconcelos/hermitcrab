@@ -14,6 +14,7 @@ from hermitcrab.agent.message_preparation import (
     extract_subagent_task,
     is_subagent_completion_prompt,
     is_transition_assistant_message,
+    parse_subagent_completion_prompt,
 )
 
 
@@ -135,10 +136,13 @@ class SessionDigestBuilder:
                     continue
                 raw_content = str(msg.get("content") or "")
                 if is_subagent_completion_prompt(raw_content):
-                    task = extract_subagent_task(raw_content)
-                    if task:
-                        event_lines.append(f"- Subagent reported back for task: {task}")
-                        artifacts_changed.append(task)
+                    self._digest_subagent_completion(
+                        raw_content,
+                        event_lines,
+                        outcomes,
+                        failures,
+                        artifacts_changed,
+                    )
                     continue
                 event_lines.append(f"- User: {content}")
                 user_requests.append(content)
@@ -325,6 +329,56 @@ class SessionDigestBuilder:
         elif tool_name == "edit_file" or tool_name.startswith("write_"):
             outcomes.append(content)
             event_lines.append(f"- Tool success ({tool_name}): {content}")
+
+    @classmethod
+    def _digest_subagent_completion(
+        cls,
+        raw_content: str,
+        event_lines: list[str],
+        outcomes: list[str],
+        failures: list[str],
+        artifacts_changed: list[str],
+    ) -> None:
+        parsed = parse_subagent_completion_prompt(raw_content)
+        if parsed is None:
+            task = extract_subagent_task(raw_content)
+            if task:
+                event_lines.append(f"- Subagent reported back for task: {task}")
+                artifacts_changed.append(task)
+            return
+
+        label = clean_snippet(parsed.get("label"), max_chars=80) or "Subagent"
+        task = clean_snippet(parsed.get("task"), max_chars=180)
+        result = clean_snippet(parsed.get("result"), max_chars=220)
+        files = parsed.get("files", "").strip()
+        status = parsed.get("status", "").strip().lower()
+        exit_reason = parsed.get("exit_reason", "").strip().lower()
+
+        if files and files.lower() != "none":
+            for path in files.split(","):
+                cleaned = clean_snippet(path, max_chars=140)
+                if cleaned:
+                    artifacts_changed.append(cleaned)
+
+        if status == "failed":
+            failure = f"{label} failed"
+            if task:
+                failure += f" for {task}"
+            if result:
+                failure += f": {result}"
+            failures.append(failure)
+            event_lines.append(f"- Subagent failure ({label}): {result or exit_reason or task}")
+            return
+
+        if status == "completed partially":
+            detail = result or exit_reason or task or label
+            failures.append(f"{label} partial result: {detail}")
+            event_lines.append(f"- Subagent partial result ({label}): {detail}")
+            return
+
+        detail = result or task or label
+        outcomes.append(f"{label}: {detail}")
+        event_lines.append(f"- Subagent completed ({label}): {detail}")
 
     @staticmethod
     def format_digest_timestamp(value: str) -> str:

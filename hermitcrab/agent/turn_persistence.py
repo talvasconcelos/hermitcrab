@@ -5,6 +5,11 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Any, Callable
 
+from hermitcrab.agent.message_preparation import (
+    is_empty_response,
+    is_placeholder_assistant_reply,
+)
+
 
 class TurnPersistence:
     """Save new turn messages into a session with deterministic truncation."""
@@ -21,6 +26,14 @@ class TurnPersistence:
     ) -> None:
         for message in messages[skip:]:
             entry = {k: v for k, v in message.items() if k != "reasoning_content"}
+            if (
+                entry.get("role") == "assistant"
+                and isinstance(entry.get("tool_calls"), list)
+                and entry["tool_calls"]
+            ):
+                content = entry.get("content")
+                if is_empty_response(content) or is_placeholder_assistant_reply(content):
+                    entry.pop("content", None)
             if entry.get("role") == "tool" and isinstance(entry.get("content"), str):
                 content = entry["content"]
                 if len(content) > cls.TOOL_RESULT_MAX_CHARS:
