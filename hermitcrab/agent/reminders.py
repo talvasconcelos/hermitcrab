@@ -20,6 +20,13 @@ def _utcnow() -> datetime:
     return datetime.now(timezone.utc)
 
 
+def _parse_iso_datetime(value: str) -> datetime:
+    dt = datetime.fromisoformat(value)
+    if dt.tzinfo is None:
+        return dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc)
+
+
 @dataclass(slots=True)
 class ReminderItem:
     """Stored reminder artifact plus its compiled cron linkage."""
@@ -426,7 +433,7 @@ class ReminderStore:
                 continue
             if item.schedule_kind == "at" and item.at:
                 try:
-                    at_dt = datetime.fromisoformat(item.at)
+                    at_dt = _parse_iso_datetime(item.at)
                 except ValueError:
                     continue
                 if at_dt >= now:
