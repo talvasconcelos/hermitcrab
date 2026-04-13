@@ -321,7 +321,11 @@ def _strip_ansi(text: str) -> str:
 
 
 def _print_agent_response(
-    response: str, render_markdown: bool, *, prompt_safe: bool = False
+    response: str,
+    render_markdown: bool,
+    *,
+    prompt_safe: bool = False,
+    model_label: str | None = None,
 ) -> None:
     """Render assistant response with consistent terminal styling."""
     content = response or ""
@@ -329,14 +333,20 @@ def _print_agent_response(
         if prompt_safe:
             clean = _strip_ansi(content)
             print_formatted_text("")
-            print_formatted_text(HTML("<ansicyan>🦀 hermitcrab</ansicyan>"))
+            heading = "🦀 hermitcrab"
+            if model_label:
+                heading += f" [{_strip_ansi(model_label)}]"
+            print_formatted_text(HTML(f"<ansicyan>{heading}</ansicyan>"))
             print_formatted_text(clean)
             print_formatted_text("")
             return
 
         body = Markdown(content) if render_markdown else Text(content)
         console.print()
-        console.print(f"[cyan]{__logo__} hermitcrab[/cyan]")
+        heading = f"[cyan]{__logo__} hermitcrab[/cyan]"
+        if model_label:
+            heading += f" [dim][{model_label}][/dim]"
+        console.print(heading)
         console.print(body)
         console.print()
     except (BrokenPipeError, OSError, ValueError):
@@ -347,7 +357,7 @@ async def _consume_outbound_loop(
     bus: Any,
     agent_loop: Any,
     turn_done: asyncio.Event,
-    turn_response: list[str],
+    turn_response: list[tuple[str, str | None]],
     *,
     render_markdown: bool,
 ) -> None:
@@ -366,13 +376,14 @@ async def _consume_outbound_loop(
                     console.print(f"  [dim]↳ {msg.content}[/dim]")
             elif not turn_done.is_set():
                 if msg.content:
-                    turn_response.append(msg.content)
+                    turn_response.append((msg.content, msg.metadata.get("_active_model_label")))
                 turn_done.set()
             elif msg.content:
                 _print_agent_response(
                     msg.content,
                     render_markdown=render_markdown,
                     prompt_safe=True,
+                    model_label=msg.metadata.get("_active_model_label"),
                 )
         except asyncio.TimeoutError:
             continue
@@ -975,7 +986,7 @@ def _run_nostr_mode(
         bus_task = asyncio.create_task(agent_loop.run())
         turn_done = asyncio.Event()
         turn_done.set()
-        turn_response: list[str] = []
+        turn_response: list[tuple[str, str | None]] = []
 
         outbound_task = asyncio.create_task(
             _consume_outbound_loop(
@@ -1003,7 +1014,12 @@ def _run_nostr_mode(
                         await turn_done.wait()
 
                     if turn_response:
-                        _print_agent_response(turn_response[0], render_markdown=markdown)
+                        content, model_label = turn_response[0]
+                        _print_agent_response(
+                            content,
+                            render_markdown=markdown,
+                            model_label=model_label,
+                        )
 
                 except asyncio.TimeoutError:
                     continue
@@ -1145,7 +1161,7 @@ def agent(
             bus_task = asyncio.create_task(agent_loop.run())
             turn_done = asyncio.Event()
             turn_done.set()
-            turn_response: list[str] = []
+            turn_response: list[tuple[str, str | None]] = []
 
             outbound_task = asyncio.create_task(
                 _consume_outbound_loop(
@@ -1227,7 +1243,12 @@ def agent(
                             await asyncio.gather(escape_task, return_exceptions=True)
 
                         if turn_response:
-                            _print_agent_response(turn_response[0], render_markdown=markdown)
+                            content, model_label = turn_response[0]
+                            _print_agent_response(
+                                content,
+                                render_markdown=markdown,
+                                model_label=model_label,
+                            )
                     except KeyboardInterrupt:
                         _restore_terminal()
                         console.print("\nGoodbye!")

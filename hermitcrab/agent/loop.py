@@ -684,6 +684,14 @@ class AgentLoop:
             return f"Current model: `{selection}` -> `{resolved_model}`"
         return f"Current model: `{selection}`"
 
+    def _active_model_reply_metadata(self, session: Session) -> dict[str, Any]:
+        """Attach the active interactive model label to user-visible replies."""
+        selection, resolved_model = self._resolve_interactive_model(session)
+        if selection is None:
+            return {}
+        label = selection if not resolved_model or resolved_model == selection else f"{selection} -> {resolved_model}"
+        return {"_active_model_label": label}
+
     async def _chat_with_retry(
         self,
         *,
@@ -1291,7 +1299,10 @@ class AgentLoop:
                 channel=msg.channel,
                 chat_id=msg.chat_id,
                 content=final_content,
-                metadata=msg.metadata or {},
+                metadata={
+                    **(msg.metadata or {}),
+                    **self._active_model_reply_metadata(session),
+                },
             )
 
     @staticmethod
@@ -1392,26 +1403,43 @@ class AgentLoop:
                 "/help — Show chat commands\n\n"
                 "For CLI commands like status, doctor, or onboard, run them in the shell "
                 "as `hermitcrab status`, `hermitcrab doctor`, or `hermitcrab onboard`.",
+                metadata=self._active_model_reply_metadata(session),
             )
 
         if cmd == "/models":
-            return self._reply(msg, self._build_models_response(session))
+            return self._reply(
+                msg,
+                self._build_models_response(session),
+                metadata=self._active_model_reply_metadata(session),
+            )
 
         if cmd == "/model":
             if not arg:
-                return self._reply(msg, self._build_model_status_response(session))
+                return self._reply(
+                    msg,
+                    self._build_model_status_response(session),
+                    metadata=self._active_model_reply_metadata(session),
+                )
 
             ok, detail = self._validate_interactive_model_selection(arg)
             if not ok:
-                return self._reply(msg, detail)
+                return self._reply(msg, detail, metadata=self._active_model_reply_metadata(session))
 
             selection = self._normalize_model_selection(arg)
             assert selection is not None
             session.metadata["active_model"] = selection
             self.sessions.save(session)
             if detail != selection:
-                return self._reply(msg, f"Switched this conversation to `{selection}` -> `{detail}`")
-            return self._reply(msg, f"Switched this conversation to `{selection}`")
+                return self._reply(
+                    msg,
+                    f"Switched this conversation to `{selection}` -> `{detail}`",
+                    metadata=self._active_model_reply_metadata(session),
+                )
+            return self._reply(
+                msg,
+                f"Switched this conversation to `{selection}`",
+                metadata=self._active_model_reply_metadata(session),
+            )
 
         if cmd == "/reflect":
             return await self._handle_reflect_command(msg, session_key, session)
