@@ -17,7 +17,8 @@ Tool signatures provided via function calling. Non-obvious constraints below.
 
 Do not blur them:
 - facts/preferences/allergies/routines belong in memory
-- current lists, notes, recipes, and reference material belong in knowledge
+- notes, recipes, and reference material belong in knowledge
+- updateable lists/checklists belong in the first-class `lists/` surface
 - a checklist item is not the same thing as a remembered preference
 
 ## Memory Operations — Use Typed APIs
@@ -55,7 +56,7 @@ Do not blur them:
 
 Use `write_decision` only when the user made or clearly accepted the choice. Assistant-authored recommendations, reports, and option lists belong in `projects/` or `knowledge/`, not `memory/decisions/`.
 
-Use `write_task` only for actionable commitments that somebody should do or track. Shopping lists, reusable checklists, reference notes, and "remember this list for later" content belong in `knowledge/notes/` via `knowledge_ingest`.
+Use `write_task` only for actionable commitments that somebody should do or track. Shopping lists and reusable checklists belong in the first-class `lists/` surface via the checklist tools. Reference notes and "remember this list for later" content belong in `knowledge/notes/`.
 
 ## File Placement Rules
 
@@ -70,6 +71,17 @@ Use `write_task` only for actionable commitments that somebody should do or trac
 - **exec**: Timeout 60s, dangerous commands blocked, output truncated at 10k chars
 - **cron**: See cron skill for scheduled tasks
 - **spawn**: Background tasks with isolated sessions, shared memory
+
+## Reminder Discipline
+
+- Use the first-class `reminder` tool for user-facing reminders; do not route normal reminders through raw `cron`.
+- Distinguish the event time from the reminder trigger time.
+- If the user gives an event time and asks to be reminded before it, use `event_at` plus `remind_offset_minutes`.
+- For meetings, appointments, pickups, departures, reservations, and other time-sensitive commitments, prefer a lead-time reminder over firing exactly at the event time.
+- Default lead-time when the user did not specify one:
+  10 minutes for meetings, appointments, calls, and timed check-ins.
+- If the user clearly wants the alert at the exact time, use `at` with the actual trigger time instead.
+- If the right lead-time is ambiguous and materially matters, ask a short clarification instead of guessing.
 
 ## Cost And Loop Discipline
 

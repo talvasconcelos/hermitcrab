@@ -126,6 +126,14 @@ class PersonProfileTool(Tool):
                     "type": "string",
                     "description": "One-time ISO datetime for a follow-up reminder",
                 },
+                "event_at": {
+                    "type": "string",
+                    "description": "Actual event ISO datetime when using a lead-time follow-up",
+                },
+                "remind_offset_minutes": {
+                    "type": "integer",
+                    "description": "Minutes before event_at to trigger the follow-up reminder",
+                },
                 "every_seconds": {
                     "type": "integer",
                     "description": "Recurring interval in seconds for a follow-up reminder",
@@ -164,6 +172,8 @@ class PersonProfileTool(Tool):
         message: str = "",
         schedule_kind: str = "",
         at: str = "",
+        event_at: str = "",
+        remind_offset_minutes: int | None = None,
         every_seconds: int | None = None,
         cron_expr: str = "",
         tz: str = "",
@@ -325,6 +335,8 @@ class PersonProfileTool(Tool):
                     channel=self._channel,
                     chat_id=self._chat_id,
                     at=at or None,
+                    event_at=event_at or None,
+                    remind_offset_minutes=remind_offset_minutes,
                     every_seconds=every_seconds,
                     cron_expr=cron_expr or None,
                     tz=tz or None,

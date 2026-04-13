@@ -265,7 +265,10 @@ class AgentLoop:
         self.knowledge = KnowledgeStore(workspace)
         self.lists = ListStore(workspace)
         self.people = PeopleStore(workspace)
-        self.reminders = ReminderStore(workspace, cron_service) if cron_service else None
+        self.reminders = ReminderStore(
+            workspace,
+            legacy_cron_store_path=(cron_service.store_path if cron_service else None),
+        )
         self.tools = ToolRegistry(default_policy=build_main_agent_policy())
         self.execution_state = ExecutionStateTracker()
         self.subagents = SubagentManager(
@@ -403,7 +406,14 @@ class AgentLoop:
         finally:
             self._mcp_connecting = False
 
-    def _set_tool_context(self, channel: str, chat_id: str, message_id: str | None = None) -> None:
+    def _set_tool_context(
+        self,
+        channel: str,
+        chat_id: str,
+        message_id: str | None = None,
+        *,
+        spawn_brief: str | None = None,
+    ) -> None:
         """Update context for all tools that need routing info."""
         if message_tool := self.tools.get("message"):
             if isinstance(message_tool, MessageTool):
@@ -411,17 +421,52 @@ class AgentLoop:
 
         if spawn_tool := self.tools.get("spawn"):
             if isinstance(spawn_tool, SpawnTool):
-                spawn_tool.set_context(channel, chat_id)
+                spawn_tool.set_context(channel, chat_id, brief=spawn_brief)
 
         if cron_tool := self.tools.get("cron"):
             if isinstance(cron_tool, CronTool):
                 cron_tool.set_context(channel, chat_id)
         if reminder_tool := self.tools.get("reminder"):
             if isinstance(reminder_tool, ReminderTool):
-                reminder_tool.set_context(channel, chat_id)
+                delivery_channel, delivery_chat_id = self._resolve_reminder_delivery_target(
+                    channel,
+                    chat_id,
+                )
+                reminder_tool.set_context(
+                    channel,
+                    chat_id,
+                    delivery_channel=delivery_channel,
+                    delivery_chat_id=delivery_chat_id,
+                )
         if person_tool := self.tools.get("person_profile"):
             if isinstance(person_tool, PersonProfileTool):
                 person_tool.set_context(channel, chat_id)
+
+    def _resolve_reminder_delivery_target(self, channel: str, chat_id: str) -> tuple[str, str]:
+        """Prefer the latest active external session when reminders are created from CLI."""
+        if channel not in {"cli", "system"} and chat_id:
+            return channel, chat_id
+
+        enabled_external_channels: set[str] = set()
+        if self.channels_config is not None:
+            for name in ("telegram", "email", "nostr"):
+                cfg = getattr(self.channels_config, name, None)
+                if getattr(cfg, "enabled", False):
+                    enabled_external_channels.add(name)
+
+        for item in self.sessions.list_sessions():
+            key = str(item.get("key") or "")
+            if ":" not in key:
+                continue
+            session_channel, session_chat_id = key.split(":", 1)
+            if session_channel in {"cli", "system", "cron", "heartbeat"}:
+                continue
+            if enabled_external_channels and session_channel not in enabled_external_channels:
+                continue
+            if session_chat_id:
+                return session_channel, session_chat_id
+
+        return channel, chat_id
 
     @staticmethod
     def _strip_think(text: str | None) -> str | None:

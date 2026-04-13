@@ -101,7 +101,7 @@ class KnowledgeIngestTool(Tool):
     def description(self) -> str:
         return (
             "Ingest new content into the knowledge base. "
-            "Use to save articles, documentation, notes, reference material, reusable checklists, or shopping lists for future retrieval. "
+            "Use to save articles, documentation, notes, and other reference material for future retrieval. "
             "Content is stored as markdown files with optional metadata. "
             "This does NOT create memory items - it only adds to the reference library."
         )

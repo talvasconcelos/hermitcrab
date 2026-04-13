@@ -368,6 +368,27 @@ class TurnRunner:
             return True
         return False
 
+    @staticmethod
+    def _looks_like_short_action_claim(content: str | None) -> bool:
+        """Detect terse completion claims that usually require a tool-backed action."""
+        text = " ".join((content or "").strip().lower().split())
+        if not text or len(text) > 160:
+            return False
+
+        action_markers = (
+            "reminder set",
+            "scheduled",
+            "saved",
+            "added",
+            "created",
+            "updated",
+            "marked",
+            "logged",
+            "done.",
+            "done!",
+        )
+        return any(marker in text for marker in action_markers)
+
     def _should_reprompt_incomplete_non_tool_response(
         self,
         *,
@@ -380,7 +401,9 @@ class TurnRunner:
             return False
         if not self.tools.get_definitions():
             return False
-        if not self._request_has_structural_action_signal(current_request):
+        if not self._request_has_structural_action_signal(
+            current_request
+        ) and not self._looks_like_short_action_claim(assistant_content):
             return False
         if self._response_looks_like_blocker_or_final(assistant_content):
             return False

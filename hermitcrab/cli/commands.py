@@ -476,6 +476,18 @@ def _create_workspace_templates(workspace: Path):
         category_dir.mkdir(exist_ok=True)
         console.print(f"  [dim]Created knowledge/{category}/[/dim]")
 
+    (workspace / "lists").mkdir(exist_ok=True)
+    console.print("  [dim]Created lists/[/dim]")
+
+    people_dir = workspace / "people"
+    people_dir.mkdir(exist_ok=True)
+    (people_dir / "profiles").mkdir(exist_ok=True)
+    (people_dir / "interactions").mkdir(exist_ok=True)
+    console.print("  [dim]Created people/profiles/ and people/interactions/[/dim]")
+
+    (workspace / "reminders").mkdir(exist_ok=True)
+    console.print("  [dim]Created reminders/[/dim]")
+
     scratchpads_dir = workspace / "scratchpads"
     scratchpads_dir.mkdir(exist_ok=True)
     (scratchpads_dir / "archive").mkdir(exist_ok=True)
@@ -693,6 +705,7 @@ def gateway(
     from hermitcrab.cron.service import CronService
     from hermitcrab.cron.types import CronJob
     from hermitcrab.heartbeat.service import HeartbeatService
+    from hermitcrab.reminders.service import ReminderService
     from hermitcrab.session.manager import SessionManager
     from hermitcrab.session.timeout_service import SessionTimeoutService
 
@@ -792,6 +805,14 @@ def gateway(
             OutboundMessage(channel=channel, chat_id=chat_id, content=response)
         )
 
+    async def on_reminder_notify(item, content: str) -> None:
+        """Deliver a due reminder to its persisted channel target."""
+        from hermitcrab.bus.events import OutboundMessage
+
+        await bus.publish_outbound(
+            OutboundMessage(channel=item.channel, chat_id=item.chat_id, content=content)
+        )
+
     hb_cfg = config.gateway.heartbeat
     heartbeat = HeartbeatService(
         workspace=config.workspace_path,
@@ -806,6 +827,12 @@ def gateway(
         agent.process_expired_sessions,
         interval_s=min(60, max(5, config.agents.defaults.inactivity_timeout_s // 6)),
         enabled=True,
+    )
+    reminder_service = ReminderService(
+        agent.reminders,
+        on_notify=on_reminder_notify,
+        interval_s=15,
+        enabled=agent.reminders is not None,
     )
 
     if channels.enabled_channels:
@@ -824,6 +851,7 @@ def gateway(
             await cron.start()
             await heartbeat.start()
             await timeout_monitor.start()
+            await reminder_service.start()
             await asyncio.gather(
                 agent.run(),
                 channels.start_all(),
@@ -834,6 +862,7 @@ def gateway(
             await agent.close()
             timeout_monitor.stop()
             heartbeat.stop()
+            reminder_service.stop()
             cron.stop()
             agent.stop()
             await channels.stop_all()
@@ -1279,14 +1308,15 @@ app.add_typer(people_app, name="people")
 
 
 def _build_reminder_store() -> Any:
-    """Build a reminder store backed by the configured workspace and cron store."""
+    """Build the reminder store in the configured workspace."""
     from hermitcrab.agent.reminders import ReminderStore
     from hermitcrab.config.loader import get_data_dir
-    from hermitcrab.cron.service import CronService
 
     config = _load_runtime_config()
-    cron = CronService(get_data_dir() / "cron" / "jobs.json")
-    return ReminderStore(config.workspace_path, cron)
+    return ReminderStore(
+        config.workspace_path,
+        legacy_cron_store_path=get_data_dir() / "cron" / "jobs.json",
+    )
 
 
 def _build_people_store() -> Any:
@@ -1555,9 +1585,13 @@ def reminders_add(
     cron_expr: str = typer.Option(None, "--cron", "-c", help="Cron expression"),
     tz: str | None = typer.Option(None, "--tz", help="IANA timezone for cron schedules"),
     at: str = typer.Option(None, "--at", help="One-time ISO datetime"),
+    event_at: str = typer.Option(None, "--event-at", help="Actual event ISO datetime"),
+    remind_before: int = typer.Option(
+        None, "--remind-before", help="Minutes before --event-at to trigger"
+    ),
 ):
-    """Add a reminder artifact and compile it into the scheduler."""
-    schedule_kind = _require_one_schedule_option(every, cron_expr, at)
+    """Add a reminder artifact."""
+    schedule_kind = _require_one_schedule_option(every, cron_expr, at or event_at)
     store = _build_reminder_store()
     try:
         item = store.upsert_reminder(
@@ -1565,6 +1599,8 @@ def reminders_add(
             message=message,
             schedule_kind=schedule_kind,
             at=at,
+            event_at=event_at,
+            remind_offset_minutes=remind_before,
             every_seconds=every,
             cron_expr=cron_expr,
             tz=tz,
@@ -1774,6 +1810,10 @@ def people_follow_up(
     cron_expr: str = typer.Option(None, "--cron", "-c", help="Cron expression"),
     tz: str | None = typer.Option(None, "--tz", help="IANA timezone for cron schedules"),
     at: str = typer.Option(None, "--at", help="One-time ISO datetime"),
+    event_at: str = typer.Option(None, "--event-at", help="Actual event ISO datetime"),
+    remind_before: int = typer.Option(
+        None, "--remind-before", help="Minutes before --event-at to trigger"
+    ),
 ):
     """Create a reminder linked to a person profile."""
     people = _build_people_store()
@@ -1781,7 +1821,7 @@ def people_follow_up(
     if person is None:
         console.print(f"[red]People profile not found: {query}[/red]")
         raise typer.Exit(1)
-    schedule_kind = _require_one_schedule_option(every, cron_expr, at)
+    schedule_kind = _require_one_schedule_option(every, cron_expr, at or event_at)
     reminders = _build_reminder_store()
     reminder_title = title or f"Follow up with {person.name}"
     try:
@@ -1790,6 +1830,8 @@ def people_follow_up(
             message=message,
             schedule_kind=schedule_kind,
             at=at,
+            event_at=event_at,
+            remind_offset_minutes=remind_before,
             every_seconds=every,
             cron_expr=cron_expr,
             tz=tz,
