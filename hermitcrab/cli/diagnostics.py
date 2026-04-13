@@ -296,13 +296,39 @@ def _build_provider_statuses(config: Config, selected_provider: str | None) -> l
 
 def _provider_ready(spec_name: str, spec: Any, provider_config: Any) -> tuple[bool, str]:
     if spec.is_oauth:
-        return True, "OAuth provider available"
+        return _oauth_provider_ready(spec_name)
     if spec.is_local:
         api_base = provider_config.api_base or spec.default_api_base
         return bool(api_base), api_base or "Local endpoint not configured"
     if provider_config.api_key:
         return True, "API key configured"
     return False, "API key not configured"
+
+
+def _oauth_provider_ready(spec_name: str) -> tuple[bool, str]:
+    if spec_name in {"openai_oauth", "openai_codex"}:
+        try:
+            from oauth_cli_kit.providers import OPENAI_CODEX_PROVIDER
+            from oauth_cli_kit.storage import FileTokenStorage
+
+            storage = FileTokenStorage(token_filename=OPENAI_CODEX_PROVIDER.token_filename)
+            if storage.load():
+                return True, "OAuth login detected"
+        except Exception:
+            pass
+        command = "openai-oauth" if spec_name == "openai_oauth" else "openai-codex"
+        return False, f"Run `hermitcrab provider login {command}`"
+
+    if spec_name == "qwen_oauth":
+        try:
+            from hermitcrab.providers.qwen_oauth_provider import resolve_qwen_runtime_credentials
+
+            resolve_qwen_runtime_credentials(refresh_if_expiring=False)
+            return True, "OAuth login detected"
+        except Exception:
+            return False, "Run `hermitcrab provider login qwen-oauth`"
+
+    return False, "OAuth login required"
 
 
 def _build_skill_statuses(workspace: Path) -> list[SkillStatus]:
@@ -344,6 +370,15 @@ def _build_next_steps(
         if selected_provider == "ollama":
             steps.append(
                 "Install or start Ollama, pull the selected model, then run `hermitcrab doctor`."
+            )
+        elif selected_provider in {"openai_oauth", "openai_codex"}:
+            command = "openai-oauth" if selected_provider == "openai_oauth" else "openai-codex"
+            steps.append(
+                f"Run `hermitcrab provider login {command}`, then try `hermitcrab agent -m \"Hello!\"`."
+            )
+        elif selected_provider == "qwen_oauth":
+            steps.append(
+                "Run `hermitcrab provider login qwen-oauth`, then try `hermitcrab agent -m \"Hello!\"`."
             )
         elif selected_provider:
             steps.append(
