@@ -6,6 +6,7 @@ import re
 import select
 import shutil
 import signal
+import subprocess
 import sys
 import tempfile
 from pathlib import Path
@@ -554,6 +555,7 @@ def _build_onboard_next_steps() -> list[str]:
             "  1. Choose a provider in [cyan]~/.hermitcrab/config.json[/cyan]",
             "     - Local: install [cyan]Ollama[/cyan] from https://ollama.com and use its local OpenAI-compatible endpoint",
             "     - Cloud: add an API key such as OpenRouter from https://openrouter.ai/keys",
+            "     - OAuth: run [cyan]hermitcrab provider login openai-oauth[/cyan] or [cyan]hermitcrab provider login qwen-oauth[/cyan]",
             "  2. Run a quick readiness check: [cyan]hermitcrab doctor[/cyan]",
             '  3. Start chatting: [cyan]hermitcrab agent[/cyan] or [cyan]hermitcrab agent -m "Hello!"[/cyan]',
         ]
@@ -578,6 +580,7 @@ def _make_provider(config: Config):
     from hermitcrab.providers.litellm_provider import LiteLLMProvider
     from hermitcrab.providers.ollama_provider import OllamaProvider
     from hermitcrab.providers.openai_codex_provider import OpenAICodexProvider
+    from hermitcrab.providers.qwen_oauth_provider import QwenOAuthProvider
 
     model = config.agents.defaults.model
     resolved_model = config.resolve_model_config(model)
@@ -623,8 +626,16 @@ def _make_provider(config: Config):
         return any(config.get_provider_name(candidate) == "ollama" for candidate in candidates)
 
     # OpenAI Codex (OAuth)
-    if provider_name == "openai_codex" or model.startswith("openai-codex/"):
+    if provider_name in {"openai_codex", "openai_oauth"} or model.startswith(
+        ("openai-codex/", "openai-oauth/")
+    ):
         return OpenAICodexProvider(default_model=resolved_model.model or model)
+
+    if provider_name == "qwen_oauth" or model.startswith(("qwen-oauth/", "qwen-portal/")):
+        return QwenOAuthProvider(
+            default_model=resolved_model.model or model,
+            api_base=config.get_api_base(model),
+        )
 
     # Custom: direct OpenAI-compatible endpoint, bypasses LiteLLM
     if provider_name == "custom":
@@ -865,7 +876,7 @@ def gateway(
     reminder_service = ReminderService(
         agent.reminders,
         on_notify=on_reminder_notify,
-        interval_s=15,
+        interval_s=config.gateway.reminders.interval_s,
         enabled=agent.reminders is not None,
     )
 
@@ -879,6 +890,7 @@ def gateway(
         console.print(f"[green]✓[/green] Cron: {cron_status['jobs']} scheduled jobs")
 
     console.print(f"[green]✓[/green] Heartbeat: every {hb_cfg.interval_s}s")
+    console.print(f"[green]✓[/green] Reminders: every {config.gateway.reminders.interval_s}s")
 
     async def run():
         try:
@@ -2151,7 +2163,7 @@ def _register_login(name: str):
 @provider_app.command("login")
 def provider_login(
     provider: str = typer.Argument(
-        ..., help="OAuth provider (e.g. 'openai-codex', 'github-copilot')"
+        ..., help="OAuth provider (e.g. 'openai-oauth', 'openai-codex', 'qwen-oauth')"
     ),
 ):
     """Authenticate with an OAuth provider."""
@@ -2173,6 +2185,7 @@ def provider_login(
     handler()
 
 
+@_register_login("openai_oauth")
 @_register_login("openai_codex")
 def _login_openai_codex() -> None:
     try:
@@ -2193,11 +2206,44 @@ def _login_openai_codex() -> None:
             console.print("[red]✗ Authentication failed[/red]")
             raise typer.Exit(1)
         console.print(
-            f"[green]✓ Authenticated with OpenAI Codex[/green]  [dim]{token.account_id}[/dim]"
+            f"[green]✓ Authenticated with OpenAI OAuth[/green]  [dim]{token.account_id}[/dim]"
         )
     except ImportError:
         console.print("[red]oauth_cli_kit not installed. Run: pip install oauth-cli-kit[/red]")
         raise typer.Exit(1)
+
+
+@_register_login("qwen_oauth")
+def _login_qwen_oauth() -> None:
+    from hermitcrab.providers.qwen_oauth_provider import resolve_qwen_runtime_credentials
+
+    qwen_binary = shutil.which("qwen")
+    try:
+        creds = resolve_qwen_runtime_credentials(refresh_if_expiring=False)
+        console.print(f"[green]✓ Authenticated with Qwen OAuth[/green]  [dim]{creds['auth_file']}[/dim]")
+        return
+    except Exception:
+        pass
+
+    if qwen_binary:
+        console.print("[cyan]Starting Qwen CLI OAuth flow...[/cyan]\n")
+        result = subprocess.run([qwen_binary, "auth", "qwen-oauth"], check=False)
+        if result.returncode != 0:
+            console.print("[red]Qwen CLI login failed.[/red]")
+            raise typer.Exit(1)
+        try:
+            creds = resolve_qwen_runtime_credentials(refresh_if_expiring=False)
+            console.print(
+                f"[green]✓ Authenticated with Qwen OAuth[/green]  [dim]{creds['auth_file']}[/dim]"
+            )
+            return
+        except Exception as exc:
+            console.print(f"[red]Qwen OAuth credentials were not usable after login: {exc}[/red]")
+            raise typer.Exit(1) from exc
+
+    console.print("[red]Qwen CLI not found and no existing Qwen OAuth credentials were detected.[/red]")
+    console.print("Install the Qwen CLI, then run: [cyan]qwen auth qwen-oauth[/cyan]")
+    raise typer.Exit(1)
 
 
 @_register_login("github_copilot")

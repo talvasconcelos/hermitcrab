@@ -17,6 +17,15 @@ class Base(BaseModel):
     model_config = ConfigDict(alias_generator=to_camel, populate_by_name=True)
 
 
+def default_nostr_relays() -> list[str]:
+    """Return the default bootstrap relays for Nostr connectivity."""
+    return [
+        "wss://relay.damus.io",
+        "wss://relay.primal.net",
+        "wss://nostr-pub.wellorder.net",
+    ]
+
+
 class TelegramConfig(Base):
     """Telegram channel configuration."""
 
@@ -64,18 +73,17 @@ class EmailConfig(Base):
 
 
 class NostrConfig(Base):
-    """Nostr channel configuration (NIP-04 encrypted DMs)."""
+    """Nostr channel configuration for legacy NIP-04 or modern NIP-17 DMs."""
 
     enabled: bool = False
     private_key: str = ""  # nsec or hex private key (required if enabled)
-    relays: list[str] = Field(
-        default_factory=lambda: [
-            "wss://relay.damus.io",
-            "wss://relay.primal.net",
-            "wss://nostr-pub.wellorder.net",
-        ]
-    )  # Default popular relays
-    protocol: Literal["nip04", "nip17"] = "nip04"  # NIP-04 for DMs, NIP-17 for groups (future)
+    relays: list[str] = Field(default_factory=lambda: default_nostr_relays())  # Default popular relays
+    protocol: Literal["nip04", "nip17"] = "nip04"  # NIP-04 legacy DMs, NIP-17 modern chat DMs
+    nip17_fallback_to_configured_relays: bool = (
+        True  # If kind 10050 is missing/unreadable, fall back to configured relays
+    )
+    nip17_relay_discovery_timeout_s: float = 4.0
+    nip17_relay_cache_ttl_s: int = 10 * 60
     allowed_pubkeys: list[str] = Field(
         default_factory=list
     )  # npub/hex, or "*" for open mode, or [] for strict/deny-all
@@ -280,7 +288,9 @@ class ProvidersConfig(Base):
     volcengine: ProviderConfig = Field(
         default_factory=ProviderConfig
     )  # VolcEngine (火山引擎) API gateway
+    openai_oauth: ProviderConfig = Field(default_factory=ProviderConfig)  # ChatGPT/Codex OAuth
     openai_codex: ProviderConfig = Field(default_factory=ProviderConfig)  # OpenAI Codex (OAuth)
+    qwen_oauth: ProviderConfig = Field(default_factory=ProviderConfig)  # Qwen Portal OAuth
     github_copilot: ProviderConfig = Field(default_factory=ProviderConfig)  # Github Copilot (OAuth)
     ollama: ProviderConfig = Field(default_factory=ProviderConfig)  # Ollama via LiteLLM routing
     nvidia_nim: ProviderConfig = Field(default_factory=ProviderConfig)  # NVIDIA NIM API
@@ -291,6 +301,12 @@ class HeartbeatConfig(Base):
 
     enabled: bool = True
     interval_s: int = 30 * 60  # 30 minutes
+
+
+class ReminderPollingConfig(Base):
+    """Reminder delivery polling configuration."""
+
+    interval_s: int = 60  # 1 minute
 
 
 class ReflectionPromotionConfig(Base):
@@ -323,6 +339,7 @@ class GatewayConfig(Base):
     host: str = "0.0.0.0"
     port: int = 18790
     heartbeat: HeartbeatConfig = Field(default_factory=HeartbeatConfig)
+    reminders: ReminderPollingConfig = Field(default_factory=ReminderPollingConfig)
 
 
 class WebSearchConfig(Base):

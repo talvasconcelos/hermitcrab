@@ -188,6 +188,24 @@ PROVIDERS: tuple[ProviderSpec, ...] = (
         strip_model_prefix=False,
         model_overrides=(),
     ),
+    # OpenAI OAuth: ChatGPT/Codex subscription-backed access via OAuth.
+    ProviderSpec(
+        name="openai_oauth",
+        keywords=("openai-oauth", "chatgpt-oauth"),
+        env_key="",
+        display_name="OpenAI OAuth",
+        litellm_prefix="",
+        skip_prefixes=(),
+        env_extras=(),
+        is_gateway=False,
+        is_local=False,
+        detect_by_key_prefix="",
+        detect_by_base_keyword="chatgpt",
+        default_api_base="https://chatgpt.com/backend-api",
+        strip_model_prefix=False,
+        model_overrides=(),
+        is_oauth=True,
+    ),
     # OpenAI Codex: uses OAuth, not API key.
     ProviderSpec(
         name="openai_codex",
@@ -205,6 +223,25 @@ PROVIDERS: tuple[ProviderSpec, ...] = (
         strip_model_prefix=False,
         model_overrides=(),
         is_oauth=True,  # OAuth-based authentication
+    ),
+    # Qwen Portal: OAuth-backed OpenAI-compatible endpoint.
+    ProviderSpec(
+        name="qwen_oauth",
+        keywords=("qwen-oauth", "qwen-portal"),
+        env_key="",
+        display_name="Qwen OAuth",
+        litellm_prefix="",
+        skip_prefixes=(),
+        env_extras=(),
+        is_gateway=False,
+        is_local=False,
+        detect_by_key_prefix="",
+        detect_by_base_keyword="portal.qwen.ai",
+        default_api_base="https://portal.qwen.ai/v1",
+        strip_model_prefix=False,
+        model_overrides=(),
+        is_oauth=True,
+        is_direct=True,
     ),
     # Github Copilot: uses OAuth, not API key.
     ProviderSpec(
