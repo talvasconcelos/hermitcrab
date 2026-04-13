@@ -27,6 +27,7 @@ from __future__ import annotations
 import asyncio
 import inspect
 import json
+import os
 import re
 from contextlib import AsyncExitStack
 from dataclasses import dataclass
@@ -692,6 +693,12 @@ class AgentLoop:
             lines.append("Aliases:")
             lines.extend(alias_lines)
 
+        discovered_lines = self._build_provider_discovery_lines(session, seen)
+        if discovered_lines:
+            lines.append("")
+            lines.append("Provider-discovered choices:")
+            lines.extend(discovered_lines)
+
         if current_selection and _remember(current_selection):
             lines.append("")
             lines.append("Other:")
@@ -706,6 +713,67 @@ class AgentLoop:
             ]
         )
         return "\n".join(lines)
+
+    @staticmethod
+    def _read_local_codex_models() -> list[str]:
+        """Read Codex model IDs from local Codex state without network access."""
+        codex_home = Path(os.getenv("CODEX_HOME", "").strip() or "~/.codex").expanduser()
+        ordered: list[str] = []
+
+        config_path = codex_home / "config.toml"
+        if config_path.exists():
+            try:
+                import tomllib
+
+                payload = tomllib.loads(config_path.read_text(encoding="utf-8"))
+                model = payload.get("model") if isinstance(payload, dict) else None
+                if isinstance(model, str) and model.strip():
+                    ordered.append(model.strip())
+            except Exception:
+                pass
+
+        cache_path = codex_home / "models_cache.json"
+        if cache_path.exists():
+            try:
+                raw = json.loads(cache_path.read_text(encoding="utf-8"))
+                entries = raw.get("models") if isinstance(raw, dict) else None
+                if isinstance(entries, list):
+                    for item in entries:
+                        if not isinstance(item, dict):
+                            continue
+                        slug = item.get("slug")
+                        if not isinstance(slug, str) or not slug.strip():
+                            continue
+                        slug = slug.strip()
+                        if slug not in ordered:
+                            ordered.append(slug)
+            except Exception:
+                pass
+
+        return ordered
+
+    def _build_provider_discovery_lines(self, session: Session, seen: set[str]) -> list[str]:
+        """Return extra model choices from provider-local discovery sources."""
+        selection, resolved_model = self._resolve_interactive_model(session)
+        model_ref = resolved_model or selection or ""
+        provider_prefix = model_ref.split("/", 1)[0] if "/" in model_ref else ""
+        lines: list[str] = []
+
+        def _add(value: str) -> None:
+            key = value.strip().lower()
+            if not key or key in seen:
+                return
+            seen.add(key)
+            lines.append(f"- `{value}`")
+
+        if provider_prefix in {"openai-codex", "openai-oauth"}:
+            for model in self._read_local_codex_models():
+                _add(f"{provider_prefix}/{model}")
+        elif provider_prefix in {"qwen-oauth", "qwen-portal"}:
+            _add("qwen-oauth/coder-model")
+            _add("qwen-oauth/vision-model")
+
+        return lines
 
     def _build_model_status_response(self, session: Session) -> str:
         """Show the current conversation model selection."""
