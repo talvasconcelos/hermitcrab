@@ -27,6 +27,7 @@ from __future__ import annotations
 import asyncio
 import inspect
 import json
+import os
 import re
 from contextlib import AsyncExitStack
 from dataclasses import dataclass
@@ -113,6 +114,7 @@ from hermitcrab.bus.queue import MessageBus
 from hermitcrab.config.schema import ExecToolConfig, ModelAliasConfig, NamedModelConfig
 from hermitcrab.providers.base import LLMProvider
 from hermitcrab.session.manager import Session, SessionManager
+from hermitcrab.utils.helpers import resolve_model_alias_config
 
 if TYPE_CHECKING:
     from hermitcrab.config.schema import ChannelsConfig
@@ -579,6 +581,218 @@ class AgentLoop:
             return self.model
         return model
 
+    @staticmethod
+    def _normalize_model_selection(value: str | None) -> str | None:
+        """Normalize a user-supplied session model reference."""
+        if value is None:
+            return None
+        normalized = value.strip()
+        return normalized or None
+
+    def _interactive_model_selection(self, session: Session | None = None) -> str | None:
+        """Return the session-scoped interactive model reference, if any."""
+        if session is not None:
+            selected = self._normalize_model_selection(session.metadata.get("active_model"))
+            if selected is not None:
+                return selected
+        return self._get_model_for_job(JobClass.INTERACTIVE_RESPONSE)
+
+    def _resolve_interactive_model(self, session: Session | None = None) -> tuple[str | None, str | None]:
+        """Resolve the session-scoped interactive model to a concrete provider model."""
+        selection = self._interactive_model_selection(session)
+        resolved = resolve_model_alias_config(selection, self.model_aliases, self.named_models)
+        return selection, resolved.model
+
+    def _validate_interactive_model_selection(self, selection: str) -> tuple[bool, str]:
+        """Validate a session-local model selection against configured provider routing."""
+        normalized = self._normalize_model_selection(selection)
+        if normalized is None:
+            return False, "Model name cannot be empty."
+
+        resolved = resolve_model_alias_config(normalized, self.model_aliases, self.named_models)
+        resolved_model = resolved.model
+        if not resolved_model:
+            return False, f"Could not resolve model `{normalized}`."
+
+        request_config_resolver = getattr(self.provider, "_request_config_resolver", None)
+        if callable(request_config_resolver):
+            request_config = request_config_resolver(resolved_model) or {}
+            if request_config.get("provider_name"):
+                return True, resolved_model
+
+        if resolved_model.startswith(
+            ("openai-codex/", "openai-oauth/", "qwen-oauth/", "qwen-portal/")
+        ):
+            return True, resolved_model
+
+        return (
+            False,
+            f"Model `{normalized}` resolves to `{resolved_model}`, but no configured provider was found for it.",
+        )
+
+    def _build_models_response(self, session: Session) -> str:
+        """Render available interactive model choices from configured defaults, names, and aliases."""
+        current_selection, current_model = self._resolve_interactive_model(session)
+        seen: set[str] = set()
+
+        def _format_choice(value: str, resolved_value: str | None) -> str:
+            if resolved_value and resolved_value != value:
+                return f"`{value}` -> `{resolved_value}`"
+            return f"`{value}`"
+
+        def _remember(value: str) -> bool:
+            key = value.strip().lower()
+            if not key or key in seen:
+                return False
+            seen.add(key)
+            return True
+
+        lines = ["Interactive models for this conversation:"]
+
+        primary = self._get_model_for_job(JobClass.INTERACTIVE_RESPONSE)
+        if primary:
+            primary_resolved = resolve_model_alias_config(
+                primary,
+                self.model_aliases,
+                self.named_models,
+            ).model
+        else:
+            primary_resolved = None
+
+        if current_selection is not None:
+            lines.append("")
+            lines.append("Current:")
+            lines.append(f"- {_format_choice(current_selection, current_model)}")
+            if current_selection != primary and primary is not None:
+                lines.append("- Reset to default with `/model default`")
+
+        if primary is not None and _remember(primary):
+            lines.append("")
+            lines.append("Default:")
+            lines.append(f"- {_format_choice(primary, primary_resolved)}")
+
+        named_lines: list[str] = []
+        for name in sorted(self.named_models):
+            resolved = resolve_model_alias_config(name, self.model_aliases, self.named_models)
+            if _remember(name):
+                named_lines.append(f"- `{name}` -> `{resolved.model or name}`")
+
+        alias_lines: list[str] = []
+        for alias in sorted(self.model_aliases):
+            resolved = resolve_model_alias_config(alias, self.model_aliases, self.named_models)
+            if _remember(alias):
+                alias_lines.append(f"- `{alias}` -> `{resolved.model or alias}`")
+
+        if named_lines:
+            lines.append("")
+            lines.append("Named models:")
+            lines.extend(named_lines)
+
+        if alias_lines:
+            lines.append("")
+            lines.append("Aliases:")
+            lines.extend(alias_lines)
+
+        discovered_lines = self._build_provider_discovery_lines(session, seen)
+        if discovered_lines:
+            lines.append("")
+            lines.append("Provider-discovered choices:")
+            lines.extend(discovered_lines)
+
+        if current_selection and _remember(current_selection):
+            lines.append("")
+            lines.append("Other:")
+            lines.append(f"- {_format_choice(current_selection, current_model)}")
+
+        lines.extend(
+            [
+                "",
+                "Use `/model <name>` to switch this conversation only.",
+                "You can use a named model, a configured alias, or a full model id like `openai-oauth/gpt-5.4`.",
+                "Use `/model` with no argument to see the active model.",
+                "Use `/model default` to clear the conversation override.",
+            ]
+        )
+        return "\n".join(lines)
+
+    @staticmethod
+    def _read_local_codex_models() -> list[str]:
+        """Read Codex model IDs from local Codex state without network access."""
+        codex_home = Path(os.getenv("CODEX_HOME", "").strip() or "~/.codex").expanduser()
+        ordered: list[str] = []
+
+        config_path = codex_home / "config.toml"
+        if config_path.exists():
+            try:
+                import tomllib
+
+                payload = tomllib.loads(config_path.read_text(encoding="utf-8"))
+                model = payload.get("model") if isinstance(payload, dict) else None
+                if isinstance(model, str) and model.strip():
+                    ordered.append(model.strip())
+            except Exception:
+                pass
+
+        cache_path = codex_home / "models_cache.json"
+        if cache_path.exists():
+            try:
+                raw = json.loads(cache_path.read_text(encoding="utf-8"))
+                entries = raw.get("models") if isinstance(raw, dict) else None
+                if isinstance(entries, list):
+                    for item in entries:
+                        if not isinstance(item, dict):
+                            continue
+                        slug = item.get("slug")
+                        if not isinstance(slug, str) or not slug.strip():
+                            continue
+                        slug = slug.strip()
+                        if slug not in ordered:
+                            ordered.append(slug)
+            except Exception:
+                pass
+
+        return ordered
+
+    def _build_provider_discovery_lines(self, session: Session, seen: set[str]) -> list[str]:
+        """Return extra model choices from provider-local discovery sources."""
+        selection, resolved_model = self._resolve_interactive_model(session)
+        model_ref = resolved_model or selection or ""
+        provider_prefix = model_ref.split("/", 1)[0] if "/" in model_ref else ""
+        lines: list[str] = []
+
+        def _add(value: str) -> None:
+            key = value.strip().lower()
+            if not key or key in seen:
+                return
+            seen.add(key)
+            lines.append(f"- `{value}`")
+
+        if provider_prefix in {"openai-codex", "openai-oauth"}:
+            for model in self._read_local_codex_models():
+                _add(f"{provider_prefix}/{model}")
+        elif provider_prefix in {"qwen-oauth", "qwen-portal"}:
+            _add("qwen-oauth/coder-model")
+            _add("qwen-oauth/vision-model")
+
+        return lines
+
+    def _build_model_status_response(self, session: Session) -> str:
+        """Show the current conversation model selection."""
+        selection, resolved_model = self._resolve_interactive_model(session)
+        if selection is None:
+            return "No interactive model is configured."
+        if resolved_model and resolved_model != selection:
+            return f"Current model: `{selection}` -> `{resolved_model}`"
+        return f"Current model: `{selection}`"
+
+    def _active_model_reply_metadata(self, session: Session) -> dict[str, Any]:
+        """Attach the active interactive model label to user-visible replies."""
+        selection, resolved_model = self._resolve_interactive_model(session)
+        if selection is None:
+            return {}
+        label = selection if not resolved_model or resolved_model == selection else f"{selection} -> {resolved_model}"
+        return {"_active_model_label": label}
+
     async def _chat_with_retry(
         self,
         *,
@@ -879,6 +1093,7 @@ class AgentLoop:
         initial_messages: list[dict],
         on_progress: Callable[..., Awaitable[None]] | None = None,
         job_class: JobClass = JobClass.INTERACTIVE_RESPONSE,
+        model_override: str | None = None,
     ) -> TurnResult:
         """
         Run the agent iteration loop.
@@ -893,7 +1108,7 @@ class AgentLoop:
         Returns:
             Structured turn result.
         """
-        runner = self._build_turn_runner()
+        runner = self._build_turn_runner(model_override=model_override)
         return await runner.run(initial_messages, on_progress=on_progress, job_class=job_class)
 
     async def run(self) -> None:
@@ -1156,6 +1371,7 @@ class AgentLoop:
                 build_result.messages,
                 on_progress=progress_callback,
                 job_class=JobClass.INTERACTIVE_RESPONSE,
+                model_override=self._resolve_interactive_model(session)[1],
             )
             final_content = turn_result.final_content
             if is_empty_response(final_content) or is_placeholder_assistant_reply(final_content):
@@ -1184,7 +1400,10 @@ class AgentLoop:
                 channel=msg.channel,
                 chat_id=msg.chat_id,
                 content=final_content,
-                metadata=msg.metadata or {},
+                metadata={
+                    **(msg.metadata or {}),
+                    **self._active_model_reply_metadata(session),
+                },
             )
 
     @staticmethod
@@ -1259,7 +1478,10 @@ class AgentLoop:
         session: Session,
     ) -> OutboundMessage | None:
         """Handle early slash commands before building interactive context."""
-        cmd = msg.content.strip().lower()
+        raw = msg.content.strip()
+        parts = raw.split(maxsplit=1)
+        cmd = parts[0].lower() if parts else ""
+        arg = parts[1].strip() if len(parts) > 1 else ""
         if cmd == "/new":
             messages_snapshot = list(session.messages)
             await self._on_session_end(
@@ -1275,10 +1497,59 @@ class AgentLoop:
                 msg,
                 "🦀 hermitcrab chat commands:\n"
                 "/new — Start a new conversation\n"
+                "/models — List interactive model choices\n"
+                "/model — Show the current conversation model\n"
+                "/model <name> — Switch the current conversation model\n"
+                "/model default — Reset to the default conversation model\n"
                 "/reflect — Run reflection on this conversation\n"
                 "/help — Show chat commands\n\n"
                 "For CLI commands like status, doctor, or onboard, run them in the shell "
                 "as `hermitcrab status`, `hermitcrab doctor`, or `hermitcrab onboard`.",
+                metadata=self._active_model_reply_metadata(session),
+            )
+
+        if cmd == "/models":
+            return self._reply(
+                msg,
+                self._build_models_response(session),
+                metadata=self._active_model_reply_metadata(session),
+            )
+
+        if cmd == "/model":
+            if not arg:
+                return self._reply(
+                    msg,
+                    self._build_model_status_response(session),
+                    metadata=self._active_model_reply_metadata(session),
+                )
+
+            if arg.lower() == "default":
+                session.metadata.pop("active_model", None)
+                self.sessions.save(session)
+                return self._reply(
+                    msg,
+                    "Reset this conversation to the default interactive model.",
+                    metadata=self._active_model_reply_metadata(session),
+                )
+
+            ok, detail = self._validate_interactive_model_selection(arg)
+            if not ok:
+                return self._reply(msg, detail, metadata=self._active_model_reply_metadata(session))
+
+            selection = self._normalize_model_selection(arg)
+            assert selection is not None
+            session.metadata["active_model"] = selection
+            self.sessions.save(session)
+            if detail != selection:
+                return self._reply(
+                    msg,
+                    f"Switched this conversation to `{selection}` -> `{detail}`",
+                    metadata=self._active_model_reply_metadata(session),
+                )
+            return self._reply(
+                msg,
+                f"Switched this conversation to `{selection}`",
+                metadata=self._active_model_reply_metadata(session),
             )
 
         if cmd == "/reflect":
@@ -1523,8 +1794,13 @@ class AgentLoop:
             )
         return "The model returned an empty reply. Please retry the request or switch to a stronger model."
 
-    def _build_turn_runner(self) -> TurnRunner:
+    def _build_turn_runner(self, *, model_override: str | None = None) -> TurnRunner:
         """Build a turn runner configured with the current loop dependencies."""
+        def _get_turn_model(job_class: JobClass) -> str | None:
+            if model_override is not None and job_class == JobClass.INTERACTIVE_RESPONSE:
+                return model_override
+            return self._get_model_for_job(job_class)
+
         return TurnRunner(
             context=self.context,
             tools=self.tools,
@@ -1540,7 +1816,7 @@ class AgentLoop:
             stream_chat_callable=(
                 self._stream_chat if isinstance(self.provider, LLMProvider) else None
             ),
-            get_model_for_job=self._get_model_for_job,
+            get_model_for_job=_get_turn_model,
             strip_think=self._strip_think,
             tool_hint=self._tool_hint,
             is_empty_response=is_empty_response,
