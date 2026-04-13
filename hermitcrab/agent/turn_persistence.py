@@ -8,6 +8,7 @@ from typing import Any, Callable
 from hermitcrab.agent.message_preparation import (
     is_empty_response,
     is_placeholder_assistant_reply,
+    is_transition_assistant_message,
 )
 
 
@@ -32,7 +33,9 @@ class TurnPersistence:
                 and entry["tool_calls"]
             ):
                 content = entry.get("content")
-                if is_empty_response(content) or is_placeholder_assistant_reply(content):
+                if is_transition_assistant_message(content, entry["tool_calls"]) or (
+                    is_empty_response(content) or is_placeholder_assistant_reply(content)
+                ):
                     entry.pop("content", None)
             if entry.get("role") == "tool" and isinstance(entry.get("content"), str):
                 content = entry["content"]

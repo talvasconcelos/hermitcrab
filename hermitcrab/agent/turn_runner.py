@@ -840,9 +840,6 @@ class TurnRunner:
                     break
 
                 if on_progress:
-                    clean = self.strip_think(response.content)
-                    if clean:
-                        await on_progress(clean)
                     await on_progress(self.tool_hint(response.tool_calls), tool_hint=True)
 
                 tool_call_dicts = [
