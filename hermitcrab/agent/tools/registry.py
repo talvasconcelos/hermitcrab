@@ -23,9 +23,14 @@ class RegisteredTool:
 class ToolRegistry:
     """Registry for tools plus the policy used to expose and execute them."""
 
-    def __init__(self, default_policy: ToolPermissionPolicy | None = None):
+    def __init__(
+        self,
+        default_policy: ToolPermissionPolicy | None = None,
+        audit_event: Any | None = None,
+    ):
         self._tools: dict[str, RegisteredTool] = {}
         self._default_policy = default_policy
+        self._audit_event = audit_event
 
     def register(self, tool: Tool, metadata: ToolMetadata | None = None) -> None:
         """Register a tool and its metadata."""
@@ -88,6 +93,13 @@ class ToolRegistry:
         denial = self._check_policy(name, entry.metadata, policy or self._default_policy)
         if denial is not None:
             logger.warning("Tool policy denied '{}' ({})", name, denial)
+            if callable(self._audit_event):
+                self._audit_event(
+                    "tool.policy_denied",
+                    tool_name=name,
+                    permission_level=entry.metadata.permission_level.value,
+                    denial=denial,
+                )
             return f"Error: Tool '{name}' is not allowed: {denial}" + hint
 
         try:

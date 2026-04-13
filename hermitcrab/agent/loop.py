@@ -274,7 +274,10 @@ class AgentLoop:
             workspace,
             legacy_cron_store_path=(cron_service.store_path if cron_service else None),
         )
-        self.tools = ToolRegistry(default_policy=build_main_agent_policy())
+        self.tools = ToolRegistry(
+            default_policy=build_main_agent_policy(),
+            audit_event=self._audit_event,
+        )
         self.execution_state = ExecutionStateTracker()
         self.subagents = SubagentManager(
             provider=provider,
