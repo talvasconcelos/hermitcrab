@@ -2079,6 +2079,13 @@ def status(
         "Bootstrap: "
         + ("[green]ready[/green]" if report.bootstrap_ready else "[yellow]incomplete[/yellow]")
     )
+    if report.named_workspaces:
+        console.print(
+            "Named workspaces: "
+            f"{report.bootstrapped_named_workspaces}/{report.named_workspaces} bootstrapped"
+        )
+    if report.nostr_workspace_bindings:
+        console.print(f"Nostr workspace bindings: {report.nostr_workspace_bindings}")
 
     console.print(f"Selected model: {report.selected_model}")
     if report.resolved_model and report.resolved_model != report.selected_model:
