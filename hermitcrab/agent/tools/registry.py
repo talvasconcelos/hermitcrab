@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from typing import Any
 
 from loguru import logger
@@ -20,6 +20,20 @@ class RegisteredTool:
     metadata: ToolMetadata
 
 
+@dataclass(slots=True)
+class PolicyDenialHint:
+    """Structured hint emitted when runtime policy blocks a tool."""
+
+    tool_name: str
+    permission_level: str
+    denial: str
+    actor: str
+    profile_name: str | None
+    allowed_permissions: tuple[str, ...]
+    alternative_tools: tuple[str, ...]
+    safe_fallback_tool: str | None = None
+
+
 class ToolRegistry:
     """Registry for tools plus the policy used to expose and execute them."""
 
@@ -31,6 +45,7 @@ class ToolRegistry:
         self._tools: dict[str, RegisteredTool] = {}
         self._default_policy = default_policy
         self._audit_event = audit_event
+        self._last_policy_hint: PolicyDenialHint | None = None
 
     def register(self, tool: Tool, metadata: ToolMetadata | None = None) -> None:
         """Register a tool and its metadata."""
@@ -92,6 +107,7 @@ class ToolRegistry:
 
         denial = self._check_policy(name, entry.metadata, policy or self._default_policy)
         if denial is not None:
+            self._last_policy_hint = None
             logger.warning("Tool policy denied '{}' ({})", name, denial)
             if callable(self._audit_event):
                 self._audit_event(
@@ -100,7 +116,28 @@ class ToolRegistry:
                     permission_level=entry.metadata.permission_level.value,
                     denial=denial,
                 )
-            return f"Error: Tool '{name}' is not allowed: {denial}" + hint
+            redirect_result = await self._execute_policy_redirect(
+                denied_name=name,
+                denied_metadata=entry.metadata,
+                denied_params=params,
+                policy=policy or self._default_policy,
+            )
+            self._last_policy_hint = self._build_policy_hint(
+                name=name,
+                metadata=entry.metadata,
+                denial=denial,
+                policy=policy or self._default_policy,
+                redirect_result=redirect_result,
+            )
+            return self._format_policy_denial(
+                name=name,
+                metadata=entry.metadata,
+                denial=denial,
+                policy=policy or self._default_policy,
+                redirect_result=redirect_result,
+            ) + hint
+
+        self._last_policy_hint = None
 
         try:
             logger.info(
@@ -120,6 +157,14 @@ class ToolRegistry:
         except Exception as exc:
             logger.exception("Tool registry raised while executing '{}'", name)
             return f"Error executing {name}: {exc}" + hint
+
+    def consume_policy_hint(self) -> dict[str, Any] | None:
+        """Return and clear the last structured policy-denial hint."""
+        hint = self._last_policy_hint
+        self._last_policy_hint = None
+        if hint is None:
+            return None
+        return asdict(hint)
 
     @staticmethod
     def _check_policy(
@@ -208,6 +253,145 @@ class ToolRegistry:
         if lowered == "false":
             return False
         return value
+
+    def _format_policy_denial(
+        self,
+        *,
+        name: str,
+        metadata: ToolMetadata,
+        denial: str,
+        policy: ToolPermissionPolicy | None,
+        redirect_result: tuple[str, str] | None,
+    ) -> str:
+        lines = [f"Error: Tool '{name}' is blocked by runtime policy.", f"Reason: {denial}"]
+
+        if policy is not None and policy.allowed_permissions:
+            allowed_permissions = ", ".join(
+                sorted(level.value for level in policy.allowed_permissions)
+            )
+            lines.append(f"Allowed permissions here: {allowed_permissions}.")
+
+        alternatives = self._policy_alternatives(name, metadata, policy)
+        if alternatives:
+            lines.append(f"Try instead: {', '.join(alternatives)}.")
+
+        if redirect_result is not None:
+            redirect_name, redirect_output = redirect_result
+            lines.append(f"Safe fallback used: `{redirect_name}`.")
+            lines.append(redirect_output)
+
+        return "\n".join(lines)
+
+    def _build_policy_hint(
+        self,
+        *,
+        name: str,
+        metadata: ToolMetadata,
+        denial: str,
+        policy: ToolPermissionPolicy | None,
+        redirect_result: tuple[str, str] | None,
+    ) -> PolicyDenialHint:
+        return PolicyDenialHint(
+            tool_name=name,
+            permission_level=metadata.permission_level.value,
+            denial=denial,
+            actor=policy.actor if policy is not None else "unknown",
+            profile_name=policy.profile_name if policy is not None else None,
+            allowed_permissions=tuple(
+                sorted(level.value for level in policy.allowed_permissions)
+            )
+            if policy is not None and policy.allowed_permissions
+            else (),
+            alternative_tools=tuple(self._policy_alternatives(name, metadata, policy)),
+            safe_fallback_tool=redirect_result[0] if redirect_result is not None else None,
+        )
+
+    def _policy_alternatives(
+        self,
+        denied_name: str,
+        denied_metadata: ToolMetadata,
+        policy: ToolPermissionPolicy | None,
+    ) -> list[str]:
+        alternatives: list[str] = []
+        for name, entry in self._tools.items():
+            if name == denied_name:
+                continue
+            if self._check_policy(name, entry.metadata, policy) is not None:
+                continue
+            if denied_metadata.tags and set(entry.metadata.tags).intersection(denied_metadata.tags):
+                alternatives.append(name)
+
+        if alternatives:
+            return sorted(alternatives)[:4]
+
+        allowed = sorted(self.tool_names(policy))
+        return allowed[:4]
+
+    async def _execute_policy_redirect(
+        self,
+        *,
+        denied_name: str,
+        denied_metadata: ToolMetadata,
+        denied_params: dict[str, Any],
+        policy: ToolPermissionPolicy | None,
+    ) -> tuple[str, str] | None:
+        redirect = self._build_policy_redirect(denied_name, denied_params)
+        if redirect is None:
+            return None
+
+        fallback_name, fallback_params = redirect
+        fallback_entry = self._tools.get(fallback_name)
+        if fallback_entry is None:
+            return None
+        if self._check_policy(fallback_name, fallback_entry.metadata, policy) is not None:
+            return None
+
+        try:
+            normalized = self._normalize_params(fallback_entry.tool, fallback_params)
+            errors = fallback_entry.tool.validate_params(normalized)
+            if errors:
+                return None
+            result = await fallback_entry.tool.execute(**normalized)
+        except Exception:
+            logger.exception(
+                "Policy redirect from '{}' to '{}' failed",
+                denied_name,
+                fallback_name,
+            )
+            return None
+
+        if self._is_error_result(result):
+            return None
+        logger.info("Policy redirect ran '{}' instead of denied '{}'", fallback_name, denied_name)
+        if callable(self._audit_event):
+            self._audit_event(
+                "tool.policy_redirected",
+                tool_name=denied_name,
+                redirect_tool_name=fallback_name,
+                permission_level=denied_metadata.permission_level.value,
+            )
+        return fallback_name, result
+
+    @staticmethod
+    def _build_policy_redirect(
+        denied_name: str,
+        denied_params: dict[str, Any],
+    ) -> tuple[str, dict[str, Any]] | None:
+        if denied_name in {"write_file", "edit_file"}:
+            path = denied_params.get("path")
+            if isinstance(path, str) and path.strip():
+                return "read_file", {"path": path}
+
+        if denied_name in {"list_add_items", "list_set_item_status", "list_remove_items", "list_delete"}:
+            list_name = denied_params.get("list_name")
+            if isinstance(list_name, str) and list_name.strip():
+                return "list_show", {"list_name": list_name, "include_completed": True}
+
+        return None
+
+    @staticmethod
+    def _is_error_result(result: Any) -> bool:
+        return isinstance(result, str) and result.strip().lower().startswith("error")
 
     def __len__(self) -> int:
         return len(self._tools)
