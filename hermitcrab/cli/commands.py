@@ -975,6 +975,12 @@ def gateway(
                     _workspace_agent_key(workspace_name),
                 )
                 agent_for_msg = _get_or_create_agent(workspace_name)
+                agent_for_msg.audit_event(
+                    "gateway.workspace_route",
+                    session_key=msg.session_key,
+                    msg=msg,
+                    workspace_agent=_workspace_agent_key(workspace_name),
+                )
                 response = await agent_for_msg.handle_inbound(msg)
                 if response is not None:
                     await bus.publish_outbound(response)

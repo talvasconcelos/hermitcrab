@@ -831,6 +831,17 @@ class AgentLoop:
         except OSError as exc:
             logger.warning("Failed to append audit event {}: {}", event, exc)
 
+    def audit_event(
+        self,
+        event: str,
+        *,
+        session_key: str | None = None,
+        msg: InboundMessage | None = None,
+        **data: Any,
+    ) -> None:
+        """Public wrapper for appending small structured audit events."""
+        self._audit_event(event, session_key=session_key, msg=msg, **data)
+
     async def _chat_with_retry(
         self,
         *,
