@@ -54,6 +54,10 @@ class StatusReport:
     selected_model: str
     resolved_model: str
     selected_provider: str | None
+    multi_workspace_routing_active: bool = False
+    named_workspaces: int = 0
+    bootstrapped_named_workspaces: int = 0
+    nostr_workspace_bindings: int = 0
     provider_statuses: list[ProviderStatus] = field(default_factory=list)
     skill_statuses: list[SkillStatus] = field(default_factory=list)
     audit: AuditSummary | None = None
@@ -93,6 +97,13 @@ def build_status_report(config_path: Path | None = None) -> StatusReport:
     selected_provider = config.get_provider_name(selected_model)
     provider_statuses = _build_provider_statuses(config, selected_provider)
     skill_statuses = _build_skill_statuses(workspace)
+    configured_workspaces = config.configured_workspaces()
+    nostr_workspace_bindings = sum(
+        len(pubkeys) for pubkeys in config.channels.nostr.workspace_bindings.values()
+    )
+    multi_workspace_routing_active = bool(config.workspaces.registry) and bool(
+        config.channels.nostr.workspace_bindings
+    )
     mcp_servers_valid = sum(
         1 for server in config.tools.mcp_servers.values() if _is_valid_mcp(server)
     )
@@ -126,6 +137,12 @@ def build_status_report(config_path: Path | None = None) -> StatusReport:
         selected_model=selected_model,
         resolved_model=resolved_model,
         selected_provider=selected_provider,
+        multi_workspace_routing_active=multi_workspace_routing_active,
+        named_workspaces=len(configured_workspaces),
+        bootstrapped_named_workspaces=sum(
+            1 for path in configured_workspaces.values() if (path / "AGENTS.md").exists()
+        ),
+        nostr_workspace_bindings=nostr_workspace_bindings,
         provider_statuses=provider_statuses,
         skill_statuses=skill_statuses,
         audit=audit,

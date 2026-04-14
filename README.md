@@ -269,7 +269,8 @@ Distillation is conservative and optional by design. Explicit memory writes rema
 - **Email** — IMAP/SMTP  
 - **CLI** — quick local chats
 
-All channels feed into the same memory & reflection engine.
+The gateway can route channel traffic to isolated workspaces. By design, sub-workspaces are
+channel-only; CLI and `config.json` remain admin-owned surfaces.
 
 ### Tools — what the agent can actually do
 

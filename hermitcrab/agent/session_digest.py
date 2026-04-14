@@ -46,9 +46,15 @@ class SessionDigestBuilder:
 
     @staticmethod
     def derive_channel_chat(session_key: str) -> tuple[str, str]:
+        if session_key.startswith("nostr:"):
+            remainder = session_key.removeprefix("nostr:")
+            if ":" in remainder:
+                _, sender_pubkey = remainder.rsplit(":", 1)
+                return "nostr", sender_pubkey
         if ":" not in session_key:
             return session_key, "direct"
-        return session_key.split(":", 1)
+        channel, chat_id = session_key.split(":", 1)
+        return channel, chat_id
 
     @staticmethod
     def safe_iso_timestamp(value: str | None) -> str:

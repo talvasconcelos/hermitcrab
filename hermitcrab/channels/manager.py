@@ -68,6 +68,7 @@ class ChannelManager:
                 self.channels["nostr"] = NostrChannel(
                     self.config.channels.nostr,
                     self.bus,
+                    workspace_resolver=self.config.resolve_nostr_sender_workspace,
                 )
                 logger.info("Nostr channel enabled (pubkey: {}...)", self.channels["nostr"].our_pubkey_hex[:8])  # type: ignore
             except ImportError as e:

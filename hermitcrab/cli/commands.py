@@ -11,7 +11,7 @@ import subprocess
 import sys
 import tempfile
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 import typer
 from prompt_toolkit import PromptSession
@@ -161,13 +161,15 @@ def _build_agent_loop_kwargs(
     config: Config,
     provider: Any,
     *,
+    workspace: Path | None = None,
     cron_service: Any | None = None,
     session_manager: Any | None = None,
 ) -> dict[str, Any]:
     """Build the shared AgentLoop configuration used by CLI entrypoints."""
+    target_workspace = workspace or config.workspace_path
     return {
         "provider": provider,
-        "workspace": config.workspace_path,
+        "workspace": target_workspace,
         "model": config.agents.defaults.model,
         "temperature": config.agents.defaults.temperature,
         "max_tokens": config.agents.defaults.max_tokens,
@@ -479,22 +481,27 @@ def onboard():
         save_config(Config())
         console.print(f"[green]✓[/green] Created config at {config_path}")
 
-    # Create workspace
-    workspace = get_workspace_path()
-
-    if not workspace.exists():
-        workspace.mkdir(parents=True, exist_ok=True)
-        console.print(f"[green]✓[/green] Created workspace at {workspace}")
-
-    # Create default bootstrap files
-    _create_workspace_templates(workspace)
+    bootstrap_workspace(get_workspace_path(), announce=console.print)
 
     console.print(f"\n{__logo__} hermitcrab is ready!")
     for line in _build_onboard_next_steps():
         console.print(line)
 
 
-def _create_workspace_templates(workspace: Path):
+def bootstrap_workspace(workspace: Path, announce: Callable[[str], None] | None = None) -> None:
+    """Create or refresh one workspace root with default structure."""
+    if not workspace.exists():
+        workspace.mkdir(parents=True, exist_ok=True)
+        if announce is not None:
+            announce(f"[green]✓[/green] Created workspace at {workspace}")
+
+    _create_workspace_templates(workspace, announce=announce)
+
+
+def _create_workspace_templates(
+    workspace: Path,
+    announce: Callable[[str], None] | None = None,
+) -> None:
     """Create default workspace template files from bundled templates."""
     from importlib.resources import files as pkg_files
 
@@ -506,7 +513,8 @@ def _create_workspace_templates(workspace: Path):
         dest = workspace / item.name
         if not dest.exists():
             _atomic_write_text(dest, item.read_text(encoding="utf-8"))
-            console.print(f"  [dim]Created {item.name}[/dim]")
+            if announce is not None:
+                announce(f"  [dim]Created {item.name}[/dim]")
 
     # Create category-based memory directories
     memory_dir = workspace / "memory"
@@ -515,7 +523,8 @@ def _create_workspace_templates(workspace: Path):
     for category in ["facts", "decisions", "goals", "tasks", "reflections"]:
         category_dir = memory_dir / category
         category_dir.mkdir(exist_ok=True)
-        console.print(f"  [dim]Created memory/{category}/[/dim]")
+        if announce is not None:
+            announce(f"  [dim]Created memory/{category}/[/dim]")
 
     # Create knowledge base directories (reference library, not memory)
     knowledge_dir = workspace / "knowledge"
@@ -524,24 +533,29 @@ def _create_workspace_templates(workspace: Path):
     for category in ["articles", "books", "docs", "notes"]:
         category_dir = knowledge_dir / category
         category_dir.mkdir(exist_ok=True)
-        console.print(f"  [dim]Created knowledge/{category}/[/dim]")
+        if announce is not None:
+            announce(f"  [dim]Created knowledge/{category}/[/dim]")
 
     (workspace / "lists").mkdir(exist_ok=True)
-    console.print("  [dim]Created lists/[/dim]")
+    if announce is not None:
+        announce("  [dim]Created lists/[/dim]")
 
     people_dir = workspace / "people"
     people_dir.mkdir(exist_ok=True)
     (people_dir / "profiles").mkdir(exist_ok=True)
     (people_dir / "interactions").mkdir(exist_ok=True)
-    console.print("  [dim]Created people/profiles/ and people/interactions/[/dim]")
+    if announce is not None:
+        announce("  [dim]Created people/profiles/ and people/interactions/[/dim]")
 
     (workspace / "reminders").mkdir(exist_ok=True)
-    console.print("  [dim]Created reminders/[/dim]")
+    if announce is not None:
+        announce("  [dim]Created reminders/[/dim]")
 
     scratchpads_dir = workspace / "scratchpads"
     scratchpads_dir.mkdir(exist_ok=True)
     (scratchpads_dir / "archive").mkdir(exist_ok=True)
-    console.print("  [dim]Created scratchpads/ and scratchpads/archive/[/dim]")
+    if announce is not None:
+        announce("  [dim]Created scratchpads/ and scratchpads/archive/[/dim]")
 
     (workspace / "skills").mkdir(exist_ok=True)
 
@@ -775,9 +789,14 @@ def gateway(
     console.print(f"[dim]Log level: {configured_level}[/dim]")
 
     config = _load_runtime_config()
+    if config.workspace_path != config.admin_workspace_path:
+        raise RuntimeError("admin workspace invariant failed: workspace_path must equal admin_workspace_path")
     bus = MessageBus()
     provider = _make_provider(config)
     session_manager = SessionManager(config.workspace_path)
+    multi_workspace_active = bool(config.workspaces.registry) and bool(
+        config.channels.nostr.workspace_bindings
+    )
 
     # Create cron service first (callback set after agent creation)
     cron = _build_cron_service()
@@ -788,10 +807,86 @@ def gateway(
         **_build_agent_loop_kwargs(
             config,
             provider,
+            workspace=config.workspace_path,
             cron_service=cron,
             session_manager=session_manager,
         ),
     )
+    workspace_agents: dict[str, AgentLoop] = {"__admin__": agent}
+
+    def _workspace_agent_key(workspace_name: str | None) -> str:
+        return workspace_name or "__admin__"
+
+    def _route_workspace_target(msg) -> tuple[str, str | None, str]:
+        """Resolve gateway routing action: admin, workspace, or denied."""
+        if msg.channel != "nostr":
+            return "admin", None, "non_nostr_channel"
+
+        metadata = msg.metadata or {}
+        target = metadata.get("workspace_target")
+        if target == "denied":
+            return "denied", None, "channel_metadata_denied"
+        if target != "workspace":
+            return "admin", None, "admin_default"
+        if not multi_workspace_active:
+            return "denied", None, "workspace_mode_disabled"
+
+        workspace_name = metadata.get("workspace_name")
+        if isinstance(workspace_name, str) and workspace_name:
+            return "workspace", workspace_name, "workspace_binding"
+        return "denied", None, "missing_workspace_name"
+
+    reminder_services: dict[str, ReminderService] = {}
+    reminder_services_running = False
+
+    async def _ensure_reminder_service(workspace_key: str, loop: AgentLoop) -> None:
+        if loop.reminders is None or workspace_key in reminder_services:
+            return
+        service = ReminderService(
+            loop.reminders,
+            on_notify=on_reminder_notify,
+            interval_s=config.gateway.reminders.interval_s,
+            enabled=True,
+        )
+        reminder_services[workspace_key] = service
+        if reminder_services_running:
+            await service.start()
+
+    def _workspace_ready_for_routing(workspace_name: str) -> tuple[bool, str]:
+        if workspace_name not in config.workspaces.registry:
+            return False, "workspace_not_configured"
+        workspace_path = config.get_workspace_path(workspace_name)
+        if not workspace_path.exists():
+            return False, "workspace_missing"
+        if not (workspace_path / "AGENTS.md").exists():
+            return False, "workspace_not_bootstrapped"
+        return True, "workspace_ready"
+
+    async def _get_or_create_agent(workspace_name: str | None) -> AgentLoop:
+        key = _workspace_agent_key(workspace_name)
+        existing = workspace_agents.get(key)
+        if existing is not None:
+            return existing
+
+        assert workspace_name is not None
+        ready, reason = _workspace_ready_for_routing(workspace_name)
+        if not ready:
+            raise ValueError(f"workspace routing blocked: {reason}")
+
+        workspace_path = config.get_workspace_path(workspace_name)
+        loop = AgentLoop(
+            bus=bus,
+            **_build_agent_loop_kwargs(
+                config,
+                _make_provider(config),
+                workspace=workspace_path,
+                session_manager=SessionManager(workspace_path),
+            ),
+        )
+        workspace_agents[key] = loop
+        await _ensure_reminder_service(key, loop)
+        logger.info("Created workspace agent for {}", workspace_name)
+        return loop
 
     # Set cron callback (needs agent)
     async def on_cron_job(job: CronJob) -> str | None:
@@ -880,22 +975,39 @@ def gateway(
         interval_s=hb_cfg.interval_s,
         enabled=hb_cfg.enabled,
     )
+
+    async def _process_expired_sessions_all() -> int:
+        """Process session inactivity across every active workspace agent."""
+        expired = 0
+        for loop in list(workspace_agents.values()):
+            try:
+                expired += await loop.process_expired_sessions()
+            except Exception as e:
+                logger.error("Failed processing expired sessions for workspace agent: {}", e)
+        return expired
+
     timeout_monitor = SessionTimeoutService(
-        agent.process_expired_sessions,
+        _process_expired_sessions_all,
         interval_s=min(60, max(5, config.agents.defaults.inactivity_timeout_s // 6)),
         enabled=True,
     )
-    reminder_service = ReminderService(
-        agent.reminders,
-        on_notify=on_reminder_notify,
-        interval_s=config.gateway.reminders.interval_s,
-        enabled=agent.reminders is not None,
-    )
+    if agent.reminders is not None:
+        reminder_services["__admin__"] = ReminderService(
+            agent.reminders,
+            on_notify=on_reminder_notify,
+            interval_s=config.gateway.reminders.interval_s,
+            enabled=True,
+        )
 
     if channels.enabled_channels:
         console.print(f"[green]✓[/green] Channels enabled: {', '.join(channels.enabled_channels)}")
     else:
         console.print("[yellow]Warning: No channels enabled[/yellow]")
+    if multi_workspace_active:
+        console.print("[green]✓[/green] Multi-workspace routing: active (Nostr bindings)")
+        console.print("[dim]Unresolved/invalid workspace routes are denied (no admin fallback)[/dim]")
+    else:
+        console.print("[dim]Multi-workspace routing: inactive[/dim]")
 
     cron_status = cron.status()
     if cron_status["jobs"] > 0:
@@ -903,26 +1015,84 @@ def gateway(
 
     console.print(f"[green]✓[/green] Heartbeat: every {hb_cfg.interval_s}s")
     console.print(f"[green]✓[/green] Reminders: every {config.gateway.reminders.interval_s}s")
+    console.print("[dim]Cron/heartbeat execution stays in admin workspace[/dim]")
+
+    async def _route_inbound_messages() -> None:
+        while True:
+            try:
+                msg = await asyncio.wait_for(bus.consume_inbound(), timeout=1.0)
+                route_target, workspace_name, route_reason = _route_workspace_target(msg)
+                logger.debug(
+                    "Gateway inbound route: channel={} chat_id={} route_target={} route_reason={} workspace_agent={}",
+                    msg.channel,
+                    msg.chat_id,
+                    route_target,
+                    route_reason,
+                    _workspace_agent_key(workspace_name),
+                )
+                if route_target == "denied":
+                    agent.audit_event(
+                        "gateway.workspace_route_denied",
+                        session_key=msg.session_key,
+                        msg=msg,
+                        workspace_agent="__admin__",
+                        route_reason=route_reason,
+                    )
+                    continue
+                try:
+                    agent_for_msg = await _get_or_create_agent(workspace_name)
+                except Exception as e:
+                    logger.warning("Workspace route failed; denying message: {}", e)
+                    agent.audit_event(
+                        "gateway.workspace_route_denied",
+                        session_key=msg.session_key,
+                        msg=msg,
+                        workspace_agent="__admin__",
+                        route_reason=f"workspace_unavailable:{workspace_name}",
+                    )
+                    continue
+                agent_for_msg.audit_event(
+                    "gateway.workspace_route",
+                    session_key=msg.session_key,
+                    msg=msg,
+                    workspace_agent=_workspace_agent_key(workspace_name),
+                    route_reason=route_reason,
+                )
+                response = await agent_for_msg.handle_inbound(msg)
+                if response is not None:
+                    await bus.publish_outbound(response)
+            except asyncio.TimeoutError:
+                continue
+            except Exception as e:
+                logger.error("Gateway inbound router loop error: {}", e)
+                continue
 
     async def run():
+        nonlocal reminder_services_running
         try:
             await cron.start()
             await heartbeat.start()
             await timeout_monitor.start()
-            await reminder_service.start()
+            reminder_services_running = True
+            for service in reminder_services.values():
+                await service.start()
             await asyncio.gather(
-                agent.run(),
+                _route_inbound_messages(),
                 channels.start_all(),
             )
         except KeyboardInterrupt:
             console.print("\nShutting down...")
         finally:
-            await agent.close()
             timeout_monitor.stop()
             heartbeat.stop()
-            reminder_service.stop()
+            reminder_services_running = False
+            for service in reminder_services.values():
+                service.stop()
             cron.stop()
-            agent.stop()
+            for loop in workspace_agents.values():
+                await loop.close()
+            for loop in workspace_agents.values():
+                loop.stop()
             await channels.stop_all()
 
     asyncio.run(run())
@@ -1321,6 +1491,19 @@ app.add_typer(reminders_app, name="reminders")
 
 people_app = typer.Typer(help="Manage people profiles")
 app.add_typer(people_app, name="people")
+
+workspaces_app = typer.Typer(help="Manage named personal workspaces")
+app.add_typer(workspaces_app, name="workspaces")
+
+
+def _configured_workspace_rows(config: Config) -> list[tuple[str, Path, str, bool]]:
+    """Return configured named workspaces for CLI display."""
+    rows: list[tuple[str, Path, str, bool]] = []
+    for name, workspace in config.workspaces.registry.items():
+        path = config.get_workspace_path(name)
+        label = workspace.label or "-"
+        rows.append((name, path, label, workspace.channel_only))
+    return rows
 
 
 def _build_cron_service():
@@ -1898,6 +2081,123 @@ def people_history(
         console.print(store.render_interaction_summary(interaction))
 
 
+@workspaces_app.command("list")
+def workspaces_list(
+    as_json: bool = typer.Option(False, "--json", help="Print named workspaces as JSON"),
+):
+    """List configured named workspaces."""
+    config = _load_runtime_config()
+    rows = _configured_workspace_rows(config)
+
+    if as_json:
+        typer.echo(
+            json.dumps(
+                [
+                    {
+                        "name": name,
+                        "path": str(path),
+                        "label": label if label != "-" else None,
+                        "channel_only": channel_only,
+                        "exists": path.exists(),
+                        "bootstrapped": (path / "AGENTS.md").exists(),
+                    }
+                    for name, path, label, channel_only in rows
+                ],
+                indent=2,
+                ensure_ascii=False,
+            )
+            + "\n",
+            nl=False,
+        )
+        return
+
+    if not rows:
+        console.print("No named workspaces configured.")
+        return
+
+    table = Table(title="Named Workspaces")
+    table.add_column("Name", style="cyan")
+    table.add_column("Path")
+    table.add_column("Label")
+    table.add_column("Mode")
+    table.add_column("State")
+
+    for name, path, label, channel_only in rows:
+        mode = "channel-only" if channel_only else "interactive"
+        if not path.exists():
+            state = "[red]missing[/red]"
+        elif (path / "AGENTS.md").exists():
+            state = "[green]ready[/green]"
+        else:
+            state = "[yellow]needs bootstrap[/yellow]"
+        table.add_row(name, str(path), label, mode, state)
+
+    console.print(table)
+
+
+@workspaces_app.command("init")
+def workspaces_init(
+    name: str | None = typer.Argument(None, help="Configured workspace name"),
+    all: bool = typer.Option(False, "--all", help="Bootstrap all configured named workspaces"),
+):
+    """Bootstrap configured named workspaces without changing admin workspace behavior."""
+    if all and name is not None:
+        console.print("[red]Error: choose a workspace name or --all, not both[/red]")
+        raise typer.Exit(1)
+    if not all and name is None:
+        console.print("[red]Error: provide a configured workspace name or use --all[/red]")
+        raise typer.Exit(1)
+
+    config = _load_runtime_config()
+    rows = _configured_workspace_rows(config)
+    names = [workspace_name for workspace_name, _, _, _ in rows]
+    if not rows:
+        console.print("[red]Error: no named workspaces configured[/red]")
+        raise typer.Exit(1)
+
+    target_names = names if all else [name]
+    missing = [workspace_name for workspace_name in target_names if workspace_name not in names]
+    if missing:
+        console.print(f"[red]Error: unknown workspace: {missing[0]}[/red]")
+        raise typer.Exit(1)
+
+    for workspace_name in target_names:
+        workspace_path = config.get_workspace_path(workspace_name)
+        console.print(f"[bold]Bootstrapping {workspace_name}[/bold]")
+        bootstrap_workspace(workspace_path, announce=console.print)
+
+
+@workspaces_app.command("resolve-nostr")
+def workspaces_resolve_nostr(
+    pubkey: str = typer.Argument(..., help="Inbound Nostr sender pubkey (64-char hex)"),
+    as_json: bool = typer.Option(False, "--json", help="Print resolution as JSON"),
+):
+    """Resolve inbound Nostr sender to admin workspace, named workspace, or denial."""
+    config = _load_runtime_config()
+    resolution = config.resolve_nostr_sender_workspace(pubkey)
+
+    payload = {
+        "target": resolution.target,
+        "workspace_name": resolution.workspace_name,
+        "workspace_path": (str(resolution.workspace_path) if resolution.workspace_path else None),
+        "normalized_pubkey": resolution.normalized_pubkey,
+        "reason": resolution.reason,
+    }
+
+    if as_json:
+        typer.echo(json.dumps(payload, indent=2, ensure_ascii=False) + "\n", nl=False)
+        return
+
+    console.print(f"Target: {resolution.target}")
+    console.print(f"Reason: {resolution.reason or '-'}")
+    if resolution.normalized_pubkey:
+        console.print(f"Pubkey: {resolution.normalized_pubkey}")
+    if resolution.workspace_name:
+        console.print(f"Workspace: {resolution.workspace_name}")
+    if resolution.workspace_path:
+        console.print(f"Path: {resolution.workspace_path}")
+
+
 # ============================================================================
 # Status Commands
 # ============================================================================
@@ -1937,6 +2237,22 @@ def status(
         "Bootstrap: "
         + ("[green]ready[/green]" if report.bootstrap_ready else "[yellow]incomplete[/yellow]")
     )
+    if report.named_workspaces:
+        console.print(
+            "Named workspaces: "
+            f"{report.bootstrapped_named_workspaces}/{report.named_workspaces} bootstrapped"
+        )
+    if report.nostr_workspace_bindings:
+        console.print(f"Nostr workspace bindings: {report.nostr_workspace_bindings}")
+    console.print(
+        "Workspace routing: "
+        + (
+            "[green]active[/green] (Nostr bound senders can route to named workspaces)"
+            if report.multi_workspace_routing_active
+            else "[dim]inactive[/dim] (admin workspace only)"
+        )
+    )
+    console.print("[dim]Cron/heartbeat remain admin-owned; unresolved workspace routes are denied[/dim]")
 
     console.print(f"Selected model: {report.selected_model}")
     if report.resolved_model and report.resolved_model != report.selected_model:
@@ -2032,6 +2348,7 @@ def doctor(
 @app.command()
 def audit(
     limit: int = typer.Option(20, "--limit", "-n", help="Maximum audit entries to show"),
+    event: str = typer.Option("", "--event", "-e", help="Show only entries for one event type"),
     as_json: bool = typer.Option(False, "--json", help="Print audit entries as JSON"),
 ):
     """Show recent durable audit trail events."""
@@ -2040,6 +2357,8 @@ def audit(
     config = _load_runtime_config()
     trail = AuditTrail(config.workspace_path)
     entries = trail.read_recent(limit)
+    if event:
+        entries = _filter_audit_entries(entries, event)
 
     if as_json:
         typer.echo(json.dumps(entries, indent=2, ensure_ascii=False) + "\n", nl=False)
@@ -2060,6 +2379,14 @@ def audit(
                 continue
             console.print(f"- {key}: {value}")
         console.print()
+
+
+def _filter_audit_entries(entries: list[dict[str, Any]], event: str) -> list[dict[str, Any]]:
+    """Filter audit entries by exact event name."""
+    event_name = event.strip()
+    if not event_name:
+        return entries
+    return [item for item in entries if str(item.get("event") or "") == event_name]
 
 
 # ============================================================================

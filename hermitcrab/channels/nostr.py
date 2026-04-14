@@ -6,6 +6,7 @@ import asyncio
 import json
 import re
 import time
+from collections.abc import Callable
 from typing import Any
 
 import websockets
@@ -22,7 +23,7 @@ from hermitcrab.channels.nostr_nip17 import (
     parse_nip17_message,
     randomized_past_window_seconds,
 )
-from hermitcrab.config.schema import NostrConfig, default_nostr_relays
+from hermitcrab.config.schema import NostrConfig, NostrWorkspaceResolution, default_nostr_relays
 
 
 def _split_message(content: str, max_len: int = 1800) -> list[str]:
@@ -56,9 +57,15 @@ class NostrChannel(BaseChannel):
     _MAX_SEEN_EVENTS = 10_000
     _NIP17_RELAY_LIST_KIND = 10050
 
-    def __init__(self, config: NostrConfig, bus: MessageBus) -> None:
+    def __init__(
+        self,
+        config: NostrConfig,
+        bus: MessageBus,
+        workspace_resolver: Callable[[str], NostrWorkspaceResolution] | None = None,
+    ) -> None:
         super().__init__(config, bus)
         self.config: NostrConfig = config
+        self._workspace_resolver = workspace_resolver
 
         try:
             from pynostr.encrypted_dm import EncryptedDirectMessage
@@ -91,6 +98,36 @@ class NostrChannel(BaseChannel):
         self._active_relays: list[str] = self._normalize_relay_urls(config.relays) or default_nostr_relays()
 
         logger.info("Nostr channel initialized (pubkey: {}...)", self._hex_pub[:8])
+
+    def _workspace_metadata(self, sender_pubkey: str) -> dict[str, Any]:
+        """Return resolved workspace metadata for one inbound sender."""
+        if self._workspace_resolver is None:
+            return {}
+        resolution = self._workspace_resolver(sender_pubkey)
+        return {
+            "workspace_target": resolution.target,
+            "workspace_name": resolution.workspace_name,
+            "workspace_path": (str(resolution.workspace_path) if resolution.workspace_path else None),
+            "workspace_reason": resolution.reason,
+        }
+
+    def _session_key_for_sender(self, sender_pubkey: str, metadata: dict[str, Any] | None = None) -> str:
+        """Build session key, namespacing named-workspace senders only."""
+        workspace_name = (metadata or {}).get("workspace_name")
+        workspace_target = (metadata or {}).get("workspace_target")
+        if workspace_target == "workspace" and isinstance(workspace_name, str) and workspace_name:
+            return f"nostr:{workspace_name}:{sender_pubkey}"
+        return f"nostr:{sender_pubkey}"
+
+    def _sender_pubkey_from_session_key(self, session_key: str) -> str | None:
+        """Extract sender pubkey from legacy or namespaced Nostr session key."""
+        if not session_key.startswith("nostr:"):
+            return None
+        remainder = session_key.removeprefix("nostr:")
+        if ":" not in remainder:
+            return remainder
+        _, sender_pubkey = remainder.rsplit(":", 1)
+        return sender_pubkey
 
     def _load_private_key(self, key: str | None) -> Any:
         if not key:
@@ -549,6 +586,7 @@ class NostrChannel(BaseChannel):
                     "relay_url": relay_url,
                     "created_at": message_created_at,
                     "kind": event_kind,
+                    **self._workspace_metadata(sender_pubkey),
                 }
             if sender_pubkey is None:
                 return
@@ -563,7 +601,7 @@ class NostrChannel(BaseChannel):
 
             logger.info("Received DM from {}...: {}...", sender_pubkey[:8], content[:50] if content else "(empty)")
 
-            session_key = f"nostr:{sender_pubkey}"
+            session_key = self._session_key_for_sender(sender_pubkey, metadata)
             await self._handle_inbound_message(
                 session_key=session_key,
                 content=content or "",
@@ -633,6 +671,7 @@ class NostrChannel(BaseChannel):
             "created_at": parsed.rumor.created_at,
             "kind": parsed.rumor.kind,
             "gift_wrap_kind": parsed.gift_wrap.kind,
+            **self._workspace_metadata(sender_pubkey),
         }
         return sender_pubkey, parsed.content, parsed.rumor.created_at or 0, metadata
 
@@ -761,10 +800,10 @@ class NostrChannel(BaseChannel):
             logger.error("Failed to send Nostr DM: {}", e)
 
     async def _handle_inbound_message(self, session_key: str, content: str, metadata: dict[str, Any] | None = None) -> None:
-        if not session_key.startswith("nostr:"):
+        sender_pubkey = self._sender_pubkey_from_session_key(session_key)
+        if sender_pubkey is None:
             logger.warning("Invalid session_key format: {}", session_key)
             return
-        sender_pubkey = session_key.replace("nostr:", "", 1)
         await self._handle_message(
             sender_id=sender_pubkey,
             chat_id=sender_pubkey,

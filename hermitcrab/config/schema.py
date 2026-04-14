@@ -1,5 +1,6 @@
 """Configuration schema using Pydantic."""
 
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal
@@ -24,6 +25,17 @@ def default_nostr_relays() -> list[str]:
         "wss://relay.primal.net",
         "wss://nostr-pub.wellorder.net",
     ]
+
+
+_HEX_PUBKEY_RE = re.compile(r"^[0-9a-fA-F]{64}$")
+
+
+def normalize_nostr_pubkey(value: str) -> str:
+    """Normalize configured Nostr sender pubkey into lowercase hex."""
+    pubkey = value.strip()
+    if _HEX_PUBKEY_RE.fullmatch(pubkey):
+        return pubkey.lower()
+    raise ValueError("pubkey must be 64-char hex")
 
 
 class TelegramConfig(Base):
@@ -87,6 +99,9 @@ class NostrConfig(Base):
     allowed_pubkeys: list[str] = Field(
         default_factory=list
     )  # npub/hex, or "*" for open mode, or [] for strict/deny-all
+    workspace_bindings: dict[str, list[str]] = Field(
+        default_factory=dict
+    )  # {"workspace-name": ["<sender-pubkey-hex>", ...]}
 
     def validate_for_use(self) -> None:
         """
@@ -207,6 +222,41 @@ class AgentDefaults(Base):
     memory_context_max_chars: int = 10000
     memory_context_max_items_per_category: int = 20
     memory_context_max_item_chars: int = 500
+
+
+class WorkspaceConfig(Base):
+    """Named personal workspace configuration."""
+
+    path: str
+    label: str | None = None
+    channel_only: bool = True
+
+    @model_validator(mode="after")
+    def validate_path(self) -> "WorkspaceConfig":
+        """Require non-empty path."""
+        self.path = self.path.strip()
+        if not self.path:
+            raise ValueError("workspace entries must include a non-empty path")
+        return self
+
+
+class WorkspacesConfig(Base):
+    """Owner-managed personal workspace registry."""
+
+    root: str = "~/.hermitcrab/workspaces"
+    registry: dict[str, WorkspaceConfig] = Field(default_factory=dict)
+
+    @model_validator(mode="after")
+    def normalize_registry(self) -> "WorkspacesConfig":
+        """Normalize names and reject blank registry keys."""
+        normalized: dict[str, WorkspaceConfig] = {}
+        for name, workspace in self.registry.items():
+            slug = name.strip()
+            if not slug:
+                raise ValueError("workspace registry keys must be non-empty")
+            normalized[slug] = workspace
+        self.registry = normalized
+        return self
 
 
 class NamedModelConfig(Base):
@@ -391,10 +441,22 @@ class ResolvedModelConfig:
     name: str | None = None
 
 
+@dataclass(frozen=True)
+class NostrWorkspaceResolution:
+    """Resolved workspace target for one inbound Nostr sender."""
+
+    target: Literal["admin", "workspace", "denied"]
+    workspace_name: str | None = None
+    workspace_path: Path | None = None
+    normalized_pubkey: str | None = None
+    reason: str | None = None
+
+
 class Config(BaseSettings):
     """Root configuration for hermitcrab."""
 
     agents: AgentsConfig = Field(default_factory=AgentsConfig)
+    workspaces: WorkspacesConfig = Field(default_factory=WorkspacesConfig)
     models: dict[str, NamedModelConfig] = Field(default_factory=dict)
     channels: ChannelsConfig = Field(default_factory=ChannelsConfig)
     providers: ProvidersConfig = Field(default_factory=ProvidersConfig)
@@ -402,10 +464,133 @@ class Config(BaseSettings):
     tools: ToolsConfig = Field(default_factory=ToolsConfig)
     reflection: ReflectionConfig = Field(default_factory=ReflectionConfig)
 
+    @model_validator(mode="after")
+    def validate_multi_workspace_nostr_bindings(self) -> "Config":
+        """Validate additive multi-workspace Nostr binding rules."""
+        bindings = self.channels.nostr.workspace_bindings
+        if not bindings:
+            return self
+
+        allowlist = {value.strip().lower() for value in self.channels.nostr.allowed_pubkeys if value.strip()}
+        if "*" in allowlist or "all" in allowlist:
+            raise ValueError(
+                "channels.nostr.allowed_pubkeys cannot use '*' or 'all' when workspace bindings are configured"
+            )
+
+        configured_workspaces = set(self.workspaces.registry)
+        normalized_allowlist: set[str] = set()
+        for pubkey in self.channels.nostr.allowed_pubkeys:
+            normalized_allowlist.add(normalize_nostr_pubkey(pubkey))
+
+        seen_pubkeys: dict[str, str] = {}
+        for workspace_name, pubkeys in bindings.items():
+            if workspace_name not in configured_workspaces:
+                raise ValueError(
+                    f"channels.nostr.workspace_bindings references unknown workspace '{workspace_name}'"
+                )
+            for pubkey in pubkeys:
+                normalized = normalize_nostr_pubkey(pubkey)
+                previous = seen_pubkeys.get(normalized)
+                if previous is not None:
+                    raise ValueError(
+                        "channels.nostr.workspace_bindings pubkeys must be unique; "
+                        f"{normalized} is assigned to both '{previous}' and '{workspace_name}'"
+                    )
+                if normalized not in normalized_allowlist:
+                    raise ValueError(
+                        "channels.nostr.workspace_bindings pubkeys must also appear in "
+                        "channels.nostr.allowed_pubkeys"
+                    )
+                seen_pubkeys[normalized] = workspace_name
+
+        return self
+
     @property
     def workspace_path(self) -> Path:
-        """Get expanded workspace path."""
+        """Get expanded admin workspace path."""
         return Path(self.agents.defaults.workspace).expanduser()
+
+    @property
+    def admin_workspace_path(self) -> Path:
+        """Get expanded admin workspace path."""
+        return self.workspace_path
+
+    @property
+    def workspaces_root_path(self) -> Path:
+        """Get expanded root path for additive personal workspaces."""
+        return Path(self.workspaces.root).expanduser()
+
+    def get_workspace_path(self, workspace_name: str | None = None) -> Path:
+        """Resolve admin workspace or configured named workspace path."""
+        if workspace_name is None:
+            return self.workspace_path
+
+        workspace = self.workspaces.registry.get(workspace_name)
+        if workspace is None:
+            raise KeyError(f"Unknown workspace: {workspace_name}")
+
+        path = Path(workspace.path).expanduser()
+        if not path.is_absolute():
+            path = self.workspaces_root_path / path
+        return path
+
+    def configured_workspaces(self) -> dict[str, Path]:
+        """Return configured named workspace paths."""
+        return {
+            name: self.get_workspace_path(name)
+            for name in self.workspaces.registry
+        }
+
+    def normalized_nostr_workspace_bindings(self) -> dict[str, set[str]]:
+        """Return normalized Nostr workspace bindings."""
+        return {
+            workspace_name: {normalize_nostr_pubkey(pubkey) for pubkey in pubkeys}
+            for workspace_name, pubkeys in self.channels.nostr.workspace_bindings.items()
+        }
+
+    def normalized_nostr_allowed_pubkeys(self) -> set[str]:
+        """Return normalized Nostr allowlist."""
+        normalized: set[str] = set()
+        for pubkey in self.channels.nostr.allowed_pubkeys:
+            value = pubkey.strip().lower()
+            if not value:
+                continue
+            if value in {"*", "all"}:
+                return {"*"}
+            normalized.add(normalize_nostr_pubkey(pubkey))
+        return normalized
+
+    def resolve_nostr_sender_workspace(self, sender_pubkey: str) -> NostrWorkspaceResolution:
+        """Resolve inbound Nostr sender to named workspace, admin workspace, or denial."""
+        try:
+            normalized_pubkey = normalize_nostr_pubkey(sender_pubkey)
+        except ValueError:
+            return NostrWorkspaceResolution(target="denied", reason="invalid_pubkey")
+
+        for workspace_name, pubkeys in self.normalized_nostr_workspace_bindings().items():
+            if normalized_pubkey in pubkeys:
+                return NostrWorkspaceResolution(
+                    target="workspace",
+                    workspace_name=workspace_name,
+                    workspace_path=self.get_workspace_path(workspace_name),
+                    normalized_pubkey=normalized_pubkey,
+                    reason="workspace_binding",
+                )
+
+        allowed_pubkeys = self.normalized_nostr_allowed_pubkeys()
+        if "*" in allowed_pubkeys or normalized_pubkey in allowed_pubkeys:
+            return NostrWorkspaceResolution(
+                target="admin",
+                workspace_path=self.admin_workspace_path,
+                normalized_pubkey=normalized_pubkey,
+                reason="allowlist_admin_fallback",
+            )
+
+        return NostrWorkspaceResolution(
+            target="denied",
+            normalized_pubkey=normalized_pubkey,
+            reason="not_allowed",
+        )
 
     def resolve_model_config(self, model: str | None = None) -> ResolvedModelConfig:
         """Resolve a model reference to an actual model string and metadata."""
