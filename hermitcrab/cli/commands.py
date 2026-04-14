@@ -821,7 +821,23 @@ def gateway(
         workspace_name = metadata.get("workspace_name")
         return workspace_name if isinstance(workspace_name, str) and workspace_name else None
 
-    def _get_or_create_agent(workspace_name: str | None) -> AgentLoop:
+    reminder_services: dict[str, ReminderService] = {}
+    reminder_services_running = False
+
+    async def _ensure_reminder_service(workspace_key: str, loop: AgentLoop) -> None:
+        if loop.reminders is None or workspace_key in reminder_services:
+            return
+        service = ReminderService(
+            loop.reminders,
+            on_notify=on_reminder_notify,
+            interval_s=config.gateway.reminders.interval_s,
+            enabled=True,
+        )
+        reminder_services[workspace_key] = service
+        if reminder_services_running:
+            await service.start()
+
+    async def _get_or_create_agent(workspace_name: str | None) -> AgentLoop:
         key = _workspace_agent_key(workspace_name)
         existing = workspace_agents.get(key)
         if existing is not None:
@@ -838,6 +854,7 @@ def gateway(
             ),
         )
         workspace_agents[key] = loop
+        await _ensure_reminder_service(key, loop)
         logger.info("Created workspace agent for {}", workspace_name)
         return loop
 
@@ -944,12 +961,13 @@ def gateway(
         interval_s=min(60, max(5, config.agents.defaults.inactivity_timeout_s // 6)),
         enabled=True,
     )
-    reminder_service = ReminderService(
-        agent.reminders,
-        on_notify=on_reminder_notify,
-        interval_s=config.gateway.reminders.interval_s,
-        enabled=agent.reminders is not None,
-    )
+    if agent.reminders is not None:
+        reminder_services["__admin__"] = ReminderService(
+            agent.reminders,
+            on_notify=on_reminder_notify,
+            interval_s=config.gateway.reminders.interval_s,
+            enabled=True,
+        )
 
     if channels.enabled_channels:
         console.print(f"[green]✓[/green] Channels enabled: {', '.join(channels.enabled_channels)}")
@@ -974,7 +992,7 @@ def gateway(
                     msg.chat_id,
                     _workspace_agent_key(workspace_name),
                 )
-                agent_for_msg = _get_or_create_agent(workspace_name)
+                agent_for_msg = await _get_or_create_agent(workspace_name)
                 agent_for_msg.audit_event(
                     "gateway.workspace_route",
                     session_key=msg.session_key,
@@ -988,11 +1006,14 @@ def gateway(
                 continue
 
     async def run():
+        nonlocal reminder_services_running
         try:
             await cron.start()
             await heartbeat.start()
             await timeout_monitor.start()
-            await reminder_service.start()
+            reminder_services_running = True
+            for service in reminder_services.values():
+                await service.start()
             await asyncio.gather(
                 _route_inbound_messages(),
                 channels.start_all(),
@@ -1002,7 +1023,9 @@ def gateway(
         finally:
             timeout_monitor.stop()
             heartbeat.stop()
-            reminder_service.stop()
+            reminder_services_running = False
+            for service in reminder_services.values():
+                service.stop()
             cron.stop()
             for loop in workspace_agents.values():
                 await loop.close()
