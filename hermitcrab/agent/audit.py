@@ -21,9 +21,18 @@ class AuditSummary:
 class AuditTrail:
     """Append-only JSONL audit trail for meaningful runtime events."""
 
-    def __init__(self, workspace: Path):
+    def __init__(
+        self,
+        workspace: Path,
+        *,
+        max_bytes: int = 256 * 1024,
+        max_archives: int = 5,
+    ):
         self.workspace = workspace
         self.path = workspace / "logs" / "audit.jsonl"
+        self.archive_dir = self.path.parent / "archive"
+        self.max_bytes = max_bytes
+        self.max_archives = max_archives
 
     def record(self, event: str, **data: Any) -> None:
         payload = {
@@ -31,9 +40,11 @@ class AuditTrail:
             "event": event,
             **data,
         }
+        encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True) + "\n"
+        self._rotate_if_needed(len(encoded.encode("utf-8")))
         self.path.parent.mkdir(parents=True, exist_ok=True)
         with self.path.open("a", encoding="utf-8") as handle:
-            handle.write(json.dumps(payload, ensure_ascii=False, sort_keys=True) + "\n")
+            handle.write(encoded)
 
     def summarize(self) -> AuditSummary:
         if not self.path.exists():
@@ -105,3 +116,32 @@ class AuditTrail:
             return []
 
         return entries[-limit:]
+
+    def _rotate_if_needed(self, incoming_size: int) -> None:
+        if self.max_bytes <= 0 or not self.path.exists():
+            return
+        try:
+            current_size = self.path.stat().st_size
+        except OSError:
+            return
+        if current_size + incoming_size <= self.max_bytes:
+            return
+
+        self.archive_dir.mkdir(parents=True, exist_ok=True)
+        archive_name = f"audit-{datetime.now(UTC).strftime('%Y%m%dT%H%M%S%fZ')}.jsonl"
+        archive_path = self.archive_dir / archive_name
+        self.path.replace(archive_path)
+        self._prune_archives()
+
+    def _prune_archives(self) -> None:
+        if self.max_archives < 0 or not self.archive_dir.exists():
+            return
+        archives = sorted(self.archive_dir.glob("audit-*.jsonl"))
+        excess = len(archives) - self.max_archives
+        if excess <= 0:
+            return
+        for archive_path in archives[:excess]:
+            try:
+                archive_path.unlink()
+            except OSError:
+                continue
