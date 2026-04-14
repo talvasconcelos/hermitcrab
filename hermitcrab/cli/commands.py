@@ -11,7 +11,7 @@ import subprocess
 import sys
 import tempfile
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 import typer
 from prompt_toolkit import PromptSession
@@ -479,22 +479,27 @@ def onboard():
         save_config(Config())
         console.print(f"[green]✓[/green] Created config at {config_path}")
 
-    # Create workspace
-    workspace = get_workspace_path()
-
-    if not workspace.exists():
-        workspace.mkdir(parents=True, exist_ok=True)
-        console.print(f"[green]✓[/green] Created workspace at {workspace}")
-
-    # Create default bootstrap files
-    _create_workspace_templates(workspace)
+    bootstrap_workspace(get_workspace_path(), announce=console.print)
 
     console.print(f"\n{__logo__} hermitcrab is ready!")
     for line in _build_onboard_next_steps():
         console.print(line)
 
 
-def _create_workspace_templates(workspace: Path):
+def bootstrap_workspace(workspace: Path, announce: Callable[[str], None] | None = None) -> None:
+    """Create or refresh one workspace root with default structure."""
+    if not workspace.exists():
+        workspace.mkdir(parents=True, exist_ok=True)
+        if announce is not None:
+            announce(f"[green]✓[/green] Created workspace at {workspace}")
+
+    _create_workspace_templates(workspace, announce=announce)
+
+
+def _create_workspace_templates(
+    workspace: Path,
+    announce: Callable[[str], None] | None = None,
+) -> None:
     """Create default workspace template files from bundled templates."""
     from importlib.resources import files as pkg_files
 
@@ -506,7 +511,8 @@ def _create_workspace_templates(workspace: Path):
         dest = workspace / item.name
         if not dest.exists():
             _atomic_write_text(dest, item.read_text(encoding="utf-8"))
-            console.print(f"  [dim]Created {item.name}[/dim]")
+            if announce is not None:
+                announce(f"  [dim]Created {item.name}[/dim]")
 
     # Create category-based memory directories
     memory_dir = workspace / "memory"
@@ -515,7 +521,8 @@ def _create_workspace_templates(workspace: Path):
     for category in ["facts", "decisions", "goals", "tasks", "reflections"]:
         category_dir = memory_dir / category
         category_dir.mkdir(exist_ok=True)
-        console.print(f"  [dim]Created memory/{category}/[/dim]")
+        if announce is not None:
+            announce(f"  [dim]Created memory/{category}/[/dim]")
 
     # Create knowledge base directories (reference library, not memory)
     knowledge_dir = workspace / "knowledge"
@@ -524,24 +531,29 @@ def _create_workspace_templates(workspace: Path):
     for category in ["articles", "books", "docs", "notes"]:
         category_dir = knowledge_dir / category
         category_dir.mkdir(exist_ok=True)
-        console.print(f"  [dim]Created knowledge/{category}/[/dim]")
+        if announce is not None:
+            announce(f"  [dim]Created knowledge/{category}/[/dim]")
 
     (workspace / "lists").mkdir(exist_ok=True)
-    console.print("  [dim]Created lists/[/dim]")
+    if announce is not None:
+        announce("  [dim]Created lists/[/dim]")
 
     people_dir = workspace / "people"
     people_dir.mkdir(exist_ok=True)
     (people_dir / "profiles").mkdir(exist_ok=True)
     (people_dir / "interactions").mkdir(exist_ok=True)
-    console.print("  [dim]Created people/profiles/ and people/interactions/[/dim]")
+    if announce is not None:
+        announce("  [dim]Created people/profiles/ and people/interactions/[/dim]")
 
     (workspace / "reminders").mkdir(exist_ok=True)
-    console.print("  [dim]Created reminders/[/dim]")
+    if announce is not None:
+        announce("  [dim]Created reminders/[/dim]")
 
     scratchpads_dir = workspace / "scratchpads"
     scratchpads_dir.mkdir(exist_ok=True)
     (scratchpads_dir / "archive").mkdir(exist_ok=True)
-    console.print("  [dim]Created scratchpads/ and scratchpads/archive/[/dim]")
+    if announce is not None:
+        announce("  [dim]Created scratchpads/ and scratchpads/archive/[/dim]")
 
     (workspace / "skills").mkdir(exist_ok=True)
 
@@ -1322,6 +1334,19 @@ app.add_typer(reminders_app, name="reminders")
 people_app = typer.Typer(help="Manage people profiles")
 app.add_typer(people_app, name="people")
 
+workspaces_app = typer.Typer(help="Manage named personal workspaces")
+app.add_typer(workspaces_app, name="workspaces")
+
+
+def _configured_workspace_rows(config: Config) -> list[tuple[str, Path, str, bool]]:
+    """Return configured named workspaces for CLI display."""
+    rows: list[tuple[str, Path, str, bool]] = []
+    for name, workspace in config.workspaces.registry.items():
+        path = config.get_workspace_path(name)
+        label = workspace.label or "-"
+        rows.append((name, path, label, workspace.channel_only))
+    return rows
+
 
 def _build_cron_service():
     """Build the CronService in the configured data directory."""
@@ -1896,6 +1921,92 @@ def people_history(
     console.print(f"[bold]Interactions for {person.name}[/bold]")
     for interaction in interactions:
         console.print(store.render_interaction_summary(interaction))
+
+
+@workspaces_app.command("list")
+def workspaces_list(
+    as_json: bool = typer.Option(False, "--json", help="Print named workspaces as JSON"),
+):
+    """List configured named workspaces."""
+    config = _load_runtime_config()
+    rows = _configured_workspace_rows(config)
+
+    if as_json:
+        typer.echo(
+            json.dumps(
+                [
+                    {
+                        "name": name,
+                        "path": str(path),
+                        "label": label if label != "-" else None,
+                        "channel_only": channel_only,
+                        "exists": path.exists(),
+                        "bootstrapped": (path / "AGENTS.md").exists(),
+                    }
+                    for name, path, label, channel_only in rows
+                ],
+                indent=2,
+                ensure_ascii=False,
+            )
+            + "\n",
+            nl=False,
+        )
+        return
+
+    if not rows:
+        console.print("No named workspaces configured.")
+        return
+
+    table = Table(title="Named Workspaces")
+    table.add_column("Name", style="cyan")
+    table.add_column("Path")
+    table.add_column("Label")
+    table.add_column("Mode")
+    table.add_column("State")
+
+    for name, path, label, channel_only in rows:
+        mode = "channel-only" if channel_only else "interactive"
+        if not path.exists():
+            state = "[red]missing[/red]"
+        elif (path / "AGENTS.md").exists():
+            state = "[green]ready[/green]"
+        else:
+            state = "[yellow]needs bootstrap[/yellow]"
+        table.add_row(name, str(path), label, mode, state)
+
+    console.print(table)
+
+
+@workspaces_app.command("init")
+def workspaces_init(
+    name: str | None = typer.Argument(None, help="Configured workspace name"),
+    all: bool = typer.Option(False, "--all", help="Bootstrap all configured named workspaces"),
+):
+    """Bootstrap configured named workspaces without changing admin workspace behavior."""
+    if all and name is not None:
+        console.print("[red]Error: choose a workspace name or --all, not both[/red]")
+        raise typer.Exit(1)
+    if not all and name is None:
+        console.print("[red]Error: provide a configured workspace name or use --all[/red]")
+        raise typer.Exit(1)
+
+    config = _load_runtime_config()
+    rows = _configured_workspace_rows(config)
+    names = [workspace_name for workspace_name, _, _, _ in rows]
+    if not rows:
+        console.print("[red]Error: no named workspaces configured[/red]")
+        raise typer.Exit(1)
+
+    target_names = names if all else [name]
+    missing = [workspace_name for workspace_name in target_names if workspace_name not in names]
+    if missing:
+        console.print(f"[red]Error: unknown workspace: {missing[0]}[/red]")
+        raise typer.Exit(1)
+
+    for workspace_name in target_names:
+        workspace_path = config.get_workspace_path(workspace_name)
+        console.print(f"[bold]Bootstrapping {workspace_name}[/bold]")
+        bootstrap_workspace(workspace_path, announce=console.print)
 
 
 # ============================================================================
