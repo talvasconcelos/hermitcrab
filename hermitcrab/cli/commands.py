@@ -789,9 +789,14 @@ def gateway(
     console.print(f"[dim]Log level: {configured_level}[/dim]")
 
     config = _load_runtime_config()
+    if config.workspace_path != config.admin_workspace_path:
+        raise RuntimeError("admin workspace invariant failed: workspace_path must equal admin_workspace_path")
     bus = MessageBus()
     provider = _make_provider(config)
     session_manager = SessionManager(config.workspace_path)
+    multi_workspace_active = bool(config.workspaces.registry) and bool(
+        config.channels.nostr.workspace_bindings
+    )
 
     # Create cron service first (callback set after agent creation)
     cron = _build_cron_service()
@@ -812,22 +817,24 @@ def gateway(
     def _workspace_agent_key(workspace_name: str | None) -> str:
         return workspace_name or "__admin__"
 
-    def _route_workspace_target(msg) -> tuple[str, str | None]:
+    def _route_workspace_target(msg) -> tuple[str, str | None, str]:
         """Resolve gateway routing action: admin, workspace, or denied."""
         if msg.channel != "nostr":
-            return "admin", None
+            return "admin", None, "non_nostr_channel"
 
         metadata = msg.metadata or {}
         target = metadata.get("workspace_target")
         if target == "denied":
-            return "denied", None
+            return "denied", None, "channel_metadata_denied"
         if target != "workspace":
-            return "admin", None
+            return "admin", None, "admin_default"
+        if not multi_workspace_active:
+            return "denied", None, "workspace_mode_disabled"
 
         workspace_name = metadata.get("workspace_name")
         if isinstance(workspace_name, str) and workspace_name:
-            return "workspace", workspace_name
-        return "denied", None
+            return "workspace", workspace_name, "workspace_binding"
+        return "denied", None, "missing_workspace_name"
 
     reminder_services: dict[str, ReminderService] = {}
     reminder_services_running = False
@@ -845,11 +852,26 @@ def gateway(
         if reminder_services_running:
             await service.start()
 
+    def _workspace_ready_for_routing(workspace_name: str) -> tuple[bool, str]:
+        if workspace_name not in config.workspaces.registry:
+            return False, "workspace_not_configured"
+        workspace_path = config.get_workspace_path(workspace_name)
+        if not workspace_path.exists():
+            return False, "workspace_missing"
+        if not (workspace_path / "AGENTS.md").exists():
+            return False, "workspace_not_bootstrapped"
+        return True, "workspace_ready"
+
     async def _get_or_create_agent(workspace_name: str | None) -> AgentLoop:
         key = _workspace_agent_key(workspace_name)
         existing = workspace_agents.get(key)
         if existing is not None:
             return existing
+
+        assert workspace_name is not None
+        ready, reason = _workspace_ready_for_routing(workspace_name)
+        if not ready:
+            raise ValueError(f"workspace routing blocked: {reason}")
 
         workspace_path = config.get_workspace_path(workspace_name)
         loop = AgentLoop(
@@ -981,6 +1003,10 @@ def gateway(
         console.print(f"[green]✓[/green] Channels enabled: {', '.join(channels.enabled_channels)}")
     else:
         console.print("[yellow]Warning: No channels enabled[/yellow]")
+    if multi_workspace_active:
+        console.print("[green]✓[/green] Multi-workspace routing: active (Nostr bindings)")
+    else:
+        console.print("[dim]Multi-workspace routing: inactive[/dim]")
 
     cron_status = cron.status()
     if cron_status["jobs"] > 0:
@@ -988,17 +1014,19 @@ def gateway(
 
     console.print(f"[green]✓[/green] Heartbeat: every {hb_cfg.interval_s}s")
     console.print(f"[green]✓[/green] Reminders: every {config.gateway.reminders.interval_s}s")
+    console.print("[dim]Cron/heartbeat execution stays in admin workspace[/dim]")
 
     async def _route_inbound_messages() -> None:
         while True:
             try:
                 msg = await asyncio.wait_for(bus.consume_inbound(), timeout=1.0)
-                route_target, workspace_name = _route_workspace_target(msg)
+                route_target, workspace_name, route_reason = _route_workspace_target(msg)
                 logger.debug(
-                    "Gateway inbound route: channel={} chat_id={} route_target={} workspace_agent={}",
+                    "Gateway inbound route: channel={} chat_id={} route_target={} route_reason={} workspace_agent={}",
                     msg.channel,
                     msg.chat_id,
                     route_target,
+                    route_reason,
                     _workspace_agent_key(workspace_name),
                 )
                 if route_target == "denied":
@@ -1007,19 +1035,35 @@ def gateway(
                         session_key=msg.session_key,
                         msg=msg,
                         workspace_agent="__admin__",
+                        route_reason=route_reason,
                     )
                     continue
-                agent_for_msg = await _get_or_create_agent(workspace_name)
+                try:
+                    agent_for_msg = await _get_or_create_agent(workspace_name)
+                except Exception as e:
+                    logger.warning("Workspace route failed; denying message: {}", e)
+                    agent.audit_event(
+                        "gateway.workspace_route_denied",
+                        session_key=msg.session_key,
+                        msg=msg,
+                        workspace_agent="__admin__",
+                        route_reason=f"workspace_unavailable:{workspace_name}",
+                    )
+                    continue
                 agent_for_msg.audit_event(
                     "gateway.workspace_route",
                     session_key=msg.session_key,
                     msg=msg,
                     workspace_agent=_workspace_agent_key(workspace_name),
+                    route_reason=route_reason,
                 )
                 response = await agent_for_msg.handle_inbound(msg)
                 if response is not None:
                     await bus.publish_outbound(response)
             except asyncio.TimeoutError:
+                continue
+            except Exception as e:
+                logger.error("Gateway inbound router loop error: {}", e)
                 continue
 
     async def run():
