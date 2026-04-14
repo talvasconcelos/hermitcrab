@@ -967,7 +967,14 @@ def gateway(
         while True:
             try:
                 msg = await asyncio.wait_for(bus.consume_inbound(), timeout=1.0)
-                agent_for_msg = _get_or_create_agent(_select_workspace_name(msg))
+                workspace_name = _select_workspace_name(msg)
+                logger.debug(
+                    "Gateway inbound route: channel={} chat_id={} workspace_agent={}",
+                    msg.channel,
+                    msg.chat_id,
+                    _workspace_agent_key(workspace_name),
+                )
+                agent_for_msg = _get_or_create_agent(workspace_name)
                 response = await agent_for_msg.handle_inbound(msg)
                 if response is not None:
                     await bus.publish_outbound(response)
