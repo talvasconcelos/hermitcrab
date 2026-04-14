@@ -10,8 +10,9 @@ import signal
 import subprocess
 import sys
 import tempfile
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Literal
 
 import typer
 from prompt_toolkit import PromptSession
@@ -44,6 +45,56 @@ EXIT_COMMANDS = {"exit", "quit", "/exit", "/quit", ":q"}
 _PROMPT_SESSION: PromptSession | None = None
 _SAVED_TERM_ATTRS = None  # original termios settings, restored on exit
 _ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
+
+
+@dataclass(frozen=True)
+class GatewayWorkspaceRouteDecision:
+    """Deterministic inbound gateway workspace routing decision."""
+
+    target: Literal["admin", "workspace", "denied"]
+    reason: str
+    workspace_name: str | None = None
+
+
+def _multi_workspace_routing_active(config: Config) -> bool:
+    """Enable multi-workspace routing only when registry and bindings are both configured."""
+    return bool(config.workspaces.registry) and bool(config.channels.nostr.workspace_bindings)
+
+
+def _resolve_gateway_workspace_route(
+    msg: Any,
+    *,
+    multi_workspace_active: bool,
+) -> GatewayWorkspaceRouteDecision:
+    """Resolve gateway routing action for an inbound message."""
+    if msg.channel != "nostr":
+        return GatewayWorkspaceRouteDecision("admin", "non_nostr_channel")
+
+    metadata = msg.metadata or {}
+    target = metadata.get("workspace_target")
+    if target == "denied":
+        return GatewayWorkspaceRouteDecision("denied", "channel_metadata_denied")
+    if target != "workspace":
+        return GatewayWorkspaceRouteDecision("admin", "admin_default")
+    if not multi_workspace_active:
+        return GatewayWorkspaceRouteDecision("denied", "workspace_mode_disabled")
+
+    workspace_name = metadata.get("workspace_name")
+    if isinstance(workspace_name, str) and workspace_name:
+        return GatewayWorkspaceRouteDecision("workspace", "workspace_binding", workspace_name)
+    return GatewayWorkspaceRouteDecision("denied", "missing_workspace_name")
+
+
+def _workspace_ready_for_routing(config: Config, workspace_name: str) -> tuple[bool, str]:
+    """Return whether a configured workspace is safe/ready for gateway routing."""
+    if workspace_name not in config.workspaces.registry:
+        return False, "workspace_not_configured"
+    workspace_path = config.get_workspace_path(workspace_name)
+    if not workspace_path.exists():
+        return False, "workspace_missing"
+    if not (workspace_path / "AGENTS.md").exists():
+        return False, "workspace_not_bootstrapped"
+    return True, "workspace_ready"
 
 
 def _build_job_models_from_config(config: Config) -> dict | None:
@@ -794,9 +845,7 @@ def gateway(
     bus = MessageBus()
     provider = _make_provider(config)
     session_manager = SessionManager(config.workspace_path)
-    multi_workspace_active = bool(config.workspaces.registry) and bool(
-        config.channels.nostr.workspace_bindings
-    )
+    multi_workspace_active = _multi_workspace_routing_active(config)
 
     # Create cron service first (callback set after agent creation)
     cron = _build_cron_service()
@@ -817,25 +866,6 @@ def gateway(
     def _workspace_agent_key(workspace_name: str | None) -> str:
         return workspace_name or "__admin__"
 
-    def _route_workspace_target(msg) -> tuple[str, str | None, str]:
-        """Resolve gateway routing action: admin, workspace, or denied."""
-        if msg.channel != "nostr":
-            return "admin", None, "non_nostr_channel"
-
-        metadata = msg.metadata or {}
-        target = metadata.get("workspace_target")
-        if target == "denied":
-            return "denied", None, "channel_metadata_denied"
-        if target != "workspace":
-            return "admin", None, "admin_default"
-        if not multi_workspace_active:
-            return "denied", None, "workspace_mode_disabled"
-
-        workspace_name = metadata.get("workspace_name")
-        if isinstance(workspace_name, str) and workspace_name:
-            return "workspace", workspace_name, "workspace_binding"
-        return "denied", None, "missing_workspace_name"
-
     reminder_services: dict[str, ReminderService] = {}
     reminder_services_running = False
 
@@ -852,16 +882,6 @@ def gateway(
         if reminder_services_running:
             await service.start()
 
-    def _workspace_ready_for_routing(workspace_name: str) -> tuple[bool, str]:
-        if workspace_name not in config.workspaces.registry:
-            return False, "workspace_not_configured"
-        workspace_path = config.get_workspace_path(workspace_name)
-        if not workspace_path.exists():
-            return False, "workspace_missing"
-        if not (workspace_path / "AGENTS.md").exists():
-            return False, "workspace_not_bootstrapped"
-        return True, "workspace_ready"
-
     async def _get_or_create_agent(workspace_name: str | None) -> AgentLoop:
         key = _workspace_agent_key(workspace_name)
         existing = workspace_agents.get(key)
@@ -869,7 +889,7 @@ def gateway(
             return existing
 
         assert workspace_name is not None
-        ready, reason = _workspace_ready_for_routing(workspace_name)
+        ready, reason = _workspace_ready_for_routing(config, workspace_name)
         if not ready:
             raise ValueError(f"workspace routing blocked: {reason}")
 
@@ -1021,26 +1041,29 @@ def gateway(
         while True:
             try:
                 msg = await asyncio.wait_for(bus.consume_inbound(), timeout=1.0)
-                route_target, workspace_name, route_reason = _route_workspace_target(msg)
+                route = _resolve_gateway_workspace_route(
+                    msg,
+                    multi_workspace_active=multi_workspace_active,
+                )
                 logger.debug(
                     "Gateway inbound route: channel={} chat_id={} route_target={} route_reason={} workspace_agent={}",
                     msg.channel,
                     msg.chat_id,
-                    route_target,
-                    route_reason,
-                    _workspace_agent_key(workspace_name),
+                    route.target,
+                    route.reason,
+                    _workspace_agent_key(route.workspace_name),
                 )
-                if route_target == "denied":
+                if route.target == "denied":
                     agent.audit_event(
                         "gateway.workspace_route_denied",
                         session_key=msg.session_key,
                         msg=msg,
                         workspace_agent="__admin__",
-                        route_reason=route_reason,
+                        route_reason=route.reason,
                     )
                     continue
                 try:
-                    agent_for_msg = await _get_or_create_agent(workspace_name)
+                    agent_for_msg = await _get_or_create_agent(route.workspace_name)
                 except Exception as e:
                     logger.warning("Workspace route failed; denying message: {}", e)
                     agent.audit_event(
@@ -1048,15 +1071,15 @@ def gateway(
                         session_key=msg.session_key,
                         msg=msg,
                         workspace_agent="__admin__",
-                        route_reason=f"workspace_unavailable:{workspace_name}",
+                        route_reason=f"workspace_unavailable:{route.workspace_name}",
                     )
                     continue
                 agent_for_msg.audit_event(
                     "gateway.workspace_route",
                     session_key=msg.session_key,
                     msg=msg,
-                    workspace_agent=_workspace_agent_key(workspace_name),
-                    route_reason=route_reason,
+                    workspace_agent=_workspace_agent_key(route.workspace_name),
+                    route_reason=route.reason,
                 )
                 response = await agent_for_msg.handle_inbound(msg)
                 if response is not None:
