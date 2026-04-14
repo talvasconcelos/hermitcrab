@@ -816,6 +816,16 @@ class AgentLoop:
             payload["chat_id"] = msg.chat_id
             if msg.metadata and msg.metadata.get("message_id") is not None:
                 payload["message_id"] = msg.metadata.get("message_id")
+            if msg.metadata:
+                for field in (
+                    "sender_pubkey",
+                    "workspace_target",
+                    "workspace_name",
+                    "workspace_path",
+                    "workspace_reason",
+                ):
+                    if msg.metadata.get(field) is not None:
+                        payload[field] = msg.metadata.get(field)
         try:
             self.audit.record(event, **payload)
         except OSError as exc:
