@@ -441,6 +441,17 @@ class ResolvedModelConfig:
     name: str | None = None
 
 
+@dataclass(frozen=True)
+class NostrWorkspaceResolution:
+    """Resolved workspace target for one inbound Nostr sender."""
+
+    target: Literal["admin", "workspace", "denied"]
+    workspace_name: str | None = None
+    workspace_path: Path | None = None
+    normalized_pubkey: str | None = None
+    reason: str | None = None
+
+
 class Config(BaseSettings):
     """Root configuration for hermitcrab."""
 
@@ -529,6 +540,57 @@ class Config(BaseSettings):
             name: self.get_workspace_path(name)
             for name in self.workspaces.registry
         }
+
+    def normalized_nostr_workspace_bindings(self) -> dict[str, set[str]]:
+        """Return normalized Nostr workspace bindings."""
+        return {
+            workspace_name: {normalize_nostr_pubkey(pubkey) for pubkey in pubkeys}
+            for workspace_name, pubkeys in self.channels.nostr.workspace_bindings.items()
+        }
+
+    def normalized_nostr_allowed_pubkeys(self) -> set[str]:
+        """Return normalized Nostr allowlist."""
+        normalized: set[str] = set()
+        for pubkey in self.channels.nostr.allowed_pubkeys:
+            value = pubkey.strip().lower()
+            if not value:
+                continue
+            if value in {"*", "all"}:
+                return {"*"}
+            normalized.add(normalize_nostr_pubkey(pubkey))
+        return normalized
+
+    def resolve_nostr_sender_workspace(self, sender_pubkey: str) -> NostrWorkspaceResolution:
+        """Resolve inbound Nostr sender to named workspace, admin workspace, or denial."""
+        try:
+            normalized_pubkey = normalize_nostr_pubkey(sender_pubkey)
+        except ValueError:
+            return NostrWorkspaceResolution(target="denied", reason="invalid_pubkey")
+
+        for workspace_name, pubkeys in self.normalized_nostr_workspace_bindings().items():
+            if normalized_pubkey in pubkeys:
+                return NostrWorkspaceResolution(
+                    target="workspace",
+                    workspace_name=workspace_name,
+                    workspace_path=self.get_workspace_path(workspace_name),
+                    normalized_pubkey=normalized_pubkey,
+                    reason="workspace_binding",
+                )
+
+        allowed_pubkeys = self.normalized_nostr_allowed_pubkeys()
+        if "*" in allowed_pubkeys or normalized_pubkey in allowed_pubkeys:
+            return NostrWorkspaceResolution(
+                target="admin",
+                workspace_path=self.admin_workspace_path,
+                normalized_pubkey=normalized_pubkey,
+                reason="allowlist_admin_fallback",
+            )
+
+        return NostrWorkspaceResolution(
+            target="denied",
+            normalized_pubkey=normalized_pubkey,
+            reason="not_allowed",
+        )
 
     def resolve_model_config(self, model: str | None = None) -> ResolvedModelConfig:
         """Resolve a model reference to an actual model string and metadata."""
