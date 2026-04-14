@@ -2009,6 +2009,37 @@ def workspaces_init(
         bootstrap_workspace(workspace_path, announce=console.print)
 
 
+@workspaces_app.command("resolve-nostr")
+def workspaces_resolve_nostr(
+    pubkey: str = typer.Argument(..., help="Inbound Nostr sender pubkey (64-char hex)"),
+    as_json: bool = typer.Option(False, "--json", help="Print resolution as JSON"),
+):
+    """Resolve inbound Nostr sender to admin workspace, named workspace, or denial."""
+    config = _load_runtime_config()
+    resolution = config.resolve_nostr_sender_workspace(pubkey)
+
+    payload = {
+        "target": resolution.target,
+        "workspace_name": resolution.workspace_name,
+        "workspace_path": (str(resolution.workspace_path) if resolution.workspace_path else None),
+        "normalized_pubkey": resolution.normalized_pubkey,
+        "reason": resolution.reason,
+    }
+
+    if as_json:
+        typer.echo(json.dumps(payload, indent=2, ensure_ascii=False) + "\n", nl=False)
+        return
+
+    console.print(f"Target: {resolution.target}")
+    console.print(f"Reason: {resolution.reason or '-'}")
+    if resolution.normalized_pubkey:
+        console.print(f"Pubkey: {resolution.normalized_pubkey}")
+    if resolution.workspace_name:
+        console.print(f"Workspace: {resolution.workspace_name}")
+    if resolution.workspace_path:
+        console.print(f"Path: {resolution.workspace_path}")
+
+
 # ============================================================================
 # Status Commands
 # ============================================================================
