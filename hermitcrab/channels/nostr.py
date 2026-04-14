@@ -6,6 +6,7 @@ import asyncio
 import json
 import re
 import time
+from collections.abc import Callable
 from typing import Any
 
 import websockets
@@ -22,7 +23,7 @@ from hermitcrab.channels.nostr_nip17 import (
     parse_nip17_message,
     randomized_past_window_seconds,
 )
-from hermitcrab.config.schema import NostrConfig, default_nostr_relays
+from hermitcrab.config.schema import NostrConfig, NostrWorkspaceResolution, default_nostr_relays
 
 
 def _split_message(content: str, max_len: int = 1800) -> list[str]:
@@ -56,9 +57,15 @@ class NostrChannel(BaseChannel):
     _MAX_SEEN_EVENTS = 10_000
     _NIP17_RELAY_LIST_KIND = 10050
 
-    def __init__(self, config: NostrConfig, bus: MessageBus) -> None:
+    def __init__(
+        self,
+        config: NostrConfig,
+        bus: MessageBus,
+        workspace_resolver: Callable[[str], NostrWorkspaceResolution] | None = None,
+    ) -> None:
         super().__init__(config, bus)
         self.config: NostrConfig = config
+        self._workspace_resolver = workspace_resolver
 
         try:
             from pynostr.encrypted_dm import EncryptedDirectMessage
@@ -91,6 +98,18 @@ class NostrChannel(BaseChannel):
         self._active_relays: list[str] = self._normalize_relay_urls(config.relays) or default_nostr_relays()
 
         logger.info("Nostr channel initialized (pubkey: {}...)", self._hex_pub[:8])
+
+    def _workspace_metadata(self, sender_pubkey: str) -> dict[str, Any]:
+        """Return resolved workspace metadata for one inbound sender."""
+        if self._workspace_resolver is None:
+            return {}
+        resolution = self._workspace_resolver(sender_pubkey)
+        return {
+            "workspace_target": resolution.target,
+            "workspace_name": resolution.workspace_name,
+            "workspace_path": (str(resolution.workspace_path) if resolution.workspace_path else None),
+            "workspace_reason": resolution.reason,
+        }
 
     def _load_private_key(self, key: str | None) -> Any:
         if not key:
@@ -549,6 +568,7 @@ class NostrChannel(BaseChannel):
                     "relay_url": relay_url,
                     "created_at": message_created_at,
                     "kind": event_kind,
+                    **self._workspace_metadata(sender_pubkey),
                 }
             if sender_pubkey is None:
                 return
@@ -633,6 +653,7 @@ class NostrChannel(BaseChannel):
             "created_at": parsed.rumor.created_at,
             "kind": parsed.rumor.kind,
             "gift_wrap_kind": parsed.gift_wrap.kind,
+            **self._workspace_metadata(sender_pubkey),
         }
         return sender_pubkey, parsed.content, parsed.rumor.created_at or 0, metadata
 
