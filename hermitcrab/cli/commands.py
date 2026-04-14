@@ -186,6 +186,33 @@ def _workspace_ready_for_routing(config: Config, workspace_name: str) -> tuple[b
     return True, "workspace_ready"
 
 
+def _print_gateway_runtime_summary(
+    *,
+    channels: Any,
+    multi_workspace_active: bool,
+    cron_status: dict[str, Any],
+    heartbeat_interval_s: int,
+    reminders_interval_s: int,
+) -> None:
+    """Print concise gateway runtime status lines."""
+    if channels.enabled_channels:
+        console.print(f"[green]✓[/green] Channels enabled: {', '.join(channels.enabled_channels)}")
+    else:
+        console.print("[yellow]Warning: No channels enabled[/yellow]")
+    if multi_workspace_active:
+        console.print("[green]✓[/green] Multi-workspace routing: active (Nostr bindings)")
+        console.print("[dim]Unresolved/invalid workspace routes are denied (no admin fallback)[/dim]")
+    else:
+        console.print("[dim]Multi-workspace routing: inactive[/dim]")
+
+    if cron_status.get("jobs", 0) > 0:
+        console.print(f"[green]✓[/green] Cron: {cron_status['jobs']} scheduled jobs")
+
+    console.print(f"[green]✓[/green] Heartbeat: every {heartbeat_interval_s}s")
+    console.print(f"[green]✓[/green] Reminders: every {reminders_interval_s}s")
+    console.print("[dim]Cron/heartbeat execution stays in admin workspace[/dim]")
+
+
 async def _run_gateway_inbound_router(
     *,
     bus: Any,
@@ -1127,23 +1154,14 @@ def gateway(
             enabled=True,
         )
 
-    if channels.enabled_channels:
-        console.print(f"[green]✓[/green] Channels enabled: {', '.join(channels.enabled_channels)}")
-    else:
-        console.print("[yellow]Warning: No channels enabled[/yellow]")
-    if multi_workspace_active:
-        console.print("[green]✓[/green] Multi-workspace routing: active (Nostr bindings)")
-        console.print("[dim]Unresolved/invalid workspace routes are denied (no admin fallback)[/dim]")
-    else:
-        console.print("[dim]Multi-workspace routing: inactive[/dim]")
-
     cron_status = cron.status()
-    if cron_status["jobs"] > 0:
-        console.print(f"[green]✓[/green] Cron: {cron_status['jobs']} scheduled jobs")
-
-    console.print(f"[green]✓[/green] Heartbeat: every {hb_cfg.interval_s}s")
-    console.print(f"[green]✓[/green] Reminders: every {config.gateway.reminders.interval_s}s")
-    console.print("[dim]Cron/heartbeat execution stays in admin workspace[/dim]")
+    _print_gateway_runtime_summary(
+        channels=channels,
+        multi_workspace_active=multi_workspace_active,
+        cron_status=cron_status,
+        heartbeat_interval_s=hb_cfg.interval_s,
+        reminders_interval_s=config.gateway.reminders.interval_s,
+    )
 
     async def run():
         try:
