@@ -97,6 +97,70 @@ def _workspace_ready_for_routing(config: Config, workspace_name: str) -> tuple[b
     return True, "workspace_ready"
 
 
+async def _run_gateway_inbound_router(
+    *,
+    bus: Any,
+    multi_workspace_active: bool,
+    admin_agent: Any,
+    get_or_create_agent: Callable[[str | None], Any],
+    workspace_agent_key: Callable[[str | None], str],
+) -> None:
+    """Route inbound gateway messages to admin or workspace-specific agent loops."""
+    from loguru import logger
+
+    while True:
+        try:
+            msg = await asyncio.wait_for(bus.consume_inbound(), timeout=1.0)
+            route = _resolve_gateway_workspace_route(
+                msg,
+                multi_workspace_active=multi_workspace_active,
+            )
+            logger.debug(
+                "Gateway inbound route: channel={} chat_id={} route_target={} route_reason={} workspace_agent={}",
+                msg.channel,
+                msg.chat_id,
+                route.target,
+                route.reason,
+                workspace_agent_key(route.workspace_name),
+            )
+            if route.target == "denied":
+                admin_agent.audit_event(
+                    "gateway.workspace_route_denied",
+                    session_key=msg.session_key,
+                    msg=msg,
+                    workspace_agent="__admin__",
+                    route_reason=route.reason,
+                )
+                continue
+            try:
+                agent_for_msg = await get_or_create_agent(route.workspace_name)
+            except Exception as e:
+                logger.warning("Workspace route failed; denying message: {}", e)
+                admin_agent.audit_event(
+                    "gateway.workspace_route_denied",
+                    session_key=msg.session_key,
+                    msg=msg,
+                    workspace_agent="__admin__",
+                    route_reason=f"workspace_unavailable:{route.workspace_name}",
+                )
+                continue
+            agent_for_msg.audit_event(
+                "gateway.workspace_route",
+                session_key=msg.session_key,
+                msg=msg,
+                workspace_agent=workspace_agent_key(route.workspace_name),
+                route_reason=route.reason,
+            )
+            response = await agent_for_msg.handle_inbound(msg)
+            if response is not None:
+                await bus.publish_outbound(response)
+        except asyncio.TimeoutError:
+            continue
+        except Exception as e:
+            logger.error("Gateway inbound router loop error: {}", e)
+            continue
+
+
 def _build_job_models_from_config(config: Config) -> dict | None:
     """
     Build job_models dict from config for AgentLoop initialization.
@@ -1037,59 +1101,6 @@ def gateway(
     console.print(f"[green]✓[/green] Reminders: every {config.gateway.reminders.interval_s}s")
     console.print("[dim]Cron/heartbeat execution stays in admin workspace[/dim]")
 
-    async def _route_inbound_messages() -> None:
-        while True:
-            try:
-                msg = await asyncio.wait_for(bus.consume_inbound(), timeout=1.0)
-                route = _resolve_gateway_workspace_route(
-                    msg,
-                    multi_workspace_active=multi_workspace_active,
-                )
-                logger.debug(
-                    "Gateway inbound route: channel={} chat_id={} route_target={} route_reason={} workspace_agent={}",
-                    msg.channel,
-                    msg.chat_id,
-                    route.target,
-                    route.reason,
-                    _workspace_agent_key(route.workspace_name),
-                )
-                if route.target == "denied":
-                    agent.audit_event(
-                        "gateway.workspace_route_denied",
-                        session_key=msg.session_key,
-                        msg=msg,
-                        workspace_agent="__admin__",
-                        route_reason=route.reason,
-                    )
-                    continue
-                try:
-                    agent_for_msg = await _get_or_create_agent(route.workspace_name)
-                except Exception as e:
-                    logger.warning("Workspace route failed; denying message: {}", e)
-                    agent.audit_event(
-                        "gateway.workspace_route_denied",
-                        session_key=msg.session_key,
-                        msg=msg,
-                        workspace_agent="__admin__",
-                        route_reason=f"workspace_unavailable:{route.workspace_name}",
-                    )
-                    continue
-                agent_for_msg.audit_event(
-                    "gateway.workspace_route",
-                    session_key=msg.session_key,
-                    msg=msg,
-                    workspace_agent=_workspace_agent_key(route.workspace_name),
-                    route_reason=route.reason,
-                )
-                response = await agent_for_msg.handle_inbound(msg)
-                if response is not None:
-                    await bus.publish_outbound(response)
-            except asyncio.TimeoutError:
-                continue
-            except Exception as e:
-                logger.error("Gateway inbound router loop error: {}", e)
-                continue
-
     async def run():
         nonlocal reminder_services_running
         try:
@@ -1100,7 +1111,13 @@ def gateway(
             for service in reminder_services.values():
                 await service.start()
             await asyncio.gather(
-                _route_inbound_messages(),
+                _run_gateway_inbound_router(
+                    bus=bus,
+                    multi_workspace_active=multi_workspace_active,
+                    admin_agent=agent,
+                    get_or_create_agent=_get_or_create_agent,
+                    workspace_agent_key=_workspace_agent_key,
+                ),
                 channels.start_all(),
             )
         except KeyboardInterrupt:
