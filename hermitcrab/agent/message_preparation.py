@@ -103,6 +103,9 @@ def parse_subagent_completion_prompt(content: str) -> dict[str, str] | None:
         "exit_reason": _field("Exit reason"),
         "tools_used": _field("Tools used"),
         "files": _field("Files"),
+        "escalation_action": _field("Escalation action"),
+        "escalation_target": _field("Escalation target"),
+        "escalation_reason": _field("Escalation reason"),
         "result": result,
     }
 

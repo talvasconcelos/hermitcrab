@@ -26,11 +26,20 @@ def summarize_subagent_completion(content: str) -> str:
     task = ""
     result = ""
     files = ""
+    escalation_action = ""
+    escalation_target = ""
+    escalation_reason = ""
     for idx, line in enumerate(lines):
         if line.startswith("Task:"):
             task = line[5:].strip()
         elif line.startswith("Files:"):
             files = line[6:].strip()
+        elif line.startswith("Escalation action:"):
+            escalation_action = line[18:].strip()
+        elif line.startswith("Escalation target:"):
+            escalation_target = line[18:].strip()
+        elif line.startswith("Escalation reason:"):
+            escalation_reason = line[18:].strip()
         elif line == "Result:":
             result = "\n".join(lines[idx + 1 :]).strip()
             break
@@ -39,15 +48,29 @@ def summarize_subagent_completion(content: str) -> str:
         blocker = _clean_result_line(result)
         task_snippet = f" for '{task}'" if task else ""
         if blocker:
-            return f"Background work for {label}{task_snippet} failed. " f"Main blocker: {blocker}"
-        return f"Background work for {label}{task_snippet} failed."
+            summary = f"Background work for {label}{task_snippet} failed. Main blocker: {blocker}"
+        else:
+            summary = f"Background work for {label}{task_snippet} failed."
+        if escalation_action and escalation_target:
+            summary += (
+                " Suggested next step: coordinator may "
+                f"{_render_escalation(escalation_action, escalation_target, escalation_reason)}"
+            )
+        return summary
 
     if status == "completed partially":
         detail = _clean_result_line(result) or files
         task_snippet = f" for '{task}'" if task else ""
         if detail:
-            return f"{label} finished partially in the background{task_snippet}. {detail}"
-        return f"{label} finished partially in the background{task_snippet}."
+            summary = f"{label} finished partially in the background{task_snippet}. {detail}"
+        else:
+            summary = f"{label} finished partially in the background{task_snippet}."
+        if escalation_action and escalation_target:
+            summary += (
+                " Suggested next step: coordinator may "
+                f"{_render_escalation(escalation_action, escalation_target, escalation_reason)}"
+            )
+        return summary
 
     if result:
         summary = _clean_result_line(result)
@@ -75,6 +98,18 @@ def _clean_result_line(result: str) -> str:
     if len(first_line) > 280:
         return first_line[:277].rstrip() + "..."
     return first_line
+
+
+def _render_escalation(action: str, target: str, reason: str) -> str:
+    if action == "retry_with_profile":
+        text = f"retry with `{target}` profile."
+    elif action == "continue_read_only":
+        text = f"continue with read-only result from `{target}`."
+    else:
+        text = "take over in main agent."
+    if reason:
+        return f"{text} Reason: {reason}"
+    return text
 
 
 def fallback_system_task_summary(content: str) -> str:

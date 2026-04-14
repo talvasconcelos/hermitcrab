@@ -89,3 +89,67 @@ def get_subagent_profile(name: str | None) -> SubagentProfile:
         return SUBAGENT_PROFILES[DEFAULT_SUBAGENT_PROFILE]
     normalized = name.strip().lower().replace("-", "_")
     return SUBAGENT_PROFILES.get(normalized, SUBAGENT_PROFILES[DEFAULT_SUBAGENT_PROFILE])
+
+
+def suggest_subagent_escalation(
+    current_profile: str,
+    *,
+    blocked_tool: str,
+    required_permission: str,
+    safe_fallback_tool: str | None = None,
+) -> dict[str, str] | None:
+    """Suggest a bounded next step after a subagent permission denial."""
+    if safe_fallback_tool:
+        return {
+            "action": "continue_read_only",
+            "target": safe_fallback_tool,
+            "reason": "A safe read-only fallback already ran; coordinator can decide whether that is enough.",
+        }
+
+    if required_permission == ToolPermissionLevel.COORDINATOR.value:
+        return {
+            "action": "escalate_to_main_agent",
+            "target": "main_agent",
+            "reason": f"`{blocked_tool}` is coordinator-only.",
+        }
+
+    if required_permission == ToolPermissionLevel.DANGEROUS_EXEC.value:
+        return {
+            "action": "escalate_to_main_agent",
+            "target": "main_agent",
+            "reason": f"`{blocked_tool}` needs dangerous execution authority.",
+        }
+
+    if required_permission == ToolPermissionLevel.WORKSPACE_WRITE.value:
+        if current_profile != "implementation":
+            return {
+                "action": "retry_with_profile",
+                "target": "implementation",
+                "reason": f"`{blocked_tool}` needs workspace write permission.",
+            }
+        return {
+            "action": "escalate_to_main_agent",
+            "target": "main_agent",
+            "reason": f"`{blocked_tool}` was still blocked under implementation profile.",
+        }
+
+    if required_permission == ToolPermissionLevel.NETWORK.value:
+        if current_profile in {"explore", "verification"}:
+            return {
+                "action": "retry_with_profile",
+                "target": "research",
+                "reason": f"`{blocked_tool}` needs network permission.",
+            }
+        return {
+            "action": "escalate_to_main_agent",
+            "target": "main_agent",
+            "reason": f"`{blocked_tool}` needs network permission not available in profile `{current_profile}`.",
+        }
+
+    if current_profile != "implementation":
+        return {
+            "action": "escalate_to_main_agent",
+            "target": "main_agent",
+            "reason": f"`{blocked_tool}` was blocked under profile `{current_profile}`.",
+        }
+    return None

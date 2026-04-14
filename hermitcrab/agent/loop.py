@@ -56,6 +56,7 @@ from hermitcrab.agent.message_preparation import (
     is_empty_response,
     is_placeholder_assistant_reply,
     is_subagent_completion_prompt,
+    parse_subagent_completion_prompt,
 )
 from hermitcrab.agent.pending_work import (
     PendingWork,
@@ -1304,6 +1305,18 @@ class AgentLoop:
                 or msg.content.lstrip().startswith("[Subagent '")
             ):
                 safe_content = summarize_subagent_completion(msg.content)
+                parsed = parse_subagent_completion_prompt(msg.content)
+                retried = False
+                if parsed is not None:
+                    safe_content, retried = await self._maybe_handle_subagent_escalation(
+                        session_key=key,
+                        channel=channel,
+                        chat_id=chat_id,
+                        session=session,
+                        history=history,
+                        parsed=parsed,
+                        safe_content=safe_content,
+                    )
                 all_msgs = [
                     {"role": "system", "content": "deterministic background update"},
                     *history,
@@ -1314,7 +1327,10 @@ class AgentLoop:
                 if "failed" not in safe_content.lower() and "error" not in safe_content.lower():
                     session.metadata.pop("pending_work", None)
                 self.sessions.save(session)
-                self.execution_state.set(key, ExecutionPhase.COMPLETED, "system update ready")
+                if retried:
+                    self.execution_state.set(key, ExecutionPhase.DELEGATED, "subagent escalation retry")
+                else:
+                    self.execution_state.set(key, ExecutionPhase.COMPLETED, "system update ready")
                 return OutboundMessage(channel=channel, chat_id=chat_id, content=safe_content)
 
             scratchpad_path = self._ensure_scratchpad(key)
@@ -1343,6 +1359,110 @@ class AgentLoop:
                 chat_id=chat_id,
                 content=safe_content or fallback_system_task_summary(msg.content),
             )
+
+    async def _maybe_handle_subagent_escalation(
+        self,
+        *,
+        session_key: str,
+        channel: str,
+        chat_id: str,
+        session: Session,
+        history: list[dict[str, Any]],
+        parsed: dict[str, str],
+        safe_content: str,
+    ) -> tuple[str, bool]:
+        action = parsed.get("escalation_action", "").strip()
+        target = parsed.get("escalation_target", "").strip()
+        reason = parsed.get("escalation_reason", "").strip()
+        task = parsed.get("task", "").strip()
+        label = parsed.get("label", "").strip() or "subagent task"
+        profile = parsed.get("profile", "").strip()
+        status = parsed.get("status", "").strip().lower()
+
+        if not action or not target or status not in {"failed", "completed partially"}:
+            return safe_content, False
+
+        if action == "retry_with_profile" and task and target and target != profile:
+            retry_key = self._subagent_retry_key(label=label, task=task, target=target)
+            if retry_key not in self._subagent_retry_history(session):
+                brief = self._build_subagent_brief(task, build_prompt_history(history), session)
+                await self.subagents.spawn(
+                    task=task,
+                    label=label,
+                    origin_channel=channel,
+                    origin_chat_id=chat_id,
+                    profile=target,
+                    brief=brief,
+                )
+                self._record_subagent_retry(session, retry_key)
+                self._audit_event(
+                    "subagent.escalation_retry",
+                    session_key=session_key,
+                    channel=channel,
+                    chat_id=chat_id,
+                    label=label,
+                    requested_profile=profile,
+                    retried_profile=target,
+                    reason=reason,
+                    task=task,
+                )
+                return safe_content + f" Coordinator is retrying this in the background with `{target}` profile.", True
+
+        if action == "escalate_to_main_agent":
+            self._audit_event(
+                "subagent.escalation_takeover",
+                session_key=session_key,
+                channel=channel,
+                chat_id=chat_id,
+                label=label,
+                requested_profile=profile,
+                reason=reason,
+                task=task,
+            )
+            note = " Coordinator will handle the next step directly instead of auto-respawning this subagent."
+            if reason:
+                note += f" Reason: {reason}"
+            return safe_content + note, False
+
+        if action == "continue_read_only":
+            self._audit_event(
+                "subagent.escalation_read_only",
+                session_key=session_key,
+                channel=channel,
+                chat_id=chat_id,
+                label=label,
+                requested_profile=profile,
+                fallback_target=target,
+                reason=reason,
+                task=task,
+            )
+            note = " Coordinator kept the safe read-only result instead of escalating."
+            if reason:
+                note += f" Reason: {reason}"
+            return safe_content + note, False
+
+        return safe_content, False
+
+    @staticmethod
+    def _subagent_retry_key(*, label: str, task: str, target: str) -> str:
+        return "|".join(
+            [
+                clean_snippet(label, max_chars=80),
+                clean_snippet(task, max_chars=180),
+                clean_snippet(target, max_chars=40),
+            ]
+        )
+
+    @staticmethod
+    def _subagent_retry_history(session: Session) -> list[str]:
+        history = session.metadata.get("subagent_retry_history", [])
+        return history if isinstance(history, list) else []
+
+    def _record_subagent_retry(self, session: Session, retry_key: str) -> None:
+        history = self._subagent_retry_history(session)
+        updated = [item for item in history if item != retry_key]
+        updated.append(retry_key)
+        session.metadata["subagent_retry_history"] = updated[-20:]
 
     async def _process_user_message(
         self,
