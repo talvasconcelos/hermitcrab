@@ -2254,6 +2254,7 @@ def doctor(
 @app.command()
 def audit(
     limit: int = typer.Option(20, "--limit", "-n", help="Maximum audit entries to show"),
+    event: str = typer.Option("", "--event", "-e", help="Show only entries for one event type"),
     as_json: bool = typer.Option(False, "--json", help="Print audit entries as JSON"),
 ):
     """Show recent durable audit trail events."""
@@ -2262,6 +2263,8 @@ def audit(
     config = _load_runtime_config()
     trail = AuditTrail(config.workspace_path)
     entries = trail.read_recent(limit)
+    if event:
+        entries = _filter_audit_entries(entries, event)
 
     if as_json:
         typer.echo(json.dumps(entries, indent=2, ensure_ascii=False) + "\n", nl=False)
@@ -2282,6 +2285,14 @@ def audit(
                 continue
             console.print(f"- {key}: {value}")
         console.print()
+
+
+def _filter_audit_entries(entries: list[dict[str, Any]], event: str) -> list[dict[str, Any]]:
+    """Filter audit entries by exact event name."""
+    event_name = event.strip()
+    if not event_name:
+        return entries
+    return [item for item in entries if str(item.get("event") or "") == event_name]
 
 
 # ============================================================================
