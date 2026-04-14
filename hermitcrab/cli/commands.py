@@ -161,13 +161,15 @@ def _build_agent_loop_kwargs(
     config: Config,
     provider: Any,
     *,
+    workspace: Path | None = None,
     cron_service: Any | None = None,
     session_manager: Any | None = None,
 ) -> dict[str, Any]:
     """Build the shared AgentLoop configuration used by CLI entrypoints."""
+    target_workspace = workspace or config.workspace_path
     return {
         "provider": provider,
-        "workspace": config.workspace_path,
+        "workspace": target_workspace,
         "model": config.agents.defaults.model,
         "temperature": config.agents.defaults.temperature,
         "max_tokens": config.agents.defaults.max_tokens,
@@ -800,10 +802,44 @@ def gateway(
         **_build_agent_loop_kwargs(
             config,
             provider,
+            workspace=config.workspace_path,
             cron_service=cron,
             session_manager=session_manager,
         ),
     )
+    workspace_agents: dict[str, AgentLoop] = {"__admin__": agent}
+
+    def _workspace_agent_key(workspace_name: str | None) -> str:
+        return workspace_name or "__admin__"
+
+    def _select_workspace_name(msg) -> str | None:
+        if msg.channel != "nostr":
+            return None
+        metadata = msg.metadata or {}
+        if metadata.get("workspace_target") != "workspace":
+            return None
+        workspace_name = metadata.get("workspace_name")
+        return workspace_name if isinstance(workspace_name, str) and workspace_name else None
+
+    def _get_or_create_agent(workspace_name: str | None) -> AgentLoop:
+        key = _workspace_agent_key(workspace_name)
+        existing = workspace_agents.get(key)
+        if existing is not None:
+            return existing
+
+        workspace_path = config.get_workspace_path(workspace_name)
+        loop = AgentLoop(
+            bus=bus,
+            **_build_agent_loop_kwargs(
+                config,
+                _make_provider(config),
+                workspace=workspace_path,
+                session_manager=SessionManager(workspace_path),
+            ),
+        )
+        workspace_agents[key] = loop
+        logger.info("Created workspace agent for {}", workspace_name)
+        return loop
 
     # Set cron callback (needs agent)
     async def on_cron_job(job: CronJob) -> str | None:
@@ -916,6 +952,17 @@ def gateway(
     console.print(f"[green]✓[/green] Heartbeat: every {hb_cfg.interval_s}s")
     console.print(f"[green]✓[/green] Reminders: every {config.gateway.reminders.interval_s}s")
 
+    async def _route_inbound_messages() -> None:
+        while True:
+            try:
+                msg = await asyncio.wait_for(bus.consume_inbound(), timeout=1.0)
+                agent_for_msg = _get_or_create_agent(_select_workspace_name(msg))
+                response = await agent_for_msg.handle_inbound(msg)
+                if response is not None:
+                    await bus.publish_outbound(response)
+            except asyncio.TimeoutError:
+                continue
+
     async def run():
         try:
             await cron.start()
@@ -923,18 +970,20 @@ def gateway(
             await timeout_monitor.start()
             await reminder_service.start()
             await asyncio.gather(
-                agent.run(),
+                _route_inbound_messages(),
                 channels.start_all(),
             )
         except KeyboardInterrupt:
             console.print("\nShutting down...")
         finally:
-            await agent.close()
+            for loop in workspace_agents.values():
+                await loop.close()
             timeout_monitor.stop()
             heartbeat.stop()
             reminder_service.stop()
             cron.stop()
-            agent.stop()
+            for loop in workspace_agents.values():
+                loop.stop()
             await channels.stop_all()
 
     asyncio.run(run())

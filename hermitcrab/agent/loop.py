@@ -1158,53 +1158,54 @@ class AgentLoop:
             while self._running:
                 try:
                     msg = await asyncio.wait_for(self.bus.consume_inbound(), timeout=1.0)
-                    session_key = msg.session_key
-                    process_task = asyncio.create_task(self._process_message(msg))
-                    self._active_turn_tasks[session_key] = process_task
-                    try:
-                        response = await process_task
-                        if response is not None:
-                            await self.bus.publish_outbound(response)
-                        elif msg.channel == "cli":
-                            await self.bus.publish_outbound(
-                                OutboundMessage(
-                                    channel=msg.channel,
-                                    chat_id=msg.chat_id,
-                                    content="",
-                                    metadata=msg.metadata or {},
-                                )
-                            )
-                    except asyncio.CancelledError:
-                        logger.info("Cancelled active work for session {}", session_key)
-                        self.execution_state.clear(session_key)
+                    response = await self.handle_inbound(msg)
+                    if response is not None:
+                        await self.bus.publish_outbound(response)
+                    elif msg.channel == "cli":
                         await self.bus.publish_outbound(
                             OutboundMessage(
                                 channel=msg.channel,
                                 chat_id=msg.chat_id,
-                                content="Stopped the active work. Ready for the next request.",
+                                content="",
                                 metadata=msg.metadata or {},
                             )
                         )
-                    except Exception as e:
-                        logger.error("Error processing message: {}", e)
-                        self.execution_state.set(msg.session_key, ExecutionPhase.FAILED, str(e))
-                        await self.bus.publish_outbound(
-                            OutboundMessage(
-                                channel=msg.channel,
-                                chat_id=msg.chat_id,
-                                content=f"Sorry, I encountered an error: {str(e)}",
-                            )
-                        )
-                    finally:
-                        current = self._active_turn_tasks.get(session_key)
-                        if current is process_task:
-                            self._active_turn_tasks.pop(session_key, None)
                 except asyncio.TimeoutError:
                     continue
         finally:
             await self._shutdown_background_tasks()
             await self.close_mcp()
             logger.info("Agent loop stopped")
+
+    async def handle_inbound(self, msg: InboundMessage) -> OutboundMessage | None:
+        """Process one inbound bus message without owning the bus-consume loop."""
+        await self._connect_mcp()
+        session_key = msg.session_key
+        process_task = asyncio.create_task(self._process_message(msg))
+        self._active_turn_tasks[session_key] = process_task
+        try:
+            return await process_task
+        except asyncio.CancelledError:
+            logger.info("Cancelled active work for session {}", session_key)
+            self.execution_state.clear(session_key)
+            return OutboundMessage(
+                channel=msg.channel,
+                chat_id=msg.chat_id,
+                content="Stopped the active work. Ready for the next request.",
+                metadata=msg.metadata or {},
+            )
+        except Exception as e:
+            logger.error("Error processing message: {}", e)
+            self.execution_state.set(msg.session_key, ExecutionPhase.FAILED, str(e))
+            return OutboundMessage(
+                channel=msg.channel,
+                chat_id=msg.chat_id,
+                content=f"Sorry, I encountered an error: {str(e)}",
+            )
+        finally:
+            current = self._active_turn_tasks.get(session_key)
+            if current is process_task:
+                self._active_turn_tasks.pop(session_key, None)
 
     async def cancel_active_work(
         self, session_key: str, *, cancel_background: bool = False
