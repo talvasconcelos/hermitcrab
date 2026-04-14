@@ -928,8 +928,19 @@ def gateway(
         interval_s=hb_cfg.interval_s,
         enabled=hb_cfg.enabled,
     )
+
+    async def _process_expired_sessions_all() -> int:
+        """Process session inactivity across every active workspace agent."""
+        expired = 0
+        for loop in list(workspace_agents.values()):
+            try:
+                expired += await loop.process_expired_sessions()
+            except Exception as e:
+                logger.error("Failed processing expired sessions for workspace agent: {}", e)
+        return expired
+
     timeout_monitor = SessionTimeoutService(
-        agent.process_expired_sessions,
+        _process_expired_sessions_all,
         interval_s=min(60, max(5, config.agents.defaults.inactivity_timeout_s // 6)),
         enabled=True,
     )
@@ -976,12 +987,12 @@ def gateway(
         except KeyboardInterrupt:
             console.print("\nShutting down...")
         finally:
-            for loop in workspace_agents.values():
-                await loop.close()
             timeout_monitor.stop()
             heartbeat.stop()
             reminder_service.stop()
             cron.stop()
+            for loop in workspace_agents.values():
+                await loop.close()
             for loop in workspace_agents.values():
                 loop.stop()
             await channels.stop_all()
