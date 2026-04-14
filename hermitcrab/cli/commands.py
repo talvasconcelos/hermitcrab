@@ -56,6 +56,95 @@ class GatewayWorkspaceRouteDecision:
     workspace_name: str | None = None
 
 
+@dataclass
+class GatewayWorkspaceRuntimeState:
+    """Stateful runtime helpers for admin + named workspace agents in gateway mode."""
+
+    config: Config
+    bus: Any
+    create_provider: Callable[[], Any]
+    on_reminder_notify: Callable[[Any, str], Any]
+    reminder_interval_s: int
+    reminder_service_factory: Callable[..., Any]
+    agents: dict[str, Any]
+    reminder_services: dict[str, Any]
+    reminder_services_running: bool = False
+
+    def workspace_agent_key(self, workspace_name: str | None) -> str:
+        return workspace_name or "__admin__"
+
+    async def ensure_reminder_service(self, workspace_key: str, loop: Any) -> None:
+        if loop.reminders is None or workspace_key in self.reminder_services:
+            return
+        service = self.reminder_service_factory(
+            loop.reminders,
+            on_notify=self.on_reminder_notify,
+            interval_s=self.reminder_interval_s,
+            enabled=True,
+        )
+        self.reminder_services[workspace_key] = service
+        if self.reminder_services_running:
+            await service.start()
+
+    async def get_or_create_agent(self, workspace_name: str | None) -> Any:
+        key = self.workspace_agent_key(workspace_name)
+        existing = self.agents.get(key)
+        if existing is not None:
+            return existing
+
+        assert workspace_name is not None
+        ready, reason = _workspace_ready_for_routing(self.config, workspace_name)
+        if not ready:
+            raise ValueError(f"workspace routing blocked: {reason}")
+
+        workspace_path = self.config.get_workspace_path(workspace_name)
+        from hermitcrab.agent.loop import AgentLoop
+        from hermitcrab.session.manager import SessionManager
+
+        loop = AgentLoop(
+            bus=self.bus,
+            **_build_agent_loop_kwargs(
+                self.config,
+                self.create_provider(),
+                workspace=workspace_path,
+                session_manager=SessionManager(workspace_path),
+            ),
+        )
+        self.agents[key] = loop
+        await self.ensure_reminder_service(key, loop)
+        return loop
+
+    async def process_expired_sessions_all(self) -> int:
+        """Process session inactivity across every active workspace agent."""
+        from loguru import logger
+
+        expired = 0
+        for loop in list(self.agents.values()):
+            try:
+                expired += await loop.process_expired_sessions()
+            except Exception as e:
+                logger.error("Failed processing expired sessions for workspace agent: {}", e)
+        return expired
+
+    async def start_reminder_services(self) -> None:
+        self.reminder_services_running = True
+        for service in self.reminder_services.values():
+            await service.start()
+
+    def stop_reminder_services(self) -> None:
+        self.reminder_services_running = False
+        for service in self.reminder_services.values():
+            service.stop()
+
+    async def close_agents(self) -> None:
+        for loop in self.agents.values():
+            await loop.close()
+
+    def stop_agents(self) -> None:
+        for loop in self.agents.values():
+            loop.stop()
+
+
 def _multi_workspace_routing_active(config: Config) -> bool:
     """Enable multi-workspace routing only when registry and bindings are both configured."""
     return bool(config.workspaces.registry) and bool(config.channels.nostr.workspace_bindings)
@@ -925,52 +1014,6 @@ def gateway(
             session_manager=session_manager,
         ),
     )
-    workspace_agents: dict[str, AgentLoop] = {"__admin__": agent}
-
-    def _workspace_agent_key(workspace_name: str | None) -> str:
-        return workspace_name or "__admin__"
-
-    reminder_services: dict[str, ReminderService] = {}
-    reminder_services_running = False
-
-    async def _ensure_reminder_service(workspace_key: str, loop: AgentLoop) -> None:
-        if loop.reminders is None or workspace_key in reminder_services:
-            return
-        service = ReminderService(
-            loop.reminders,
-            on_notify=on_reminder_notify,
-            interval_s=config.gateway.reminders.interval_s,
-            enabled=True,
-        )
-        reminder_services[workspace_key] = service
-        if reminder_services_running:
-            await service.start()
-
-    async def _get_or_create_agent(workspace_name: str | None) -> AgentLoop:
-        key = _workspace_agent_key(workspace_name)
-        existing = workspace_agents.get(key)
-        if existing is not None:
-            return existing
-
-        assert workspace_name is not None
-        ready, reason = _workspace_ready_for_routing(config, workspace_name)
-        if not ready:
-            raise ValueError(f"workspace routing blocked: {reason}")
-
-        workspace_path = config.get_workspace_path(workspace_name)
-        loop = AgentLoop(
-            bus=bus,
-            **_build_agent_loop_kwargs(
-                config,
-                _make_provider(config),
-                workspace=workspace_path,
-                session_manager=SessionManager(workspace_path),
-            ),
-        )
-        workspace_agents[key] = loop
-        await _ensure_reminder_service(key, loop)
-        logger.info("Created workspace agent for {}", workspace_name)
-        return loop
 
     # Set cron callback (needs agent)
     async def on_cron_job(job: CronJob) -> str | None:
@@ -1060,23 +1103,24 @@ def gateway(
         enabled=hb_cfg.enabled,
     )
 
-    async def _process_expired_sessions_all() -> int:
-        """Process session inactivity across every active workspace agent."""
-        expired = 0
-        for loop in list(workspace_agents.values()):
-            try:
-                expired += await loop.process_expired_sessions()
-            except Exception as e:
-                logger.error("Failed processing expired sessions for workspace agent: {}", e)
-        return expired
+    workspace_state = GatewayWorkspaceRuntimeState(
+        config=config,
+        bus=bus,
+        create_provider=lambda: _make_provider(config),
+        on_reminder_notify=on_reminder_notify,
+        reminder_interval_s=config.gateway.reminders.interval_s,
+        reminder_service_factory=ReminderService,
+        agents={"__admin__": agent},
+        reminder_services={},
+    )
 
     timeout_monitor = SessionTimeoutService(
-        _process_expired_sessions_all,
+        workspace_state.process_expired_sessions_all,
         interval_s=min(60, max(5, config.agents.defaults.inactivity_timeout_s // 6)),
         enabled=True,
     )
     if agent.reminders is not None:
-        reminder_services["__admin__"] = ReminderService(
+        workspace_state.reminder_services["__admin__"] = ReminderService(
             agent.reminders,
             on_notify=on_reminder_notify,
             interval_s=config.gateway.reminders.interval_s,
@@ -1102,21 +1146,18 @@ def gateway(
     console.print("[dim]Cron/heartbeat execution stays in admin workspace[/dim]")
 
     async def run():
-        nonlocal reminder_services_running
         try:
             await cron.start()
             await heartbeat.start()
             await timeout_monitor.start()
-            reminder_services_running = True
-            for service in reminder_services.values():
-                await service.start()
+            await workspace_state.start_reminder_services()
             await asyncio.gather(
                 _run_gateway_inbound_router(
                     bus=bus,
                     multi_workspace_active=multi_workspace_active,
                     admin_agent=agent,
-                    get_or_create_agent=_get_or_create_agent,
-                    workspace_agent_key=_workspace_agent_key,
+                    get_or_create_agent=workspace_state.get_or_create_agent,
+                    workspace_agent_key=workspace_state.workspace_agent_key,
                 ),
                 channels.start_all(),
             )
@@ -1125,14 +1166,10 @@ def gateway(
         finally:
             timeout_monitor.stop()
             heartbeat.stop()
-            reminder_services_running = False
-            for service in reminder_services.values():
-                service.stop()
+            workspace_state.stop_reminder_services()
             cron.stop()
-            for loop in workspace_agents.values():
-                await loop.close()
-            for loop in workspace_agents.values():
-                loop.stop()
+            await workspace_state.close_agents()
+            workspace_state.stop_agents()
             await channels.stop_all()
 
     asyncio.run(run())
