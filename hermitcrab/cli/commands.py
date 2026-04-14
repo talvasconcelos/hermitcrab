@@ -812,14 +812,22 @@ def gateway(
     def _workspace_agent_key(workspace_name: str | None) -> str:
         return workspace_name or "__admin__"
 
-    def _select_workspace_name(msg) -> str | None:
+    def _route_workspace_target(msg) -> tuple[str, str | None]:
+        """Resolve gateway routing action: admin, workspace, or denied."""
         if msg.channel != "nostr":
-            return None
+            return "admin", None
+
         metadata = msg.metadata or {}
-        if metadata.get("workspace_target") != "workspace":
-            return None
+        target = metadata.get("workspace_target")
+        if target == "denied":
+            return "denied", None
+        if target != "workspace":
+            return "admin", None
+
         workspace_name = metadata.get("workspace_name")
-        return workspace_name if isinstance(workspace_name, str) and workspace_name else None
+        if isinstance(workspace_name, str) and workspace_name:
+            return "workspace", workspace_name
+        return "denied", None
 
     reminder_services: dict[str, ReminderService] = {}
     reminder_services_running = False
@@ -985,13 +993,22 @@ def gateway(
         while True:
             try:
                 msg = await asyncio.wait_for(bus.consume_inbound(), timeout=1.0)
-                workspace_name = _select_workspace_name(msg)
+                route_target, workspace_name = _route_workspace_target(msg)
                 logger.debug(
-                    "Gateway inbound route: channel={} chat_id={} workspace_agent={}",
+                    "Gateway inbound route: channel={} chat_id={} route_target={} workspace_agent={}",
                     msg.channel,
                     msg.chat_id,
+                    route_target,
                     _workspace_agent_key(workspace_name),
                 )
+                if route_target == "denied":
+                    agent.audit_event(
+                        "gateway.workspace_route_denied",
+                        session_key=msg.session_key,
+                        msg=msg,
+                        workspace_agent="__admin__",
+                    )
+                    continue
                 agent_for_msg = await _get_or_create_agent(workspace_name)
                 agent_for_msg.audit_event(
                     "gateway.workspace_route",
