@@ -277,6 +277,24 @@ async def _run_gateway_inbound_router(
             continue
 
 
+async def _shutdown_gateway_runtime(
+    *,
+    timeout_monitor: Any,
+    heartbeat: Any,
+    workspace_state: GatewayWorkspaceRuntimeState,
+    cron: Any,
+    channels: Any,
+) -> None:
+    """Shutdown gateway runtime components in a stable order."""
+    timeout_monitor.stop()
+    heartbeat.stop()
+    workspace_state.stop_reminder_services()
+    cron.stop()
+    await workspace_state.close_agents()
+    workspace_state.stop_agents()
+    await channels.stop_all()
+
+
 def _build_job_models_from_config(config: Config) -> dict | None:
     """
     Build job_models dict from config for AgentLoop initialization.
@@ -1182,13 +1200,13 @@ def gateway(
         except KeyboardInterrupt:
             console.print("\nShutting down...")
         finally:
-            timeout_monitor.stop()
-            heartbeat.stop()
-            workspace_state.stop_reminder_services()
-            cron.stop()
-            await workspace_state.close_agents()
-            workspace_state.stop_agents()
-            await channels.stop_all()
+            await _shutdown_gateway_runtime(
+                timeout_monitor=timeout_monitor,
+                heartbeat=heartbeat,
+                workspace_state=workspace_state,
+                cron=cron,
+                channels=channels,
+            )
 
     asyncio.run(run())
 
