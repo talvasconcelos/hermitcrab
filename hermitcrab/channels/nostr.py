@@ -111,6 +111,24 @@ class NostrChannel(BaseChannel):
             "workspace_reason": resolution.reason,
         }
 
+    def _session_key_for_sender(self, sender_pubkey: str, metadata: dict[str, Any] | None = None) -> str:
+        """Build session key, namespacing named-workspace senders only."""
+        workspace_name = (metadata or {}).get("workspace_name")
+        workspace_target = (metadata or {}).get("workspace_target")
+        if workspace_target == "workspace" and isinstance(workspace_name, str) and workspace_name:
+            return f"nostr:{workspace_name}:{sender_pubkey}"
+        return f"nostr:{sender_pubkey}"
+
+    def _sender_pubkey_from_session_key(self, session_key: str) -> str | None:
+        """Extract sender pubkey from legacy or namespaced Nostr session key."""
+        if not session_key.startswith("nostr:"):
+            return None
+        remainder = session_key.removeprefix("nostr:")
+        if ":" not in remainder:
+            return remainder
+        _, sender_pubkey = remainder.rsplit(":", 1)
+        return sender_pubkey
+
     def _load_private_key(self, key: str | None) -> Any:
         if not key:
             logger.warning("Nostr private key not provided, generating new keypair")
@@ -583,7 +601,7 @@ class NostrChannel(BaseChannel):
 
             logger.info("Received DM from {}...: {}...", sender_pubkey[:8], content[:50] if content else "(empty)")
 
-            session_key = f"nostr:{sender_pubkey}"
+            session_key = self._session_key_for_sender(sender_pubkey, metadata)
             await self._handle_inbound_message(
                 session_key=session_key,
                 content=content or "",
@@ -782,10 +800,10 @@ class NostrChannel(BaseChannel):
             logger.error("Failed to send Nostr DM: {}", e)
 
     async def _handle_inbound_message(self, session_key: str, content: str, metadata: dict[str, Any] | None = None) -> None:
-        if not session_key.startswith("nostr:"):
+        sender_pubkey = self._sender_pubkey_from_session_key(session_key)
+        if sender_pubkey is None:
             logger.warning("Invalid session_key format: {}", session_key)
             return
-        sender_pubkey = session_key.replace("nostr:", "", 1)
         await self._handle_message(
             sender_id=sender_pubkey,
             chat_id=sender_pubkey,
