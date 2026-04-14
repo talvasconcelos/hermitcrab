@@ -1005,6 +1005,7 @@ def gateway(
         console.print("[yellow]Warning: No channels enabled[/yellow]")
     if multi_workspace_active:
         console.print("[green]✓[/green] Multi-workspace routing: active (Nostr bindings)")
+        console.print("[dim]Unresolved/invalid workspace routes are denied (no admin fallback)[/dim]")
     else:
         console.print("[dim]Multi-workspace routing: inactive[/dim]")
 
@@ -2243,6 +2244,15 @@ def status(
         )
     if report.nostr_workspace_bindings:
         console.print(f"Nostr workspace bindings: {report.nostr_workspace_bindings}")
+    console.print(
+        "Workspace routing: "
+        + (
+            "[green]active[/green] (Nostr bound senders can route to named workspaces)"
+            if report.multi_workspace_routing_active
+            else "[dim]inactive[/dim] (admin workspace only)"
+        )
+    )
+    console.print("[dim]Cron/heartbeat remain admin-owned; unresolved workspace routes are denied[/dim]")
 
     console.print(f"Selected model: {report.selected_model}")
     if report.resolved_model and report.resolved_model != report.selected_model:

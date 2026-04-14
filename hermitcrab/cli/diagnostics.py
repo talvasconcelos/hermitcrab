@@ -54,6 +54,7 @@ class StatusReport:
     selected_model: str
     resolved_model: str
     selected_provider: str | None
+    multi_workspace_routing_active: bool = False
     named_workspaces: int = 0
     bootstrapped_named_workspaces: int = 0
     nostr_workspace_bindings: int = 0
@@ -100,6 +101,9 @@ def build_status_report(config_path: Path | None = None) -> StatusReport:
     nostr_workspace_bindings = sum(
         len(pubkeys) for pubkeys in config.channels.nostr.workspace_bindings.values()
     )
+    multi_workspace_routing_active = bool(config.workspaces.registry) and bool(
+        config.channels.nostr.workspace_bindings
+    )
     mcp_servers_valid = sum(
         1 for server in config.tools.mcp_servers.values() if _is_valid_mcp(server)
     )
@@ -133,6 +137,7 @@ def build_status_report(config_path: Path | None = None) -> StatusReport:
         selected_model=selected_model,
         resolved_model=resolved_model,
         selected_provider=selected_provider,
+        multi_workspace_routing_active=multi_workspace_routing_active,
         named_workspaces=len(configured_workspaces),
         bootstrapped_named_workspaces=sum(
             1 for path in configured_workspaces.values() if (path / "AGENTS.md").exists()
