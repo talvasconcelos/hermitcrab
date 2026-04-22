@@ -62,10 +62,12 @@ class NostrChannel(BaseChannel):
         config: NostrConfig,
         bus: MessageBus,
         workspace_resolver: Callable[[str], NostrWorkspaceResolution] | None = None,
+        audit_event: Callable[..., None] | None = None,
     ) -> None:
         super().__init__(config, bus)
         self.config: NostrConfig = config
         self._workspace_resolver = workspace_resolver
+        self._audit_event = audit_event
 
         try:
             from pynostr.encrypted_dm import EncryptedDirectMessage
@@ -93,11 +95,22 @@ class NostrChannel(BaseChannel):
         self._running = False
         self._receive_task: asyncio.Task | None = None
         self._seen_event_ids: set[str] = set()
+        self._live_event_relays: set[str] = set()
         self._listen_start: int = 0
         self._nip17_relay_cache: dict[str, tuple[float, list[str]]] = {}
         self._active_relays: list[str] = self._normalize_relay_urls(config.relays) or default_nostr_relays()
 
         logger.info("Nostr channel initialized (pubkey: {}...)", self._hex_pub[:8])
+
+    def _emit_audit_event(self, event: str, **data: Any) -> None:
+        """Best-effort audit hook for channel-level operator diagnostics."""
+        audit_event = getattr(self, "_audit_event", None)
+        if audit_event is None:
+            return
+        try:
+            audit_event(event, channel=self.name, **data)
+        except Exception as exc:
+            logger.warning("Failed to append Nostr audit event {}: {}", event, exc)
 
     def _workspace_metadata(self, sender_pubkey: str) -> dict[str, Any]:
         """Return resolved workspace metadata for one inbound sender."""
@@ -433,14 +446,36 @@ class NostrChannel(BaseChannel):
     async def _relay_targets_for_nip17_recipient(self, recipient_pubkey: str) -> list[str]:
         discovered = await self._discover_recipient_relays(recipient_pubkey)
         if discovered:
+            self._emit_audit_event(
+                "nostr.nip17_relay_targets",
+                recipient_pubkey=recipient_pubkey,
+                resolution="discovered_kind10050",
+                relay_count=len(discovered),
+                relay_urls=discovered,
+            )
             return discovered
         if self._nip17_fallback_to_configured_relays():
+            configured = self._configured_relays()
             logger.warning(
                 "No kind 10050 inbox relays found for {}..., falling back to configured relays",
                 recipient_pubkey[:8],
             )
-            return self._configured_relays()
+            self._emit_audit_event(
+                "nostr.nip17_relay_targets",
+                recipient_pubkey=recipient_pubkey,
+                resolution="fallback_configured",
+                relay_count=len(configured),
+                relay_urls=configured,
+            )
+            return configured
         logger.warning("No kind 10050 inbox relays found for {}..., skipping publish", recipient_pubkey[:8])
+        self._emit_audit_event(
+            "nostr.nip17_relay_targets",
+            recipient_pubkey=recipient_pubkey,
+            resolution="none",
+            relay_count=0,
+            relay_urls=[],
+        )
         return []
 
     def _next_reconnect_delay(self, relay_url: str) -> int:
@@ -454,6 +489,7 @@ class NostrChannel(BaseChannel):
             await self._subscribe_to_relay(relay_url, ws)
 
     async def _subscribe_to_relay(self, relay_url: str, ws: ClientConnection) -> None:
+        self._live_event_relays.discard(relay_url)
         subscribed_kind = 4 if self._protocol() == "nip04" else NIP17_GIFT_WRAP_KIND
         since = (
             self._listen_start
@@ -539,13 +575,45 @@ class NostrChannel(BaseChannel):
             subscription_id = data[1]
             if subscription_id != self._subscription_id:
                 return
+            if relay_url not in self._live_event_relays:
+                return
             event = data[2] if len(data) > 2 else None
             if event:
                 await self._handle_event(relay_url, event)
+        elif msg_type == "EOSE":
+            subscription_id = data[1]
+            if subscription_id != self._subscription_id:
+                return
+            if relay_url not in self._live_event_relays:
+                self._live_event_relays.add(relay_url)
+                logger.info("Nostr relay caught up, live events enabled: {}", relay_url)
         elif msg_type == "NOTICE":
-            pass  # Skip relay notices (too verbose)
+            message = str(data[1]) if len(data) > 1 else ""
+            logger.warning("Nostr relay NOTICE from {}: {}", relay_url, message)
+            self._emit_audit_event(
+                "nostr.relay_notice",
+                relay_url=relay_url,
+                message=message,
+            )
         elif msg_type == "OK":
-            pass  # Skip OK confirmations (too verbose)
+            event_id = str(data[1]) if len(data) > 1 else ""
+            accepted = bool(data[2]) if len(data) > 2 else False
+            message = str(data[3]) if len(data) > 3 else ""
+            log = logger.info if accepted else logger.warning
+            log(
+                "Nostr relay publish {} from {} for {}...: {}",
+                "accepted" if accepted else "rejected",
+                relay_url,
+                event_id[:8],
+                message or "(no message)",
+            )
+            self._emit_audit_event(
+                "nostr.publish_confirmation",
+                relay_url=relay_url,
+                event_id=event_id,
+                accepted=accepted,
+                message=message,
+            )
 
     async def _handle_event(self, relay_url: str, event: dict[str, Any]) -> None:
         try:
@@ -701,6 +769,7 @@ class NostrChannel(BaseChannel):
     async def start(self) -> None:
         self._running = True
         self._listen_start = int(time.time())
+        self._live_event_relays.clear()
 
         if self._protocol() == "nip17":
             await self._reconcile_own_kind10050()
@@ -720,6 +789,7 @@ class NostrChannel(BaseChannel):
 
     async def stop(self) -> None:
         self._running = False
+        self._live_event_relays.clear()
         if self._receive_task:
             self._receive_task.cancel()
             try:
@@ -750,6 +820,8 @@ class NostrChannel(BaseChannel):
             recipient_pubkey = self._normalize_pubkey_to_hex(recipient_pubkey)
             chunks = _split_message(content)
             for index, chunk in enumerate(chunks, start=1):
+                publish_attempts = 0
+                relay_attempts = 0
                 if self._protocol() == "nip17":
                     events = build_nip17_message(
                         sender_private_key_hex=self._hex_priv,
@@ -776,10 +848,15 @@ class NostrChannel(BaseChannel):
                         relay_targets = await self._relay_targets_for_nip17_recipient(event_recipient)
                         if not relay_targets:
                             continue
+                        publish_attempts += 1
+                        relay_attempts += len(relay_targets)
                         await self._publish_event_to_relays(event, relay_targets)
                     else:
                         publish_msg = event.to_message()
-                        for relay_url, ws in await self._connection_snapshot():
+                        connections = await self._connection_snapshot()
+                        publish_attempts += 1
+                        relay_attempts += len(connections)
+                        for relay_url, ws in connections:
                             try:
                                 await ws.send(publish_msg)
                             except Exception as e:
@@ -787,12 +864,13 @@ class NostrChannel(BaseChannel):
                                 await self._remove_connection_if_same(relay_url, ws)
 
                 logger.info(
-                    "Sent DM chunk {}/{} to {}... (protocol={}, events={}, chars={})",
+                    "Published DM chunk attempt {}/{} to {}... (protocol={}, events_attempted={}, relay_targets={}, chars={})",
                     index,
                     len(chunks),
                     recipient_pubkey[:8],
                     self._protocol(),
-                    len(events),
+                    publish_attempts,
+                    relay_attempts,
                     len(chunk),
                 )
                 await asyncio.sleep(1)

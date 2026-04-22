@@ -808,6 +808,18 @@ def _create_workspace_templates(
 
     (workspace / "skills").mkdir(exist_ok=True)
 
+    onboarding_flag = workspace / ".onboarding_mode"
+    if not onboarding_flag.exists():
+        _atomic_write_text(
+            onboarding_flag,
+            (
+                "Onboarding mode is enabled for this workspace.\n"
+                "Delete this file to disable onboarding prompt injection.\n"
+            ),
+        )
+        if announce is not None:
+            announce("  [dim]Enabled onboarding mode (.onboarding_mode)[/dim]")
+
 
 def _build_onboard_next_steps() -> list[str]:
     """Build concise first-run guidance based on the local environment."""
@@ -1084,7 +1096,7 @@ def gateway(
     cron.on_job = on_cron_job
 
     # Create channel manager
-    channels = ChannelManager(config, bus)
+    channels = ChannelManager(config, bus, audit_event=agent.audit_event)
 
     def _pick_heartbeat_target() -> tuple[str, str]:
         """Pick a routable channel/chat target for heartbeat-triggered messages."""
@@ -1132,6 +1144,9 @@ def gateway(
     async def on_reminder_notify(item, content: str) -> None:
         """Deliver a due reminder to its persisted channel target."""
         from hermitcrab.bus.events import OutboundMessage
+
+        if item.channel == "cli":
+            return
 
         await bus.publish_outbound(
             OutboundMessage(channel=item.channel, chat_id=item.chat_id, content=content)
@@ -2403,6 +2418,8 @@ def status(
             if report.audit.last_event:
                 stamp = f" at {report.audit.last_timestamp}" if report.audit.last_timestamp else ""
                 console.print(f"- Latest: {report.audit.last_event}{stamp}")
+        for highlight in report.audit_highlights:
+            console.print(f"- {highlight}")
 
     if report.next_steps:
         console.print("\n[bold]Try This Next[/bold]")

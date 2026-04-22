@@ -31,11 +31,22 @@ _HEX_PUBKEY_RE = re.compile(r"^[0-9a-fA-F]{64}$")
 
 
 def normalize_nostr_pubkey(value: str) -> str:
-    """Normalize configured Nostr sender pubkey into lowercase hex."""
-    pubkey = value.strip()
-    if _HEX_PUBKEY_RE.fullmatch(pubkey):
-        return pubkey.lower()
-    raise ValueError("pubkey must be 64-char hex")
+    """Normalize configured Nostr key to lowercase pubkey hex."""
+    key = value.strip()
+    if _HEX_PUBKEY_RE.fullmatch(key):
+        return key.lower()
+
+    try:
+        from pynostr.key import PrivateKey, PublicKey
+
+        if key.startswith("npub"):
+            return PublicKey.from_npub(key).hex().lower()
+        if key.startswith("nsec"):
+            return PrivateKey.from_nsec(key).public_key.hex().lower()
+    except Exception as exc:
+        raise ValueError("pubkey must be npub/nsec or 64-char hex") from exc
+
+    raise ValueError("pubkey must be npub/nsec or 64-char hex")
 
 
 class TelegramConfig(Base):

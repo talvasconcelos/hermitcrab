@@ -69,14 +69,17 @@ def _parse_event(payload: str, *, require_signature: bool) -> Event:
     if not isinstance(tags, list):
         raise NIP17Error("event tags must be a list")
 
-    event = Event(
-        content=content,
-        pubkey=pubkey,
-        created_at=created_at,
-        kind=kind,
-        tags=tags,
-        sig=sig if isinstance(sig, str) else None,
-    )
+    try:
+        event = Event(
+            content=content,
+            pubkey=pubkey,
+            created_at=created_at,
+            kind=kind,
+            tags=tags,
+            sig=sig if isinstance(sig, str) else None,
+        )
+    except Exception as exc:
+        raise NIP17Error("invalid event fields") from exc
 
     expected_id = data.get("id")
     if isinstance(expected_id, str) and event.id != expected_id:

@@ -61,6 +61,7 @@ class StatusReport:
     provider_statuses: list[ProviderStatus] = field(default_factory=list)
     skill_statuses: list[SkillStatus] = field(default_factory=list)
     audit: AuditSummary | None = None
+    audit_highlights: list[str] = field(default_factory=list)
     mcp_servers_configured: int = 0
     mcp_servers_valid: int = 0
     overall_state: str = "error"
@@ -107,7 +108,9 @@ def build_status_report(config_path: Path | None = None) -> StatusReport:
     mcp_servers_valid = sum(
         1 for server in config.tools.mcp_servers.values() if _is_valid_mcp(server)
     )
-    audit = AuditTrail(workspace).summarize()
+    audit_trail = AuditTrail(workspace)
+    audit = audit_trail.summarize()
+    audit_highlights = _build_audit_highlights(audit_trail.read_recent(limit=40))
 
     next_steps = _build_next_steps(
         config_exists=path.exists(),
@@ -146,6 +149,7 @@ def build_status_report(config_path: Path | None = None) -> StatusReport:
         provider_statuses=provider_statuses,
         skill_statuses=skill_statuses,
         audit=audit,
+        audit_highlights=audit_highlights,
         mcp_servers_configured=len(config.tools.mcp_servers),
         mcp_servers_valid=mcp_servers_valid,
         overall_state=overall_state,
@@ -273,6 +277,62 @@ def build_doctor_report(config_path: Path | None = None) -> DoctorReport:
         )
 
     return DoctorReport(status=status, findings=findings)
+
+
+def _build_audit_highlights(entries: list[dict[str, Any]]) -> list[str]:
+    """Summarize recent audit events into operator-facing highlights."""
+    highlights: list[str] = []
+    seen: set[str] = set()
+
+    for payload in reversed(entries):
+        event = payload.get("event")
+        message: str | None = None
+
+        if event == "nostr.nip17_relay_targets":
+            recipient = str(payload.get("recipient_pubkey") or "")[:8]
+            resolution = str(payload.get("resolution") or "")
+            relay_count = int(payload.get("relay_count") or 0)
+            if resolution == "fallback_configured":
+                message = (
+                    f"Nostr DM relay resolution used fallback to configured relays for {recipient} "
+                    f"({relay_count} relay(s)); no kind 10050 inbox relays were found."
+                )
+            elif resolution == "none":
+                message = (
+                    f"Nostr DM publish was skipped for {recipient}; no kind 10050 inbox relays "
+                    "were found and fallback relays were disabled."
+                )
+        elif event == "nostr.publish_confirmation" and payload.get("accepted") is False:
+            relay_url = str(payload.get("relay_url") or "relay")
+            event_id = str(payload.get("event_id") or "")[:8]
+            detail = str(payload.get("message") or "").strip()
+            suffix = f": {detail}" if detail else ""
+            message = f"Nostr relay rejected publish for {event_id} on {relay_url}{suffix}"
+        elif event == "nostr.relay_notice":
+            relay_url = str(payload.get("relay_url") or "relay")
+            detail = str(payload.get("message") or "").strip()
+            if detail:
+                message = f"Nostr relay notice from {relay_url}: {detail}"
+        elif event == "gateway.workspace_route_denied":
+            sender = str(payload.get("sender_pubkey") or payload.get("chat_id") or "")[:8]
+            reason = str(payload.get("reason") or "route denied")
+            message = f"Workspace routing denied for {sender}: {reason}"
+        elif event == "tool.policy_denied":
+            tool_name = str(payload.get("tool_name") or "tool")
+            permission = str(payload.get("permission_level") or "unknown")
+            message = f"Runtime policy denied `{tool_name}` ({permission})."
+        elif event == "tool.policy_redirected":
+            tool_name = str(payload.get("tool_name") or "tool")
+            redirect_name = str(payload.get("redirect_tool_name") or "fallback")
+            message = f"Runtime policy redirected `{tool_name}` to safe fallback `{redirect_name}`."
+
+        if message and message not in seen:
+            seen.add(message)
+            highlights.append(message)
+        if len(highlights) >= 5:
+            break
+
+    return highlights
 
 
 def render_json_report(report: StatusReport | DoctorReport) -> str:

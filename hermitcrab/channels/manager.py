@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Callable
 from typing import Any
 
 from loguru import logger
@@ -22,9 +23,15 @@ class ChannelManager:
     - Route outbound messages
     """
 
-    def __init__(self, config: Config, bus: MessageBus):
+    def __init__(
+        self,
+        config: Config,
+        bus: MessageBus,
+        audit_event: Callable[..., None] | None = None,
+    ):
         self.config = config
         self.bus = bus
+        self._audit_event = audit_event
         self.channels: dict[str, BaseChannel] = {}
         self._dispatch_task: asyncio.Task | None = None
 
@@ -69,6 +76,7 @@ class ChannelManager:
                     self.config.channels.nostr,
                     self.bus,
                     workspace_resolver=self.config.resolve_nostr_sender_workspace,
+                    audit_event=self._audit_event,
                 )
                 logger.info("Nostr channel enabled (pubkey: {}...)", self.channels["nostr"].our_pubkey_hex[:8])  # type: ignore
             except ImportError as e:
@@ -90,14 +98,15 @@ class ChannelManager:
             logger.warning("No channels enabled")
             return
 
-        # Start outbound dispatcher
-        self._dispatch_task = asyncio.create_task(self._dispatch_outbound())
-
         # Start channels
         tasks = []
         for name, channel in self.channels.items():
             logger.info("Starting {} channel...", name)
             tasks.append(asyncio.create_task(self._start_channel(name, channel)))
+
+        # Let channel tasks initialize before outbound dispatch begins.
+        await asyncio.sleep(0)
+        self._dispatch_task = asyncio.create_task(self._dispatch_outbound())
 
         # Wait for all to complete (they should run forever)
         await asyncio.gather(*tasks, return_exceptions=True)
@@ -141,6 +150,19 @@ class ChannelManager:
 
                 channel = self.channels.get(msg.channel)
                 if channel:
+                    if not channel.is_running:
+                        retries = int(msg.metadata.get("_dispatch_retries", 0))
+                        if retries < 5:
+                            msg.metadata["_dispatch_retries"] = retries + 1
+                            await asyncio.sleep(0.2)
+                            await self.bus.publish_outbound(msg)
+                        else:
+                            logger.warning(
+                                "Channel {} not running; dropping outbound after {} retries",
+                                msg.channel,
+                                retries,
+                            )
+                        continue
                     try:
                         await channel.send(msg)
                     except Exception as e:
