@@ -58,12 +58,15 @@ from hermitcrab.agent.message_preparation import (
     is_subagent_completion_prompt,
     parse_subagent_completion_prompt,
 )
+from hermitcrab.agent.onboarding import OnboardingProfileService
 from hermitcrab.agent.pending_work import (
     PendingWork,
     build_pending_work_hint,
     build_skill_creation_hint,
+    extract_planned_command,
     find_action_source,
     has_structured_payload,
+    looks_like_confirmation,
     relates_to_pending_work,
     should_resume_pending_work,
     snippet,
@@ -306,6 +309,12 @@ class AgentLoop:
             max_file_lines=int(reflection_promotion.get("max_file_lines", 500) or 500),
             notify_user=bool(reflection_promotion.get("notify_user", True)),
         )
+        onboarding_model = self._get_model_for_job(JobClass.INTERACTIVE_RESPONSE) or self.model
+        self._onboarding_service = OnboardingProfileService(
+            workspace=workspace,
+            chat_callable=self._chat_with_retry,
+            model=onboarding_model,
+        )
 
         self._running = False
         self._mcp_servers = mcp_servers or {}
@@ -450,6 +459,24 @@ class AgentLoop:
         if person_tool := self.tools.get("person_profile"):
             if isinstance(person_tool, PersonProfileTool):
                 person_tool.set_context(channel, chat_id)
+        if exec_tool := self.tools.get("exec"):
+            if isinstance(exec_tool, ExecTool):
+                exec_tool.clear_destructive_approval()
+
+    def _apply_destructive_approval_from_pending(
+        self,
+        pending: PendingWork | None,
+        current_message: str,
+    ) -> None:
+        """Arm one exact destructive exec command after an explicit user confirmation."""
+        if pending is None or not looks_like_confirmation(current_message):
+            return
+        command = pending.planned_command or extract_planned_command(pending.last_failure)
+        if not command:
+            return
+        exec_tool = self.tools.get("exec")
+        if isinstance(exec_tool, ExecTool):
+            exec_tool.allow_destructive_command(command)
 
     def _resolve_reminder_delivery_target(self, channel: str, chat_id: str) -> tuple[str, str]:
         """Prefer the latest active external session when reminders are created from CLI."""
@@ -1553,6 +1580,7 @@ class AgentLoop:
             logger.info("Response to {}:{}: {}", msg.channel, msg.sender_id, preview)
 
             self._save_turn(session, turn_result.messages, build_result.save_skip)
+            await self._maybe_sync_onboarding_profiles(session)
             self.skill_runtime.update_after_turn(
                 session.metadata,
                 result_messages=turn_result.messages,
@@ -1574,6 +1602,13 @@ class AgentLoop:
                     **self._active_model_reply_metadata(session),
                 },
             )
+
+    async def _maybe_sync_onboarding_profiles(self, session: Session) -> None:
+        """Persist onboarding profile insights into bootstrap files when enabled."""
+        try:
+            await self._onboarding_service.maybe_sync_from_messages(list(session.messages))
+        except Exception as exc:
+            logger.debug("Onboarding profile sync skipped due to error: {}", exc)
 
     @staticmethod
     def _reply(
@@ -1794,6 +1829,7 @@ class AgentLoop:
             user_index += 1
         if pending and should_resume_pending_work(pending, msg.content):
             resumed_pending_work = pending
+            self._apply_destructive_approval_from_pending(pending, msg.content)
             if user_index is not None:
                 messages.insert(
                     user_index,
@@ -1865,6 +1901,7 @@ class AgentLoop:
                 latest_request=msg.content,
                 source_excerpt=source_excerpt,
                 last_failure="Delegated work is still running.",
+                planned_command=None,
                 tools_used=result.tools_used,
                 created_at=created_at,
                 updated_at=session.updated_at.isoformat(),
@@ -1893,6 +1930,7 @@ class AgentLoop:
                 latest_request=msg.content,
                 source_excerpt=source_excerpt,
                 last_failure=snippet(result.final_content, max_chars=280),
+                planned_command=result.planned_command,
                 tools_used=result.tools_used,
                 created_at=created_at,
                 updated_at=session.updated_at.isoformat(),

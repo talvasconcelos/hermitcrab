@@ -70,6 +70,17 @@ def looks_like_confirmation(text: str | None) -> bool:
     }
 
 
+def extract_planned_command(text: str | None) -> str | None:
+    """Extract an exact planned command from an approval prompt."""
+    if not isinstance(text, str):
+        return None
+    match = re.search(r"Planned command:\s*`([^`]+)`", text, flags=re.IGNORECASE | re.DOTALL)
+    if not match:
+        return None
+    command = normalize_text(match.group(1))
+    return command or None
+
+
 def _keywords(text: str | None) -> set[str]:
     return {token for token in re.findall(r"\w+", (text or "").lower()) if len(token) >= 4}
 
@@ -82,6 +93,7 @@ class PendingWork:
     latest_request: str
     source_excerpt: str
     last_failure: str
+    planned_command: str | None
     tools_used: list[str]
     created_at: str
     updated_at: str
@@ -97,6 +109,11 @@ class PendingWork:
                 latest_request=str(payload.get("latest_request") or ""),
                 source_excerpt=str(payload.get("source_excerpt") or ""),
                 last_failure=str(payload.get("last_failure") or ""),
+                planned_command=(
+                    str(payload.get("planned_command"))
+                    if payload.get("planned_command") is not None
+                    else None
+                ),
                 tools_used=[str(name) for name in payload.get("tools_used") or []],
                 created_at=str(payload.get("created_at") or _utcnow_iso()),
                 updated_at=str(payload.get("updated_at") or _utcnow_iso()),
@@ -134,6 +151,11 @@ def build_pending_work_hint(pending: PendingWork, current_request: str) -> str:
         lines.append(f"Source content: {snippet(pending.source_excerpt, max_chars=320)}")
     if pending.last_failure:
         lines.append(f"Last failure: {snippet(pending.last_failure, max_chars=240)}")
+    if pending.planned_command and looks_like_confirmation(current_request):
+        lines.append(
+            "If you retry the previously approved destructive command, use this exact command: "
+            f"`{pending.planned_command}`"
+        )
     lines.append(f"Current user message: {snippet(current_request, max_chars=180)}")
     lines.append(
         "If the user is continuing that task, resume and complete it now. If the user clearly changed topics, follow the new request instead."

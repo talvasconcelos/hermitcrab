@@ -278,9 +278,41 @@ class ToolRegistry:
         if redirect_result is not None:
             redirect_name, redirect_output = redirect_result
             lines.append(f"Safe fallback used: `{redirect_name}`.")
+            lines.append(
+                self._format_policy_redirect_guidance(
+                    denied_name=name,
+                    redirect_name=redirect_name,
+                )
+            )
             lines.append(redirect_output)
+        else:
+            lines.append(
+                self._format_permission_guidance(
+                    permission_level=metadata.permission_level.value,
+                )
+            )
 
         return "\n".join(lines)
+
+    @staticmethod
+    def _format_policy_redirect_guidance(*, denied_name: str, redirect_name: str) -> str:
+        if redirect_name == "read_file" and denied_name in {"write_file", "edit_file"}:
+            return "Next safe step: inspect the current file content above, then ask a higher-permission agent to apply the edit."
+        if redirect_name == "list_show" and denied_name.startswith("list_"):
+            return "Next safe step: inspect the current list state above, then ask a higher-permission agent to make the change."
+        return "Next safe step: use the safe fallback output above to decide the next allowed action."
+
+    @staticmethod
+    def _format_permission_guidance(*, permission_level: str) -> str:
+        if permission_level == "workspace_write":
+            return "Next safe step: gather the needed read-only context first, then hand the write back to a higher-permission agent."
+        if permission_level == "dangerous_exec":
+            return "Next safe step: ask for explicit approval before retrying the destructive action."
+        if permission_level == "network":
+            return "Next safe step: continue with local/read-only work or switch to a profile that allows network access."
+        if permission_level == "coordinator":
+            return "Next safe step: continue within the current profile or hand coordination back to the main agent."
+        return "Next safe step: use one of the allowed tools above or hand the blocked action back to a higher-permission agent."
 
     def _build_policy_hint(
         self,

@@ -51,6 +51,7 @@ class TurnResult:
     tools_used: list[str]
     messages: list[dict[str, Any]]
     outcome: TurnOutcome
+    planned_command: str | None = None
 
 
 class TurnRunner:
@@ -699,6 +700,7 @@ class TurnRunner:
         intermediate_ack_reprompt_count = 0
         memory_authority_reprompt_count = 0
         post_tool_repair_attempted = False
+        planned_command: str | None = None
         current_request = next(
             (
                 msg.get("content")
@@ -711,7 +713,7 @@ class TurnRunner:
 
         model = self.get_model_for_job(job_class)
         if model is None:
-            return TurnResult(None, [], [], TurnOutcome.EMPTY_REPLY)
+            return TurnResult(None, [], [], TurnOutcome.EMPTY_REPLY, None)
 
         job_name = getattr(job_class, "value", str(job_class or "unknown"))
 
@@ -914,6 +916,12 @@ class TurnRunner:
                     tool_results.append((tool_call.name, result))
                     executed_count += 1
                     if self._needs_destructive_approval(result):
+                        if (
+                            tool_call.name == "exec"
+                            and isinstance(tool_call.arguments, dict)
+                            and isinstance(tool_call.arguments.get("command"), str)
+                        ):
+                            planned_command = tool_call.arguments["command"].strip() or None
                         if self.audit_event is not None:
                             self.audit_event(
                                 "tool.approval_required",
@@ -1133,4 +1141,4 @@ class TurnRunner:
             len(final_content or ""),
         )
         messages = self._append_final_assistant_message(messages, final_content)
-        return TurnResult(final_content, tools_used, messages, outcome)
+        return TurnResult(final_content, tools_used, messages, outcome, planned_command)

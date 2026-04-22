@@ -26,6 +26,8 @@ class ContextBuilder:
     """
 
     BOOTSTRAP_FILES = ["AGENTS.md", "SOUL.md", "USER.md", "TOOLS.md", "IDENTITY.md"]
+    ONBOARDING_FLAG_FILE = ".onboarding_mode"
+    ONBOARDING_PROMPT_FILE = "ONBOARDING_MODE.md"
 
     def __init__(
         self,
@@ -86,6 +88,9 @@ class ContextBuilder:
         bootstrap = self._load_bootstrap_files()
         if bootstrap:
             fixed_parts.append(bootstrap)
+        onboarding_prompt = self._load_onboarding_prompt()
+        if onboarding_prompt:
+            fixed_parts.append(f"# Onboarding Mode\n\n{onboarding_prompt}")
 
         channel_prompt = self._load_channel_prompt(channel, chat_id)
         if channel_prompt:
@@ -327,6 +332,18 @@ Use subagents for complex, time-consuming, or specialized tasks. For substantial
                 parts.append(f"## {filename}\n\n{content}")
 
         return "\n\n".join(parts) if parts else ""
+
+    def _load_onboarding_prompt(self) -> str:
+        """Load onboarding instructions when workspace onboarding flag is enabled."""
+        flag_path = self.workspace / self.ONBOARDING_FLAG_FILE
+        if not flag_path.exists():
+            return ""
+
+        prompt_path = self.workspace / self.ONBOARDING_PROMPT_FILE
+        if not prompt_path.exists():
+            return ""
+
+        return prompt_path.read_text(encoding="utf-8").strip()
 
     def build_messages(
         self,

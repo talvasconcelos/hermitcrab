@@ -360,7 +360,11 @@ class SessionManager:
                 continue
 
             if age <= recent_max_age:
-                return history
+                if self._query_signals_resume(normalized_query):
+                    return history
+                if normalized_query and self._history_matches_query(history, normalized_query):
+                    return history
+                continue
 
             if self._query_signals_resume(normalized_query):
                 return history

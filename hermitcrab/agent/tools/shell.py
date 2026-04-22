@@ -33,6 +33,7 @@ class ExecTool(Tool):
         ]
         self.allow_patterns = allow_patterns or []
         self.restrict_to_workspace = restrict_to_workspace
+        self._approved_destructive_command: str | None = None
 
     @property
     def name(self) -> str:
@@ -61,9 +62,16 @@ class ExecTool(Tool):
 
     async def execute(self, command: str, working_dir: str | None = None, **kwargs: Any) -> str:
         cwd = working_dir or self.working_dir or os.getcwd()
-        guard_error = self._guard_command(command, cwd)
+        destructive_approved = self._is_approved_destructive_command(command)
+        guard_error = self._guard_command(
+            command,
+            cwd,
+            destructive_approved=destructive_approved,
+        )
         if guard_error:
             return guard_error
+        if destructive_approved:
+            self.clear_destructive_approval()
 
         try:
             process = await asyncio.create_subprocess_shell(
@@ -143,7 +151,31 @@ class ExecTool(Tool):
 
         return result
 
-    def _guard_command(self, command: str, cwd: str) -> str | None:
+    def allow_destructive_command(self, command: str) -> None:
+        """Allow one exact destructive command to run on the next execute call."""
+        self._approved_destructive_command = self._normalize_command(command)
+
+    def clear_destructive_approval(self) -> None:
+        """Clear any one-shot destructive command approval."""
+        self._approved_destructive_command = None
+
+    @classmethod
+    def _normalize_command(cls, command: str) -> str:
+        return " ".join(command.strip().split())
+
+    def _is_approved_destructive_command(self, command: str) -> bool:
+        approved = self._approved_destructive_command
+        if not approved:
+            return False
+        return approved == self._normalize_command(command)
+
+    def _guard_command(
+        self,
+        command: str,
+        cwd: str,
+        *,
+        destructive_approved: bool = False,
+    ) -> str | None:
         """Best-effort safety guard with explicit risk classification."""
         cmd = command.strip()
         lower = cmd.lower()
@@ -153,7 +185,7 @@ class ExecTool(Tool):
                 return "Error: Command blocked by safety guard (dangerous pattern detected)"
 
         risk = self._classify_command_risk(cmd)
-        if risk == "destructive":
+        if risk == "destructive" and not destructive_approved:
             return "Error: Command blocked by safety guard (destructive command requires explicit approval)"
 
         if self.allow_patterns:
