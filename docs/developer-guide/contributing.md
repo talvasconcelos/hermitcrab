@@ -122,19 +122,19 @@ Reject work that mostly add prompt churn, cleverness, or surface area without im
 - Smaller, higher-signal suite over broad noisy coverage
 - Treat test growth as suspect until proven otherwise
 
-## Beta3 focus areas
+## Current focus areas
 
-- Nostr NIP-17 and group conversation support
+- Nostr NIP-17 direct-message support and reliability
 - Explicit conversation-level model switching
 - Permission/policy UX and auditability
 - Owner-managed multi-workspace foundations
 - Workspace hygiene, onboarding, help, and diagnostics
 
-See `project/BETA3_ROADMAP.md` for detailed planning.
+See `project/BETA3_ROADMAP.md` for current planning direction.
 
 ## Getting help
 
 - Read `AGENTS.md` for repository guidance
-- Read `project/BETA3_ROADMAP.md` for beta3 planning
+- Read `project/BETA3_ROADMAP.md` for current roadmap planning
 - Check existing issues and PRs on GitHub
 - Ask in project channels

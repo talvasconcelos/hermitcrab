@@ -16,7 +16,7 @@ If config already exists, prompts:
 - `y` — overwrite with defaults (loses existing values)
 - `N` — refresh config (preserves existing values, adds new fields)
 
-Creates template files (`AGENTS.md`, `IDENTITY.md`, `SOUL.md`, `USER.md`, `TOOLS.md`, `HEARTBEAT.md`) and subdirectories (`memory/`, `knowledge/`, `sessions/`, `scratchpads/`, `people/`, `lists/`, `reminders/`, `journal/`, `logs/`).
+Creates template files (`AGENTS.md`, `IDENTITY.md`, `SOUL.md`, `USER.md`, `TOOLS.md`, `HEARTBEAT.md`) and workspace directories (`memory/`, `knowledge/`, `scratchpads/`, `people/`, `lists/`, `reminders/`, `skills/`).
 
 ## hermitcrab agent
 

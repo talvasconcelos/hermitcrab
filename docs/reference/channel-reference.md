@@ -27,7 +27,7 @@ Primary channel. Encrypted DMs via NIP-04 (legacy) or NIP-17 (modern).
 
 **NIP-04** — legacy encrypted DMs. Stable and widely supported. Uses kind 4 events with shared-key encryption.
 
-**NIP-17** — modern gift-wrap DMs. Uses kind 14 events with relay discovery via kind 10050. Support is evolving in beta3.
+**NIP-17** — modern gift-wrap DMs. Uses kind 14 events with relay discovery via kind 10050.
 
 ### Relay discovery (NIP-17)
 
@@ -64,8 +64,7 @@ In multi-workspace mode, sender pubkeys are mapped to specific workspaces via `w
 ### Current behavior and known limits
 
 - NIP-04 is stable
-- NIP-17 is actively developed in beta3
-- Group conversation support is a beta3 priority
+- NIP-17 DM behavior continues to improve
 - Relay discovery can fail on less-popular relays; fallback to configured relays handles this
 
 ## Telegram

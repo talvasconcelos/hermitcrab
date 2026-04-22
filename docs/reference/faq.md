@@ -10,7 +10,7 @@ A personal AI agent you run on your own machine. It remembers what matters to yo
 
 ### Is this production-ready?
 
-HermitCrab is in beta (`0.1.0b2`). It is usable for real daily workflows but has evolving areas like Nostr NIP-17 groups, multi-workspace isolation, and advanced permission UX.
+HermitCrab is usable for real daily workflows and actively evolving. For stability-sensitive setups, review the changelog and run `hermitcrab doctor` and `hermitcrab status` after upgrades.
 
 ### What models does it support?
 
@@ -149,7 +149,7 @@ Workspace data is backward-compatible. New config fields are added by `hermitcra
 
 ### How do I know what changed?
 
-Check the release notes in the repository. Major changes are documented in `project/BETA3_ROADMAP.md` for post-beta work.
+Check the release notes in the repository changelog.
 
 ## Docker
 

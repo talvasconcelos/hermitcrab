@@ -9,7 +9,7 @@ HermitCrab supports four channels:
 | Channel | Use case | Setup complexity |
 |---------|----------|------------------|
 | CLI | Local terminal sessions | None — works out of the box |
-| Nostr | Encrypted DMs, groups | Medium — requires key pair |
+| Nostr | Encrypted DMs | Medium — requires key pair |
 | Telegram | Bot on Telegram | Low — requires bot token |
 | Email | IMAP/SMTP integration | Medium — requires IMAP/SMTP config |
 
@@ -82,9 +82,8 @@ Warning: this lets anyone message your agent. Use only if you want open access.
 
 ### Current behavior and known limits
 
-- NIP-04 DMs are stable. NIP-17 support is evolving in beta3.
+- NIP-04 DMs are stable. NIP-17 DM support continues to improve.
 - NIP-17 uses kind 10050 relay discovery with fallback to configured relays.
-- Group conversation support is a beta3 priority.
 
 ## Telegram
 
@@ -179,4 +178,4 @@ When the agent replies, messages are dispatched through the same channel the use
 
 ## Multi-channel identity
 
-The same agent handles all channels. Memory, tasks, and knowledge are shared across channels. A conversation started on Telegram continues seamlessly on Nostr or CLI.
+The same agent handles all channels. Memory, tasks, and knowledge are shared across channels. Sessions remain channel-scoped unless you explicitly target the same session key.

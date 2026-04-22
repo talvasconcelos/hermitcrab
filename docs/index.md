@@ -77,6 +77,6 @@ Move your `workspace/` folder anywhere — your agent picks up exactly where it 
 
 ## Current status
 
-HermitCrab is in **beta** (`0.1.0b2`). It is usable for real daily workflows but may have rough edges in evolving areas like Nostr NIP-17 groups, multi-workspace isolation, and advanced permission UX.
+HermitCrab is actively evolving. These docs track current behavior and usage patterns as the product grows.
 
 See the [changelog](changelog.md) for version history.
