@@ -227,4 +227,4 @@ Instructions for the agent...
 
 ## Extending skills
 
-To add a new skill to the codebase, see [Extending tools](developer-guide/extending-tools.md) for the general pattern. Skills are discovered automatically from directories under `hermitcrab/skills/`.
+To add a new skill to the codebase, see [Extending tools](../developer-guide/extending-tools.md) for the general pattern. Skills are discovered automatically from directories under `hermitcrab/skills/`.
