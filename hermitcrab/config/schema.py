@@ -28,6 +28,8 @@ def default_nostr_relays() -> list[str]:
 
 
 _HEX_PUBKEY_RE = re.compile(r"^[0-9a-fA-F]{64}$")
+_IDENTITY_SLUG_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]*$")
+_RESERVED_IDENTITY_NAMES = frozenset({"shared", "system"})
 
 
 def normalize_nostr_pubkey(value: str) -> str:
@@ -47,6 +49,21 @@ def normalize_nostr_pubkey(value: str) -> str:
         raise ValueError("pubkey must be npub/nsec or 64-char hex") from exc
 
     raise ValueError("pubkey must be npub/nsec or 64-char hex")
+
+
+def _validate_identity_slug(value: str, *, field_name: str) -> str:
+    """Validate a filesystem-safe identity slug."""
+    slug = value.strip()
+    if not slug:
+        raise ValueError(f"{field_name} must be non-empty")
+    if slug in _RESERVED_IDENTITY_NAMES:
+        raise ValueError(f"{field_name} '{slug}' is reserved")
+    if not _IDENTITY_SLUG_RE.fullmatch(slug):
+        raise ValueError(
+            f"{field_name} must start with a letter or number and contain only letters, numbers, "
+            "underscores, or hyphens"
+        )
+    return slug
 
 
 class TelegramConfig(Base):
@@ -270,6 +287,65 @@ class WorkspacesConfig(Base):
         return self
 
 
+class SystemConfig(Base):
+    """System-owned operational and generated state."""
+
+    root: str = "system"
+
+    @model_validator(mode="after")
+    def validate_root(self) -> "SystemConfig":
+        """Require non-empty system root."""
+        self.root = self.root.strip()
+        if not self.root:
+            raise ValueError("system.root must be non-empty")
+        return self
+
+
+class IdentityConfig(Base):
+    """Identity-specific configuration."""
+
+    root: str | None = None
+    label: str | None = None
+    role: str = "managed"
+    models: dict[str, str] = Field(default_factory=dict)
+    excluded_models: list[str] = Field(default_factory=list)
+    active: bool = True
+
+    @model_validator(mode="after")
+    def validate_root(self) -> "IdentityConfig":
+        """Reject blank explicit roots."""
+        if self.root is not None:
+            self.root = self.root.strip()
+            if not self.root:
+                raise ValueError("identity root must be non-empty when set")
+        return self
+
+
+class IdentitiesConfig(Base):
+    """Identity registry and defaults."""
+
+    root: str = "identities"
+    owner_identity: str = "owner"
+    default_identity_model: str | None = None
+    registry: dict[str, IdentityConfig] = Field(default_factory=dict)
+
+    @model_validator(mode="after")
+    def normalize_registry(self) -> "IdentitiesConfig":
+        """Normalize identity names and reject reserved or unsafe slugs."""
+        self.root = self.root.strip()
+        if not self.root:
+            raise ValueError("identities.root must be non-empty")
+
+        self.owner_identity = _validate_identity_slug(self.owner_identity, field_name="ownerIdentity")
+
+        normalized: dict[str, IdentityConfig] = {}
+        for name, identity in self.registry.items():
+            slug = _validate_identity_slug(name, field_name="identity registry key")
+            normalized[slug] = identity
+        self.registry = normalized
+        return self
+
+
 class NamedModelConfig(Base):
     """Reusable named model definition with optional provider-specific request options."""
 
@@ -466,6 +542,9 @@ class NostrWorkspaceResolution:
 class Config(BaseSettings):
     """Root configuration for hermitcrab."""
 
+    root: str = "~/.hermitcrab"
+    system: SystemConfig = Field(default_factory=SystemConfig)
+    identities: IdentitiesConfig = Field(default_factory=IdentitiesConfig)
     agents: AgentsConfig = Field(default_factory=AgentsConfig)
     workspaces: WorkspacesConfig = Field(default_factory=WorkspacesConfig)
     models: dict[str, NamedModelConfig] = Field(default_factory=dict)
@@ -474,6 +553,14 @@ class Config(BaseSettings):
     gateway: GatewayConfig = Field(default_factory=GatewayConfig)
     tools: ToolsConfig = Field(default_factory=ToolsConfig)
     reflection: ReflectionConfig = Field(default_factory=ReflectionConfig)
+
+    @model_validator(mode="after")
+    def validate_root(self) -> "Config":
+        """Require a non-empty HermitCrab root path."""
+        self.root = self.root.strip()
+        if not self.root:
+            raise ValueError("root must be non-empty")
+        return self
 
     @model_validator(mode="after")
     def validate_multi_workspace_nostr_bindings(self) -> "Config":
@@ -517,6 +604,54 @@ class Config(BaseSettings):
         return self
 
     @property
+    def hermitcrab_root_path(self) -> Path:
+        """Get expanded HermitCrab root path."""
+        return Path(self.root).expanduser()
+
+    @property
+    def system_root_path(self) -> Path:
+        """Get expanded system-owned state root."""
+        return self._resolve_under_root(self.system.root)
+
+    @property
+    def identities_root_path(self) -> Path:
+        """Get expanded identities root."""
+        return self._resolve_under_root(self.identities.root)
+
+    @property
+    def owner_identity_name(self) -> str:
+        """Return the configured owner identity name."""
+        return self.identities.owner_identity
+
+    @property
+    def owner_identity_root_path(self) -> Path:
+        """Get expanded owner identity root."""
+        return self.get_identity_path(self.owner_identity_name)
+
+    def get_identity_path(self, identity_name: str | None = None) -> Path:
+        """Resolve an identity root path."""
+        name = identity_name or self.owner_identity_name
+        slug = _validate_identity_slug(name, field_name="identity name")
+        identity = self.identities.registry.get(slug)
+        root = identity.root if identity and identity.root else slug
+        path = Path(root).expanduser()
+        if not path.is_absolute():
+            path = self.identities_root_path / path
+        return path
+
+    def configured_identities(self) -> dict[str, Path]:
+        """Return configured identity paths."""
+        return {
+            name: self.get_identity_path(name)
+            for name in self.identities.registry
+        }
+
+    def detects_legacy_workspace_layout(self) -> bool:
+        """Return true when legacy beta workspace roots exist under the HermitCrab root."""
+        root = self.hermitcrab_root_path
+        return (root / "workspace").exists() or (root / "workspaces").exists()
+
+    @property
     def workspace_path(self) -> Path:
         """Get expanded admin workspace path."""
         return Path(self.agents.defaults.workspace).expanduser()
@@ -551,6 +686,13 @@ class Config(BaseSettings):
             name: self.get_workspace_path(name)
             for name in self.workspaces.registry
         }
+
+    def _resolve_under_root(self, value: str) -> Path:
+        """Resolve a config path under the HermitCrab root unless absolute."""
+        path = Path(value).expanduser()
+        if path.is_absolute():
+            return path
+        return self.hermitcrab_root_path / path
 
     def normalized_nostr_workspace_bindings(self) -> dict[str, set[str]]:
         """Return normalized Nostr workspace bindings."""
