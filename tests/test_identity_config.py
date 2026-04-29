@@ -15,6 +15,7 @@ def test_default_identity_paths_use_beta4_layout() -> None:
     assert config.identities_root_path.as_posix().endswith("/.hermitcrab/identities")
     assert config.owner_identity_name == "owner"
     assert config.owner_identity_root_path.as_posix().endswith("/.hermitcrab/identities/owner")
+    assert config.workspace_path == config.owner_identity_root_path
 
 
 def test_identity_paths_resolve_under_configured_root(tmp_path) -> None:
@@ -24,6 +25,23 @@ def test_identity_paths_resolve_under_configured_root(tmp_path) -> None:
     assert config.system_root_path == tmp_path / "system"
     assert config.identities_root_path == tmp_path / "identities"
     assert config.get_identity_path("alice") == tmp_path / "identities" / "alice"
+    assert config.workspace_path == tmp_path / "identities" / "owner"
+
+
+def test_explicit_legacy_workspace_path_is_preserved(tmp_path) -> None:
+    legacy_workspace = tmp_path / "workspace"
+    config = Config.model_validate(
+        {
+            "root": str(tmp_path),
+            "agents": {
+                "defaults": {
+                    "workspace": str(legacy_workspace),
+                }
+            },
+        }
+    )
+
+    assert config.workspace_path == legacy_workspace
 
 
 def test_identity_paths_accept_configured_relative_and_absolute_roots(tmp_path) -> None:

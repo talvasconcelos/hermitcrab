@@ -706,7 +706,6 @@ def onboard():
     """Initialize hermitcrab configuration and workspace."""
     from hermitcrab.config.loader import get_config_path, load_config, save_config
     from hermitcrab.config.schema import Config
-    from hermitcrab.utils.helpers import get_workspace_path
 
     config_path = get_config_path()
 
@@ -727,24 +726,71 @@ def onboard():
                 f"[green]✓[/green] Config refreshed at {config_path} (existing values preserved)"
             )
     else:
-        save_config(Config())
+        config = Config()
+        save_config(config)
         console.print(f"[green]✓[/green] Created config at {config_path}")
 
-    bootstrap_workspace(get_workspace_path(), announce=console.print)
+    bootstrap_beta4_layout(config, announce=console.print)
 
     console.print(f"\n{__logo__} hermitcrab is ready!")
     for line in _build_onboard_next_steps():
         console.print(line)
 
 
+def bootstrap_beta4_layout(config: Config, announce: Callable[[str], None] | None = None) -> None:
+    """Create or refresh the beta4 system and owner identity roots."""
+    system_root = config.system_root_path
+    owner_root = config.owner_identity_root_path
+
+    _ensure_root(system_root, "system root", announce=announce)
+    _create_template_files(system_root, ["AGENTS.md", "TOOLS.md"], announce=announce)
+    (system_root / "logs").mkdir(exist_ok=True)
+    (system_root / "indexes").mkdir(exist_ok=True)
+    (system_root / "history").mkdir(exist_ok=True)
+
+    _ensure_root(owner_root, "owner identity root", announce=announce)
+    _create_template_files(
+        owner_root,
+        ["IDENTITY.md", "SOUL.md", "USER.md", "HEARTBEAT.md", "ONBOARDING_MODE.md"],
+        announce=announce,
+    )
+    _create_identity_directories(owner_root, announce=announce)
+
+
 def bootstrap_workspace(workspace: Path, announce: Callable[[str], None] | None = None) -> None:
     """Create or refresh one workspace root with default structure."""
-    if not workspace.exists():
-        workspace.mkdir(parents=True, exist_ok=True)
-        if announce is not None:
-            announce(f"[green]✓[/green] Created workspace at {workspace}")
+    _ensure_root(workspace, "workspace", announce=announce)
 
     _create_workspace_templates(workspace, announce=announce)
+
+
+def _ensure_root(
+    root: Path,
+    label: str,
+    announce: Callable[[str], None] | None = None,
+) -> None:
+    """Create one root directory if missing."""
+    if not root.exists():
+        root.mkdir(parents=True, exist_ok=True)
+        if announce is not None:
+            announce(f"[green]✓[/green] Created {label} at {root}")
+
+
+def _create_template_files(
+    root: Path,
+    names: list[str],
+    announce: Callable[[str], None] | None = None,
+) -> None:
+    """Create selected bundled template files in a root."""
+    from importlib.resources import files as pkg_files
+
+    templates_dir = pkg_files("hermitcrab") / "templates"
+    for name in names:
+        dest = root / name
+        if not dest.exists():
+            _atomic_write_text(dest, (templates_dir / name).read_text(encoding="utf-8"))
+            if announce is not None:
+                announce(f"  [dim]Created {dest.name}[/dim]")
 
 
 def _create_workspace_templates(
@@ -814,6 +860,66 @@ def _create_workspace_templates(
             onboarding_flag,
             (
                 "Onboarding mode is enabled for this workspace.\n"
+                "Delete this file to disable onboarding prompt injection.\n"
+            ),
+        )
+        if announce is not None:
+            announce("  [dim]Enabled onboarding mode (.onboarding_mode)[/dim]")
+
+
+def _create_identity_directories(
+    identity_root: Path,
+    announce: Callable[[str], None] | None = None,
+) -> None:
+    """Create beta4 per-identity runtime directories."""
+    for dirname in ["cron", "journal", "projects", "reports", "sessions", "skills"]:
+        (identity_root / dirname).mkdir(exist_ok=True)
+        if announce is not None:
+            announce(f"  [dim]Created {dirname}/[/dim]")
+
+    # Create category-based memory directories
+    memory_dir = identity_root / "memory"
+    memory_dir.mkdir(exist_ok=True)
+    for category in ["facts", "decisions", "goals", "tasks", "reflections"]:
+        (memory_dir / category).mkdir(exist_ok=True)
+        if announce is not None:
+            announce(f"  [dim]Created memory/{category}/[/dim]")
+
+    # Create knowledge base directories (reference library, not memory)
+    knowledge_dir = identity_root / "knowledge"
+    knowledge_dir.mkdir(exist_ok=True)
+    for category in ["articles", "books", "docs", "notes"]:
+        (knowledge_dir / category).mkdir(exist_ok=True)
+        if announce is not None:
+            announce(f"  [dim]Created knowledge/{category}/[/dim]")
+
+    (identity_root / "lists").mkdir(exist_ok=True)
+    if announce is not None:
+        announce("  [dim]Created lists/[/dim]")
+
+    people_dir = identity_root / "people"
+    people_dir.mkdir(exist_ok=True)
+    (people_dir / "profiles").mkdir(exist_ok=True)
+    (people_dir / "interactions").mkdir(exist_ok=True)
+    if announce is not None:
+        announce("  [dim]Created people/profiles/ and people/interactions/[/dim]")
+
+    (identity_root / "reminders").mkdir(exist_ok=True)
+    if announce is not None:
+        announce("  [dim]Created reminders/[/dim]")
+
+    scratchpads_dir = identity_root / "scratchpads"
+    scratchpads_dir.mkdir(exist_ok=True)
+    (scratchpads_dir / "archive").mkdir(exist_ok=True)
+    if announce is not None:
+        announce("  [dim]Created scratchpads/ and scratchpads/archive/[/dim]")
+
+    onboarding_flag = identity_root / ".onboarding_mode"
+    if not onboarding_flag.exists():
+        _atomic_write_text(
+            onboarding_flag,
+            (
+                "Onboarding mode is enabled for this identity.\n"
                 "Delete this file to disable onboarding prompt injection.\n"
             ),
         )

@@ -232,7 +232,7 @@ class AgentJobModels(Base):
 class AgentDefaults(Base):
     """Default agent configuration."""
 
-    workspace: str = "~/.hermitcrab/workspace"
+    workspace: str | None = None
     model: str = "anthropic/claude-opus-4-5"  # Primary model for interactive responses
     job_models: AgentJobModels = Field(default_factory=AgentJobModels)
     enable_distillation: bool = (
@@ -654,7 +654,10 @@ class Config(BaseSettings):
     @property
     def workspace_path(self) -> Path:
         """Get expanded admin workspace path."""
-        return Path(self.agents.defaults.workspace).expanduser()
+        workspace = self.agents.defaults.workspace
+        if workspace and workspace.strip():
+            return Path(workspace).expanduser()
+        return self.owner_identity_root_path
 
     @property
     def admin_workspace_path(self) -> Path:
