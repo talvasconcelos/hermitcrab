@@ -214,12 +214,16 @@ class AgentLoop:
         memory_context_max_items_per_category: int = 25,
         memory_context_max_item_chars: int = 600,
         system_root: Path | None = None,
+        identity_name: str = "owner",
+        identity_root: Path | None = None,
     ):
         self.bus = bus
         self.channels_config = channels_config
         self.provider = provider
-        self.workspace = workspace
-        self.audit = AuditTrail(workspace)
+        self.identity_name = identity_name
+        self.identity_root = identity_root or workspace
+        self.workspace = self.identity_root
+        self.audit = AuditTrail(self.identity_root)
         self.model = model or provider.get_default_model()
         self.max_iterations = max_iterations
         self.temperature = temperature
@@ -261,7 +265,7 @@ class AgentLoop:
         )
 
         self.context = ContextBuilder(
-            workspace,
+            self.identity_root,
             memory_max_chars=memory_context_max_chars,
             memory_max_items_per_category=memory_context_max_items_per_category,
             memory_max_item_chars=memory_context_max_item_chars,
@@ -269,15 +273,15 @@ class AgentLoop:
             named_models=self.named_models,
             system_root=system_root,
         )
-        self.skill_runtime = SkillRuntimeManager(workspace, self.context.skills)
-        self.sessions = session_manager or SessionManager(workspace)
-        self.journal = JournalStore(workspace)
-        self.memory = MemoryStore(workspace)
-        self.knowledge = KnowledgeStore(workspace)
-        self.lists = ListStore(workspace)
-        self.people = PeopleStore(workspace)
+        self.skill_runtime = SkillRuntimeManager(self.identity_root, self.context.skills)
+        self.sessions = session_manager or SessionManager(self.identity_root)
+        self.journal = JournalStore(self.identity_root)
+        self.memory = MemoryStore(self.identity_root)
+        self.knowledge = KnowledgeStore(self.identity_root)
+        self.lists = ListStore(self.identity_root)
+        self.people = PeopleStore(self.identity_root)
         self.reminders = ReminderStore(
-            workspace,
+            self.identity_root,
             legacy_cron_store_path=(cron_service.store_path if cron_service else None),
         )
         self.tools = ToolRegistry(
@@ -287,7 +291,7 @@ class AgentLoop:
         self.execution_state = ExecutionStateTracker()
         self.subagents = SubagentManager(
             provider=provider,
-            workspace=workspace,
+            workspace=self.identity_root,
             bus=bus,
             model=self._job_models.get(JobClass.SUBAGENT) or self.model,
             temperature=self.temperature,
@@ -313,7 +317,7 @@ class AgentLoop:
         )
         onboarding_model = self._get_model_for_job(JobClass.INTERACTIVE_RESPONSE) or self.model
         self._onboarding_service = OnboardingProfileService(
-            workspace=workspace,
+            workspace=self.identity_root,
             chat_callable=self._chat_with_retry,
             model=onboarding_model,
         )
@@ -324,7 +328,7 @@ class AgentLoop:
         self._mcp_connected = False
         self._mcp_connecting = False
         self._background_jobs = BackgroundJobManager(
-            workspace=workspace,
+            workspace=self.identity_root,
             journal=self.journal,
             memory=self.memory,
             reflection_service=self._reflection_service,
@@ -335,7 +339,7 @@ class AgentLoop:
         )
         self._background_tasks = self._background_jobs._background_tasks
         self._session_lifecycle = SessionLifecycleManager(
-            workspace=workspace,
+            workspace=self.identity_root,
             sessions=self.sessions,
             inactivity_timeout_s=self.inactivity_timeout_s,
         )

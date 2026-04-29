@@ -107,6 +107,8 @@ class GatewayWorkspaceRuntimeState:
                 self.config,
                 self.create_provider(),
                 workspace=workspace_path,
+                identity_name=workspace_name,
+                identity_root=workspace_path,
                 session_manager=SessionManager(workspace_path),
             ),
         )
@@ -411,14 +413,19 @@ def _build_agent_loop_kwargs(
     provider: Any,
     *,
     workspace: Path | None = None,
+    identity_name: str | None = None,
+    identity_root: Path | None = None,
     cron_service: Any | None = None,
     session_manager: Any | None = None,
 ) -> dict[str, Any]:
     """Build the shared AgentLoop configuration used by CLI entrypoints."""
-    target_workspace = workspace or config.workspace_path
+    target_identity_name = identity_name or config.owner_identity_name
+    target_identity_root = identity_root or workspace or config.workspace_path
     return {
         "provider": provider,
-        "workspace": target_workspace,
+        "workspace": target_identity_root,
+        "identity_name": target_identity_name,
+        "identity_root": target_identity_root,
         "system_root": config.system_root_path,
         "model": config.agents.defaults.model,
         "temperature": config.agents.defaults.temperature,
