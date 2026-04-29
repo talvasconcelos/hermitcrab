@@ -213,6 +213,7 @@ class AgentLoop:
         memory_context_max_chars: int = 12000,
         memory_context_max_items_per_category: int = 25,
         memory_context_max_item_chars: int = 600,
+        system_root: Path | None = None,
     ):
         self.bus = bus
         self.channels_config = channels_config
@@ -266,6 +267,7 @@ class AgentLoop:
             memory_max_item_chars=memory_context_max_item_chars,
             model_aliases=self.model_aliases,
             named_models=self.named_models,
+            system_root=system_root,
         )
         self.skill_runtime = SkillRuntimeManager(workspace, self.context.skills)
         self.sessions = session_manager or SessionManager(workspace)

@@ -419,6 +419,7 @@ def _build_agent_loop_kwargs(
     return {
         "provider": provider,
         "workspace": target_workspace,
+        "system_root": config.system_root_path,
         "model": config.agents.defaults.model,
         "temperature": config.agents.defaults.temperature,
         "max_tokens": config.agents.defaults.max_tokens,

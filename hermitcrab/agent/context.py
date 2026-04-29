@@ -25,7 +25,8 @@ class ContextBuilder:
     into a coherent prompt for the LLM.
     """
 
-    BOOTSTRAP_FILES = ["AGENTS.md", "SOUL.md", "USER.md", "TOOLS.md", "IDENTITY.md"]
+    SYSTEM_BOOTSTRAP_FILES = ["AGENTS.md", "TOOLS.md"]
+    IDENTITY_BOOTSTRAP_FILES = ["SOUL.md", "USER.md", "IDENTITY.md"]
     ONBOARDING_FLAG_FILE = ".onboarding_mode"
     ONBOARDING_PROMPT_FILE = "ONBOARDING_MODE.md"
 
@@ -38,8 +39,10 @@ class ContextBuilder:
         model_aliases: dict[str, str | ModelAliasConfig] | None = None,
         named_models: dict[str, NamedModelConfig] | None = None,
         prompt_token_budget: int = 4000,
+        system_root: Path | None = None,
     ):
         self.workspace = workspace
+        self.system_root = system_root
         self.memory = MemoryStore(workspace)
         self.skills = SkillsLoader(workspace)
         self.memory_max_chars = memory_max_chars
@@ -322,12 +325,26 @@ Use subagents for complex, time-consuming, or specialized tasks. For substantial
         )
 
     def _load_bootstrap_files(self) -> str:
-        """Load all bootstrap files from workspace."""
+        """Load system and identity bootstrap files."""
         parts = []
 
-        for filename in self.BOOTSTRAP_FILES:
-            file_path = self.workspace / filename
-            if file_path.exists():
+        roots_and_files: list[tuple[Path, list[str]]] = []
+        if self.system_root is not None:
+            roots_and_files.append((self.system_root, self.SYSTEM_BOOTSTRAP_FILES))
+        roots_and_files.append(
+            (
+                self.workspace,
+                self.SYSTEM_BOOTSTRAP_FILES + self.IDENTITY_BOOTSTRAP_FILES,
+            )
+        )
+
+        seen: set[Path] = set()
+        for root, filenames in roots_and_files:
+            for filename in filenames:
+                file_path = root / filename
+                if file_path in seen or not file_path.exists():
+                    continue
+                seen.add(file_path)
                 content = file_path.read_text(encoding="utf-8")
                 parts.append(f"## {filename}\n\n{content}")
 

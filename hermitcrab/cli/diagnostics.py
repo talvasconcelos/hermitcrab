@@ -88,11 +88,23 @@ class DoctorReport:
         }
 
 
+def _bootstrap_ready(config: Config, workspace: Path) -> bool:
+    """Return whether legacy or beta4 bootstrap files are present."""
+    legacy_ready = (workspace / "AGENTS.md").exists()
+    beta4_ready = (
+        (config.system_root_path / "AGENTS.md").exists()
+        and (config.system_root_path / "TOOLS.md").exists()
+        and (workspace / "IDENTITY.md").exists()
+    )
+    return legacy_ready or beta4_ready
+
+
 def build_status_report(config_path: Path | None = None) -> StatusReport:
     """Build a structured runtime status snapshot."""
     path = config_path or get_config_path()
     config, config_error = _load_config_with_error(path)
     workspace = config.workspace_path
+    bootstrap_ready = _bootstrap_ready(config, workspace)
     selected_model = config.agents.defaults.model
     resolved_model = config.resolve_model_config(selected_model).model or ""
     selected_provider = config.get_provider_name(selected_model)
@@ -116,7 +128,7 @@ def build_status_report(config_path: Path | None = None) -> StatusReport:
         config_exists=path.exists(),
         config_valid=config_error is None,
         workspace_exists=workspace.exists(),
-        bootstrap_ready=(workspace / "AGENTS.md").exists(),
+        bootstrap_ready=bootstrap_ready,
         selected_provider=selected_provider,
         provider_statuses=provider_statuses,
     )
@@ -124,7 +136,7 @@ def build_status_report(config_path: Path | None = None) -> StatusReport:
         config_exists=path.exists(),
         config_valid=config_error is None,
         workspace_exists=workspace.exists(),
-        bootstrap_ready=(workspace / "AGENTS.md").exists(),
+        bootstrap_ready=bootstrap_ready,
         selected_provider=selected_provider,
         provider_statuses=provider_statuses,
     )
@@ -136,7 +148,7 @@ def build_status_report(config_path: Path | None = None) -> StatusReport:
         config_error=config_error,
         workspace=str(workspace),
         workspace_exists=workspace.exists(),
-        bootstrap_ready=(workspace / "AGENTS.md").exists(),
+        bootstrap_ready=bootstrap_ready,
         selected_model=selected_model,
         resolved_model=resolved_model,
         selected_provider=selected_provider,
@@ -199,8 +211,8 @@ def build_doctor_report(config_path: Path | None = None) -> DoctorReport:
             DiagnosticFinding(
                 check_id="workspace.bootstrap_missing",
                 severity="warning",
-                title="Workspace bootstrap files look incomplete",
-                detail="The workspace exists, but `AGENTS.md` is missing.",
+                title="Bootstrap files look incomplete",
+                detail="The configured identity exists, but required bootstrap files are missing.",
                 remediation="Run `hermitcrab onboard` to restore the default workspace templates.",
             )
         )

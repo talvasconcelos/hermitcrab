@@ -4,7 +4,10 @@ from __future__ import annotations
 
 from typer.testing import CliRunner
 
+from hermitcrab.agent.context import ContextBuilder
 from hermitcrab.cli.commands import app, bootstrap_beta4_layout
+from hermitcrab.cli.diagnostics import build_status_report
+from hermitcrab.config.loader import save_config
 from hermitcrab.config.schema import Config
 
 runner = CliRunner()
@@ -71,3 +74,39 @@ def test_onboard_creates_beta4_layout_without_legacy_workspace(monkeypatch, tmp_
     assert (home / ".hermitcrab" / "identities" / "owner" / "IDENTITY.md").exists()
     assert (home / ".hermitcrab" / "identities" / "owner" / "memory" / "facts").is_dir()
     assert not (home / ".hermitcrab" / "workspace").exists()
+
+
+def test_status_treats_beta4_layout_as_bootstrapped(tmp_path) -> None:
+    config_path = tmp_path / "config.json"
+    config = Config.model_validate(
+        {
+            "root": str(tmp_path),
+            "providers": {"anthropic": {"apiKey": "test-key"}},
+        }
+    )
+    save_config(config, config_path)
+    bootstrap_beta4_layout(config)
+
+    report = build_status_report(config_path)
+
+    assert report.bootstrap_ready is True
+    assert report.overall_state == "ready"
+
+
+def test_context_builder_loads_system_and_identity_bootstrap_files(tmp_path) -> None:
+    config = Config.model_validate({"root": str(tmp_path)})
+    bootstrap_beta4_layout(config)
+
+    (config.system_root_path / "AGENTS.md").write_text("system rules\n", encoding="utf-8")
+    (config.owner_identity_root_path / "IDENTITY.md").write_text(
+        "identity rules\n",
+        encoding="utf-8",
+    )
+
+    prompt = ContextBuilder(
+        config.owner_identity_root_path,
+        system_root=config.system_root_path,
+    ).build_system_prompt()
+
+    assert "system rules" in prompt
+    assert "identity rules" in prompt
