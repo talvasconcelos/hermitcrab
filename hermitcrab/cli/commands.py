@@ -2599,7 +2599,7 @@ def audit(
     from hermitcrab.agent.audit import AuditTrail
 
     config = _load_runtime_config()
-    trail = AuditTrail(config.workspace_path)
+    trail = AuditTrail(config.system_root_path)
     entries = trail.read_recent(limit)
     if event:
         entries = _filter_audit_entries(entries, event)

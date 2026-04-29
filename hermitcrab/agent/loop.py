@@ -222,8 +222,9 @@ class AgentLoop:
         self.provider = provider
         self.identity_name = identity_name
         self.identity_root = identity_root or workspace
+        self.system_root = system_root
         self.workspace = self.identity_root
-        self.audit = AuditTrail(self.identity_root)
+        self.audit = AuditTrail(system_root or self.identity_root)
         self.model = model or provider.get_default_model()
         self.max_iterations = max_iterations
         self.temperature = temperature
@@ -842,6 +843,7 @@ class AgentLoop:
     ) -> None:
         """Append one small structured audit entry without breaking user flows."""
         payload: dict[str, Any] = dict(data)
+        payload["identity_name"] = self.identity_name
         if session_key:
             payload["session_key"] = session_key
         if msg is not None:

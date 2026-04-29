@@ -120,7 +120,7 @@ def build_status_report(config_path: Path | None = None) -> StatusReport:
     mcp_servers_valid = sum(
         1 for server in config.tools.mcp_servers.values() if _is_valid_mcp(server)
     )
-    audit_trail = AuditTrail(workspace)
+    audit_trail = AuditTrail(config.system_root_path)
     audit = audit_trail.summarize()
     audit_highlights = _build_audit_highlights(audit_trail.read_recent(limit=40))
 
