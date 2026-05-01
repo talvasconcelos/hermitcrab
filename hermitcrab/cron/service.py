@@ -10,7 +10,14 @@ from typing import Any, Callable, Coroutine
 
 from loguru import logger
 
-from hermitcrab.cron.types import CronJob, CronJobState, CronPayload, CronSchedule, CronStore
+from hermitcrab.cron.types import (
+    CronConflict,
+    CronJob,
+    CronJobState,
+    CronPayload,
+    CronSchedule,
+    CronStore,
+)
 
 
 def _now_ms() -> int:
@@ -66,10 +73,15 @@ class CronService:
     def __init__(
         self,
         store_path: Path,
-        on_job: Callable[[CronJob], Coroutine[Any, Any, str | None]] | None = None
+        on_job: Callable[[CronJob], Coroutine[Any, Any, str | None]] | None = None,
+        *,
+        identity_name: str = "owner",
+        conflict_finder: Callable[[CronSchedule, int], list[CronConflict]] | None = None,
     ):
         self.store_path = store_path
         self.on_job = on_job  # Callback to execute job, returns response text
+        self.identity_name = identity_name
+        self.conflict_finder = conflict_finder
         self._store: CronStore | None = None
         self._timer_task: asyncio.Task | None = None
         self._running = False
@@ -228,6 +240,8 @@ class CronService:
             if j.enabled and j.state.next_run_at_ms and now >= j.state.next_run_at_ms
         ]
 
+        due_jobs = sorted(due_jobs, key=lambda j: (j.state.next_run_at_ms or 0, j.name, j.id))
+
         for job in due_jobs:
             await self._execute_job(job)
 
@@ -274,6 +288,61 @@ class CronService:
         jobs = store.jobs if include_disabled else [j for j in store.jobs if j.enabled]
         return sorted(jobs, key=lambda j: j.state.next_run_at_ms or float('inf'))
 
+    def find_local_schedule_conflicts(
+        self,
+        schedule: CronSchedule,
+        *,
+        now_ms: int | None = None,
+        window_ms: int = 0,
+    ) -> list[CronConflict]:
+        """Find enabled jobs whose next run conflicts with the proposed schedule."""
+        now = now_ms if now_ms is not None else _now_ms()
+        next_run = compute_next_run_ms(schedule, now)
+        if next_run is None:
+            return []
+
+        conflicts: list[CronConflict] = []
+        store = self._load_store()
+        for job in store.jobs:
+            if not job.enabled:
+                continue
+            job_next_run = job.state.next_run_at_ms
+            if job_next_run is None or job_next_run <= now:
+                job_next_run = compute_next_run_ms(job.schedule, now)
+            if job_next_run is None:
+                continue
+            if abs(job_next_run - next_run) <= window_ms:
+                conflicts.append(
+                    CronConflict(
+                        identity_name=self.identity_name,
+                        job_id=job.id,
+                        job_name=job.name,
+                        next_run_at_ms=job_next_run,
+                    )
+                )
+
+        return conflicts
+
+    def find_schedule_conflicts(
+        self,
+        schedule: CronSchedule,
+        *,
+        now_ms: int | None = None,
+        window_ms: int = 0,
+    ) -> list[CronConflict]:
+        """Find local and externally reported conflicts for the proposed schedule."""
+        now = now_ms if now_ms is not None else _now_ms()
+        conflicts = self.find_local_schedule_conflicts(schedule, now_ms=now, window_ms=window_ms)
+        if self.conflict_finder is not None:
+            conflicts.extend(self.conflict_finder(schedule, now))
+        return conflicts
+
+    def _format_conflicts(self, conflicts: list[CronConflict]) -> str:
+        return ", ".join(
+            f"{conflict.identity_name}:{conflict.job_name} ({conflict.job_id})"
+            for conflict in conflicts
+        )
+
     def add_job(
         self,
         name: str,
@@ -284,11 +353,27 @@ class CronService:
         channel: str | None = None,
         to: str | None = None,
         delete_after_run: bool = False,
+        allow_conflicts: bool = False,
+        conflict_window_s: int = 0,
     ) -> CronJob:
         """Add a new job."""
         store = self._load_store()
         _validate_schedule_for_add(schedule)
         now = _now_ms()
+        next_run_at_ms = compute_next_run_ms(schedule, now)
+        if next_run_at_ms is None:
+            raise ValueError("schedule has no future run")
+        if not allow_conflicts:
+            conflicts = self.find_schedule_conflicts(
+                schedule,
+                now_ms=now,
+                window_ms=max(0, conflict_window_s) * 1000,
+            )
+            if conflicts:
+                raise ValueError(
+                    "schedule conflicts with existing job(s): "
+                    f"{self._format_conflicts(conflicts)}"
+                )
 
         job = CronJob(
             id=str(uuid.uuid4())[:8],
@@ -302,7 +387,7 @@ class CronService:
                 channel=channel,
                 to=to,
             ),
-            state=CronJobState(next_run_at_ms=compute_next_run_ms(schedule, now)),
+            state=CronJobState(next_run_at_ms=next_run_at_ms),
             created_at_ms=now,
             updated_at_ms=now,
             delete_after_run=delete_after_run,

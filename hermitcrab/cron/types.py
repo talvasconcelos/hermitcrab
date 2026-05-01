@@ -52,6 +52,16 @@ class CronJob:
     delete_after_run: bool = False
 
 
+@dataclass(frozen=True)
+class CronConflict:
+    """A schedule conflict with an existing enabled job."""
+
+    identity_name: str
+    job_id: str
+    job_name: str
+    next_run_at_ms: int
+
+
 @dataclass
 class CronStore:
     """Persistent store for cron jobs."""

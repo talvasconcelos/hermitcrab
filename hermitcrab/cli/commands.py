@@ -62,16 +62,160 @@ class GatewayWorkspaceRuntimeState:
 
     config: Config
     bus: Any
+    channels: Any
     create_provider: Callable[[], Any]
+    cron_service_factory: Callable[..., Any]
+    heartbeat_service_factory: Callable[..., Any]
     on_reminder_notify: Callable[[Any, str], Any]
+    heartbeat_interval_s: int
+    heartbeat_enabled: bool
     reminder_interval_s: int
     reminder_service_factory: Callable[..., Any]
     agents: dict[str, Any]
+    cron_services: dict[str, Any]
+    heartbeat_services: dict[str, Any]
     reminder_services: dict[str, Any]
+    cron_services_running: bool = False
+    heartbeat_services_running: bool = False
     reminder_services_running: bool = False
 
     def workspace_agent_key(self, workspace_name: str | None) -> str:
         return workspace_name or "__admin__"
+
+    def identity_agent_key(self, identity_name: str) -> str:
+        return f"identity:{identity_name}"
+
+    def find_cron_conflicts(
+        self,
+        schedule: Any,
+        *,
+        now_ms: int,
+        exclude_key: str,
+    ) -> list[Any]:
+        conflicts: list[Any] = []
+        for key, service in self.cron_services.items():
+            if key == exclude_key:
+                continue
+            conflicts.extend(service.find_local_schedule_conflicts(schedule, now_ms=now_ms))
+        return conflicts
+
+    def build_cron_service(self, identity_root: Path, identity_name: str, key: str) -> Any:
+        return self.cron_service_factory(
+            identity_root=identity_root,
+            identity_name=identity_name,
+            conflict_finder=lambda schedule, now_ms: self.find_cron_conflicts(
+                schedule,
+                now_ms=now_ms,
+                exclude_key=key,
+            ),
+        )
+
+    def pick_heartbeat_target(self, loop: Any) -> tuple[str, str]:
+        enabled = set(self.channels.enabled_channels)
+        for item in loop.sessions.list_sessions():
+            key = item.get("key") or ""
+            if ":" not in key:
+                continue
+            channel, chat_id = key.split(":", 1)
+            if channel in {"cli", "system"}:
+                continue
+            if channel in enabled and chat_id:
+                return channel, chat_id
+        return "cli", "direct"
+
+    def attach_cron_callback(self, cron: Any, loop: Any) -> None:
+        async def on_cron_job(job: Any) -> str | None:
+            response = await loop.process_direct(
+                job.payload.message,
+                session_key=f"cron:{job.id}",
+                channel=job.payload.channel or "cli",
+                chat_id=job.payload.to or "direct",
+            )
+            if job.payload.deliver and job.payload.to:
+                from hermitcrab.bus.events import OutboundMessage
+
+                await self.bus.publish_outbound(
+                    OutboundMessage(
+                        channel=job.payload.channel or "cli",
+                        chat_id=job.payload.to,
+                        content=response or "",
+                    )
+                )
+            return response
+
+        cron.on_job = on_cron_job
+
+    def build_heartbeat_service(self, loop: Any) -> Any:
+        async def on_heartbeat_execute(tasks: str) -> str:
+            channel, chat_id = self.pick_heartbeat_target(loop)
+
+            async def _silent(*_args, **_kwargs):
+                pass
+
+            return await loop.process_direct(
+                tasks,
+                session_key="heartbeat",
+                channel=channel,
+                chat_id=chat_id,
+                on_progress=_silent,
+            )
+
+        async def on_heartbeat_notify(response: str) -> None:
+            from hermitcrab.bus.events import OutboundMessage
+
+            channel, chat_id = self.pick_heartbeat_target(loop)
+            if channel == "cli":
+                return
+            await self.bus.publish_outbound(
+                OutboundMessage(channel=channel, chat_id=chat_id, content=response)
+            )
+
+        return self.heartbeat_service_factory(
+            workspace=loop.identity_root,
+            provider=loop.provider,
+            model=loop.model,
+            on_execute=on_heartbeat_execute,
+            on_notify=on_heartbeat_notify,
+            interval_s=self.heartbeat_interval_s,
+            enabled=self.heartbeat_enabled,
+        )
+
+    async def attach_agent_services(self, key: str, loop: Any, cron: Any) -> None:
+        self.agents[key] = loop
+        self.cron_services[key] = cron
+        self.attach_cron_callback(cron, loop)
+        self.heartbeat_services[key] = self.build_heartbeat_service(loop)
+        await self.ensure_reminder_service(key, loop)
+        if self.cron_services_running:
+            await cron.start()
+        if self.heartbeat_services_running:
+            await self.heartbeat_services[key].start()
+
+    async def attach_configured_identity_agents(self) -> None:
+        from hermitcrab.agent.loop import AgentLoop
+        from hermitcrab.session.manager import SessionManager
+
+        for identity_name, identity in self.config.identities.registry.items():
+            if identity_name == self.config.owner_identity_name or not identity.active:
+                continue
+            key = self.identity_agent_key(identity_name)
+            if key in self.agents:
+                continue
+            identity_root = self.config.get_identity_path(identity_name)
+            cron = self.build_cron_service(identity_root, identity_name, key)
+            loop = AgentLoop(
+                bus=self.bus,
+                **_build_agent_loop_kwargs(
+                    self.config,
+                    self.create_provider(),
+                    workspace=identity_root,
+                    identity_name=identity_name,
+                    identity_root=identity_root,
+                    cron_service=cron,
+                    session_manager=SessionManager(identity_root),
+                ),
+            )
+            await self.attach_agent_services(key, loop, cron)
 
     async def ensure_reminder_service(self, workspace_key: str, loop: Any) -> None:
         if loop.reminders is None or workspace_key in self.reminder_services:
@@ -98,6 +242,7 @@ class GatewayWorkspaceRuntimeState:
             raise ValueError(f"workspace routing blocked: {reason}")
 
         workspace_path = self.config.get_workspace_path(workspace_name)
+        cron = self.build_cron_service(workspace_path, workspace_name, key)
         from hermitcrab.agent.loop import AgentLoop
         from hermitcrab.session.manager import SessionManager
 
@@ -109,11 +254,11 @@ class GatewayWorkspaceRuntimeState:
                 workspace=workspace_path,
                 identity_name=workspace_name,
                 identity_root=workspace_path,
+                cron_service=cron,
                 session_manager=SessionManager(workspace_path),
             ),
         )
-        self.agents[key] = loop
-        await self.ensure_reminder_service(key, loop)
+        await self.attach_agent_services(key, loop, cron)
         return loop
 
     async def process_expired_sessions_all(self) -> int:
@@ -133,9 +278,29 @@ class GatewayWorkspaceRuntimeState:
         for service in self.reminder_services.values():
             await service.start()
 
+    async def start_cron_services(self) -> None:
+        self.cron_services_running = True
+        for service in self.cron_services.values():
+            await service.start()
+
+    async def start_heartbeat_services(self) -> None:
+        self.heartbeat_services_running = True
+        for service in self.heartbeat_services.values():
+            await service.start()
+
     def stop_reminder_services(self) -> None:
         self.reminder_services_running = False
         for service in self.reminder_services.values():
+            service.stop()
+
+    def stop_cron_services(self) -> None:
+        self.cron_services_running = False
+        for service in self.cron_services.values():
+            service.stop()
+
+    def stop_heartbeat_services(self) -> None:
+        self.heartbeat_services_running = False
+        for service in self.heartbeat_services.values():
             service.stop()
 
     async def close_agents(self) -> None:
@@ -192,7 +357,7 @@ def _print_gateway_runtime_summary(
     *,
     channels: Any,
     multi_workspace_active: bool,
-    cron_status: dict[str, Any],
+    cron_statuses: dict[str, dict[str, Any]],
     heartbeat_interval_s: int,
     reminders_interval_s: int,
 ) -> None:
@@ -207,12 +372,13 @@ def _print_gateway_runtime_summary(
     else:
         console.print("[dim]Multi-workspace routing: inactive[/dim]")
 
-    if cron_status.get("jobs", 0) > 0:
-        console.print(f"[green]✓[/green] Cron: {cron_status['jobs']} scheduled jobs")
+    cron_jobs = sum(status.get("jobs", 0) for status in cron_statuses.values())
+    if cron_jobs > 0:
+        console.print(f"[green]✓[/green] Cron: {cron_jobs} scheduled job(s)")
 
     console.print(f"[green]✓[/green] Heartbeat: every {heartbeat_interval_s}s")
     console.print(f"[green]✓[/green] Reminders: every {reminders_interval_s}s")
-    console.print("[dim]Cron/heartbeat execution stays in admin workspace[/dim]")
+    console.print("[dim]Scheduler: gateway-owned, identity-scoped cron/heartbeat/reminders[/dim]")
 
 
 async def _run_gateway_inbound_router(
@@ -282,16 +448,14 @@ async def _run_gateway_inbound_router(
 async def _shutdown_gateway_runtime(
     *,
     timeout_monitor: Any,
-    heartbeat: Any,
     workspace_state: GatewayWorkspaceRuntimeState,
-    cron: Any,
     channels: Any,
 ) -> None:
     """Shutdown gateway runtime components in a stable order."""
     timeout_monitor.stop()
-    heartbeat.stop()
+    workspace_state.stop_heartbeat_services()
     workspace_state.stop_reminder_services()
-    cron.stop()
+    workspace_state.stop_cron_services()
     await workspace_state.close_agents()
     workspace_state.stop_agents()
     await channels.stop_all()
@@ -1150,7 +1314,6 @@ def gateway(
     from hermitcrab.agent.loop import AgentLoop
     from hermitcrab.bus.queue import MessageBus
     from hermitcrab.channels.manager import ChannelManager
-    from hermitcrab.cron.types import CronJob
     from hermitcrab.heartbeat.service import HeartbeatService
     from hermitcrab.reminders.service import ReminderService
     from hermitcrab.session.manager import SessionManager
@@ -1168,11 +1331,14 @@ def gateway(
         raise RuntimeError("admin workspace invariant failed: workspace_path must equal admin_workspace_path")
     bus = MessageBus()
     provider = _make_provider(config)
-    session_manager = SessionManager(config.workspace_path)
+    session_manager = SessionManager(config.owner_identity_root_path)
     multi_workspace_active = _multi_workspace_routing_active(config)
 
-    # Create cron service first (callback set after agent creation)
-    cron = _build_cron_service()
+    admin_key = "__admin__"
+    admin_cron = _build_cron_service(
+        identity_root=config.owner_identity_root_path,
+        identity_name=config.owner_identity_name,
+    )
 
     # Create agent with cron service
     agent = AgentLoop(
@@ -1180,80 +1346,16 @@ def gateway(
         **_build_agent_loop_kwargs(
             config,
             provider,
-            workspace=config.workspace_path,
-            cron_service=cron,
+            workspace=config.owner_identity_root_path,
+            identity_name=config.owner_identity_name,
+            identity_root=config.owner_identity_root_path,
+            cron_service=admin_cron,
             session_manager=session_manager,
         ),
     )
 
-    # Set cron callback (needs agent)
-    async def on_cron_job(job: CronJob) -> str | None:
-        """Execute a cron job through the agent."""
-        response = await agent.process_direct(
-            job.payload.message,
-            session_key=f"cron:{job.id}",
-            channel=job.payload.channel or "cli",
-            chat_id=job.payload.to or "direct",
-        )
-        if job.payload.deliver and job.payload.to:
-            from hermitcrab.bus.events import OutboundMessage
-
-            await bus.publish_outbound(
-                OutboundMessage(
-                    channel=job.payload.channel or "cli",
-                    chat_id=job.payload.to,
-                    content=response or "",
-                )
-            )
-        return response
-
-    cron.on_job = on_cron_job
-
     # Create channel manager
     channels = ChannelManager(config, bus, audit_event=agent.audit_event)
-
-    def _pick_heartbeat_target() -> tuple[str, str]:
-        """Pick a routable channel/chat target for heartbeat-triggered messages."""
-        enabled = set(channels.enabled_channels)
-        # Prefer the most recently updated non-internal session on an enabled channel.
-        for item in session_manager.list_sessions():
-            key = item.get("key") or ""
-            if ":" not in key:
-                continue
-            channel, chat_id = key.split(":", 1)
-            if channel in {"cli", "system"}:
-                continue
-            if channel in enabled and chat_id:
-                return channel, chat_id
-        # Fallback keeps prior behavior but remains explicit.
-        return "cli", "direct"
-
-    # Create heartbeat service
-    async def on_heartbeat_execute(tasks: str) -> str:
-        """Phase 2: execute heartbeat tasks through the full agent loop."""
-        channel, chat_id = _pick_heartbeat_target()
-
-        async def _silent(*_args, **_kwargs):
-            pass
-
-        return await agent.process_direct(
-            tasks,
-            session_key="heartbeat",
-            channel=channel,
-            chat_id=chat_id,
-            on_progress=_silent,
-        )
-
-    async def on_heartbeat_notify(response: str) -> None:
-        """Deliver a heartbeat response to the user's channel."""
-        from hermitcrab.bus.events import OutboundMessage
-
-        channel, chat_id = _pick_heartbeat_target()
-        if channel == "cli":
-            return  # No external channel available to deliver to
-        await bus.publish_outbound(
-            OutboundMessage(channel=channel, chat_id=chat_id, content=response)
-        )
 
     async def on_reminder_notify(item, content: str) -> None:
         """Deliver a due reminder to its persisted channel target."""
@@ -1267,53 +1369,50 @@ def gateway(
         )
 
     hb_cfg = config.gateway.heartbeat
-    heartbeat = HeartbeatService(
-        workspace=config.workspace_path,
-        provider=provider,
-        model=agent.model,
-        on_execute=on_heartbeat_execute,
-        on_notify=on_heartbeat_notify,
-        interval_s=hb_cfg.interval_s,
-        enabled=hb_cfg.enabled,
-    )
-
     workspace_state = GatewayWorkspaceRuntimeState(
         config=config,
         bus=bus,
+        channels=channels,
         create_provider=lambda: _make_provider(config),
+        cron_service_factory=_build_cron_service,
+        heartbeat_service_factory=HeartbeatService,
         on_reminder_notify=on_reminder_notify,
+        heartbeat_interval_s=hb_cfg.interval_s,
+        heartbeat_enabled=hb_cfg.enabled,
         reminder_interval_s=config.gateway.reminders.interval_s,
         reminder_service_factory=ReminderService,
-        agents={"__admin__": agent},
+        agents={},
+        cron_services={},
+        heartbeat_services={},
         reminder_services={},
     )
+    admin_cron.conflict_finder = lambda schedule, now_ms: workspace_state.find_cron_conflicts(
+        schedule,
+        now_ms=now_ms,
+        exclude_key=admin_key,
+    )
+    asyncio.run(workspace_state.attach_agent_services(admin_key, agent, admin_cron))
+    asyncio.run(workspace_state.attach_configured_identity_agents())
 
     timeout_monitor = SessionTimeoutService(
         workspace_state.process_expired_sessions_all,
         interval_s=min(60, max(5, config.agents.defaults.inactivity_timeout_s // 6)),
         enabled=True,
     )
-    if agent.reminders is not None:
-        workspace_state.reminder_services["__admin__"] = ReminderService(
-            agent.reminders,
-            on_notify=on_reminder_notify,
-            interval_s=config.gateway.reminders.interval_s,
-            enabled=True,
-        )
 
-    cron_status = cron.status()
+    cron_statuses = {key: service.status() for key, service in workspace_state.cron_services.items()}
     _print_gateway_runtime_summary(
         channels=channels,
         multi_workspace_active=multi_workspace_active,
-        cron_status=cron_status,
+        cron_statuses=cron_statuses,
         heartbeat_interval_s=hb_cfg.interval_s,
         reminders_interval_s=config.gateway.reminders.interval_s,
     )
 
     async def run():
         try:
-            await cron.start()
-            await heartbeat.start()
+            await workspace_state.start_cron_services()
+            await workspace_state.start_heartbeat_services()
             await timeout_monitor.start()
             await workspace_state.start_reminder_services()
             await asyncio.gather(
@@ -1331,9 +1430,7 @@ def gateway(
         finally:
             await _shutdown_gateway_runtime(
                 timeout_monitor=timeout_monitor,
-                heartbeat=heartbeat,
                 workspace_state=workspace_state,
-                cron=cron,
                 channels=channels,
             )
 
@@ -1748,12 +1845,24 @@ def _configured_workspace_rows(config: Config) -> list[tuple[str, Path, str, boo
     return rows
 
 
-def _build_cron_service():
-    """Build the CronService in the configured data directory."""
-    from hermitcrab.config.loader import get_data_dir
+def _build_cron_service(
+    *,
+    identity_root: Path | None = None,
+    identity_name: str | None = None,
+    conflict_finder: Callable[[Any, int], list[Any]] | None = None,
+):
+    """Build the CronService for an identity root."""
     from hermitcrab.cron.service import CronService
 
-    return CronService(get_data_dir() / "cron" / "jobs.json")
+    if identity_root is None or identity_name is None:
+        config = _load_runtime_config()
+        identity_root = identity_root or config.owner_identity_root_path
+        identity_name = identity_name or config.owner_identity_name
+    return CronService(
+        identity_root / "cron" / "jobs.json",
+        identity_name=identity_name,
+        conflict_finder=conflict_finder,
+    )
 
 
 def _build_reminder_store() -> Any:
@@ -1763,7 +1872,7 @@ def _build_reminder_store() -> Any:
 
     config = _load_runtime_config()
     return ReminderStore(
-        config.workspace_path,
+        config.owner_identity_root_path,
         legacy_cron_store_path=get_data_dir() / "cron" / "jobs.json",
     )
 
@@ -1773,7 +1882,7 @@ def _build_people_store() -> Any:
     from hermitcrab.agent.people import PeopleStore
 
     config = _load_runtime_config()
-    return PeopleStore(config.workspace_path)
+    return PeopleStore(config.owner_identity_root_path)
 
 
 def _require_one_schedule_option(
