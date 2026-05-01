@@ -150,6 +150,51 @@ def test_identity_registry_rejects_duplicate_pubkeys() -> None:
         )
 
 
+def test_nostr_identity_bindings_accept_known_identity_without_legacy_allowlist() -> None:
+    from pynostr.key import PrivateKey
+
+    sender = PrivateKey().public_key.hex()
+    config = Config.model_validate(
+        {
+            "identities": {"registry": {"alice": {}}},
+            "channels": {"nostr": {"identityBindings": {"alice": [sender]}}},
+        }
+    )
+
+    assert config.normalized_nostr_identity_bindings() == {"alice": {sender}}
+
+
+def test_nostr_identity_bindings_reject_unknown_identity() -> None:
+    from pynostr.key import PrivateKey
+
+    sender = PrivateKey().public_key.hex()
+
+    with pytest.raises(ValueError, match="unknown identity"):
+        Config.model_validate({"channels": {"nostr": {"identityBindings": {"alice": [sender]}}}})
+
+
+def test_nostr_routing_rejects_pubkey_bound_to_identity_and_workspace(tmp_path) -> None:
+    from pynostr.key import PrivateKey
+
+    sender = PrivateKey().public_key.hex()
+
+    with pytest.raises(ValueError, match="routing pubkeys must be unique"):
+        Config.model_validate(
+            {
+                "root": str(tmp_path),
+                "workspaces": {"registry": {"side": {"path": str(tmp_path / "side")}}},
+                "identities": {"registry": {"alice": {}}},
+                "channels": {
+                    "nostr": {
+                        "allowedPubkeys": [sender],
+                        "identityBindings": {"alice": [sender]},
+                        "workspaceBindings": {"side": [sender]},
+                    }
+                },
+            }
+        )
+
+
 def test_legacy_workspace_layout_detection(tmp_path) -> None:
     config = Config.model_validate({"root": str(tmp_path)})
     assert config.detects_legacy_workspace_layout() is False

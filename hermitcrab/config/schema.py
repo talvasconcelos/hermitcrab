@@ -164,6 +164,9 @@ class NostrConfig(Base):
     allowed_pubkeys: list[str] = Field(
         default_factory=list
     )  # npub/hex, or "*" for open mode, or [] for strict/deny-all
+    identity_bindings: dict[str, list[str]] = Field(
+        default_factory=dict
+    )  # {"identity-name": ["<sender-pubkey-hex>", ...]}
     workspace_bindings: dict[str, list[str]] = Field(
         default_factory=dict
     )  # {"workspace-name": ["<sender-pubkey-hex>", ...]}
@@ -631,13 +634,14 @@ class Config(BaseSettings):
 
     @model_validator(mode="after")
     def validate_multi_workspace_nostr_bindings(self) -> "Config":
-        """Validate additive multi-workspace Nostr binding rules."""
-        bindings = self.channels.nostr.workspace_bindings
-        if not bindings:
+        """Validate additive Nostr routing binding rules."""
+        workspace_bindings = self.channels.nostr.workspace_bindings
+        identity_bindings = self.channels.nostr.identity_bindings
+        if not workspace_bindings and not identity_bindings:
             return self
 
         allowlist = {value.strip().lower() for value in self.channels.nostr.allowed_pubkeys if value.strip()}
-        if "*" in allowlist or "all" in allowlist:
+        if workspace_bindings and ("*" in allowlist or "all" in allowlist):
             raise ValueError(
                 "channels.nostr.allowed_pubkeys cannot use '*' or 'all' when workspace bindings are configured"
             )
@@ -648,7 +652,22 @@ class Config(BaseSettings):
             normalized_allowlist.add(normalize_nostr_pubkey(pubkey))
 
         seen_pubkeys: dict[str, str] = {}
-        for workspace_name, pubkeys in bindings.items():
+        for identity_name, pubkeys in identity_bindings.items():
+            if identity_name not in self.identities.registry:
+                raise ValueError(
+                    f"channels.nostr.identity_bindings references unknown identity '{identity_name}'"
+                )
+            for pubkey in pubkeys:
+                normalized = normalize_nostr_pubkey(pubkey)
+                previous = seen_pubkeys.get(normalized)
+                if previous is not None:
+                    raise ValueError(
+                        "channels.nostr routing pubkeys must be unique; "
+                        f"{normalized} is assigned to both '{previous}' and 'identity:{identity_name}'"
+                    )
+                seen_pubkeys[normalized] = f"identity:{identity_name}"
+
+        for workspace_name, pubkeys in workspace_bindings.items():
             if workspace_name not in configured_workspaces:
                 raise ValueError(
                     f"channels.nostr.workspace_bindings references unknown workspace '{workspace_name}'"
@@ -658,15 +677,15 @@ class Config(BaseSettings):
                 previous = seen_pubkeys.get(normalized)
                 if previous is not None:
                     raise ValueError(
-                        "channels.nostr.workspace_bindings pubkeys must be unique; "
-                        f"{normalized} is assigned to both '{previous}' and '{workspace_name}'"
+                        "channels.nostr routing pubkeys must be unique; "
+                        f"{normalized} is assigned to both '{previous}' and 'workspace:{workspace_name}'"
                     )
                 if normalized not in normalized_allowlist:
                     raise ValueError(
                         "channels.nostr.workspace_bindings pubkeys must also appear in "
                         "channels.nostr.allowed_pubkeys"
                     )
-                seen_pubkeys[normalized] = workspace_name
+                seen_pubkeys[normalized] = f"workspace:{workspace_name}"
 
         return self
 
@@ -769,6 +788,13 @@ class Config(BaseSettings):
         return {
             workspace_name: {normalize_nostr_pubkey(pubkey) for pubkey in pubkeys}
             for workspace_name, pubkeys in self.channels.nostr.workspace_bindings.items()
+        }
+
+    def normalized_nostr_identity_bindings(self) -> dict[str, set[str]]:
+        """Return normalized Nostr identity bindings."""
+        return {
+            identity_name: {normalize_nostr_pubkey(pubkey) for pubkey in pubkeys}
+            for identity_name, pubkeys in self.channels.nostr.identity_bindings.items()
         }
 
     def normalized_nostr_allowed_pubkeys(self) -> set[str]:

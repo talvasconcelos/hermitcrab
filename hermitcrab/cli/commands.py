@@ -27,7 +27,12 @@ from rich.table import Table
 from rich.text import Text
 
 from hermitcrab import __logo__, __version__
-from hermitcrab.config.schema import Config, ModelAliasConfig
+from hermitcrab.config.schema import (
+    Config,
+    IdentityConfig,
+    ModelAliasConfig,
+    normalize_nostr_pubkey,
+)
 
 app = typer.Typer(
     name="hermitcrab",
@@ -1836,6 +1841,9 @@ app.add_typer(people_app, name="people")
 workspaces_app = typer.Typer(help="Manage named personal workspaces")
 app.add_typer(workspaces_app, name="workspaces")
 
+user_app = typer.Typer(help="Manage identity-scoped users")
+app.add_typer(user_app, name="user")
+
 
 def _configured_workspace_rows(config: Config) -> list[tuple[str, Path, str, bool]]:
     """Return configured named workspaces for CLI display."""
@@ -1845,6 +1853,52 @@ def _configured_workspace_rows(config: Config) -> list[tuple[str, Path, str, boo
         label = workspace.label or "-"
         rows.append((name, path, label, workspace.channel_only))
     return rows
+
+
+def _save_runtime_config(config: Config) -> None:
+    """Validate and save the runtime config after CLI mutation."""
+    from hermitcrab.config.loader import save_config
+
+    try:
+        validated = Config.model_validate(config.model_dump(by_alias=True))
+    except ValueError as exc:
+        console.print(f"[red]Error: {exc}[/red]")
+        raise typer.Exit(1) from exc
+    save_config(validated)
+
+
+def _identity_rows(config: Config) -> list[tuple[str, IdentityConfig, Path]]:
+    """Return configured identities for CLI display."""
+    return [
+        (name, identity, config.get_identity_path(name))
+        for name, identity in sorted(config.identities.registry.items())
+    ]
+
+
+def _remove_identity_routes(config: Config, identity_name: str) -> None:
+    """Remove inbound Nostr routes for one identity."""
+    removed_pubkeys = {
+        normalize_nostr_pubkey(pubkey)
+        for pubkey in config.channels.nostr.identity_bindings.pop(identity_name, [])
+    }
+    if not removed_pubkeys:
+        return
+
+    remaining_routed = {
+        normalize_nostr_pubkey(pubkey)
+        for bindings in (
+            *config.channels.nostr.identity_bindings.values(),
+            *config.channels.nostr.workspace_bindings.values(),
+        )
+        for pubkey in bindings
+    }
+    config.channels.nostr.allowed_pubkeys = [
+        pubkey
+        for pubkey in config.channels.nostr.allowed_pubkeys
+        if pubkey.strip().lower() in {"*", "all"}
+        or normalize_nostr_pubkey(pubkey) not in removed_pubkeys
+        or normalize_nostr_pubkey(pubkey) in remaining_routed
+    ]
 
 
 def _build_cron_service(
@@ -2432,6 +2486,258 @@ def people_history(
     console.print(f"[bold]Interactions for {person.name}[/bold]")
     for interaction in interactions:
         console.print(store.render_interaction_summary(interaction))
+
+
+@user_app.command("list")
+def user_list(
+    as_json: bool = typer.Option(False, "--json", help="Print users as JSON"),
+):
+    """List configured users."""
+    config = _load_runtime_config()
+    rows = _identity_rows(config)
+
+    if as_json:
+        typer.echo(
+            json.dumps(
+                [
+                    {
+                        "name": name,
+                        "label": identity.label,
+                        "role": identity.role,
+                        "active": identity.active,
+                        "root": str(path),
+                        "nostr_public_key": identity.nostr_public_key,
+                        "route_count": len(config.channels.nostr.identity_bindings.get(name, [])),
+                    }
+                    for name, identity, path in rows
+                ],
+                indent=2,
+                ensure_ascii=False,
+            )
+            + "\n",
+            nl=False,
+        )
+        return
+
+    table = Table(title="Users")
+    table.add_column("Alias", style="cyan")
+    table.add_column("Label")
+    table.add_column("Role")
+    table.add_column("State")
+    table.add_column("Nostr Pubkey")
+    table.add_column("Root")
+
+    for name, identity, path in rows:
+        state = "[green]active[/green]" if identity.active else "[dim]inactive[/dim]"
+        table.add_row(
+            name,
+            identity.label or "-",
+            identity.role,
+            state,
+            f"{identity.nostr_public_key[:12]}...",
+            str(path),
+        )
+
+    console.print(table)
+
+
+@user_app.command("add")
+def user_add(
+    name: str = typer.Argument(..., help="User alias"),
+    label: str | None = typer.Option(None, "--label", help="Display label"),
+    nostr_private_key: str | None = typer.Option(
+        None,
+        "--nostr-private-key",
+        help="Identity Nostr private key as nsec or hex. Generated if omitted.",
+    ),
+):
+    """Add a user identity and bootstrap its identity root."""
+    config = _load_runtime_config()
+    if name in config.identities.registry:
+        console.print(f"[red]Error: user already exists: {name}[/red]")
+        raise typer.Exit(1)
+
+    config.identities.registry[name] = IdentityConfig(
+        label=label,
+        nostr_private_key=nostr_private_key or "",
+    )
+    try:
+        validated = Config.model_validate(config.model_dump(by_alias=True))
+    except ValueError as exc:
+        console.print(f"[red]Error: {exc}[/red]")
+        raise typer.Exit(1) from exc
+
+    identity_root = validated.get_identity_path(name)
+    _ensure_root(identity_root, "identity root", announce=console.print)
+    _create_template_files(
+        identity_root,
+        ["IDENTITY.md", "SOUL.md", "USER.md", "HEARTBEAT.md", "ONBOARDING_MODE.md"],
+        announce=console.print,
+    )
+    _create_identity_directories(identity_root, announce=console.print)
+    _save_runtime_config(validated)
+    identity = validated.identities.registry[name]
+    console.print(f"[green]✓[/green] Added user '{name}'")
+    console.print(f"Nostr pubkey: {identity.nostr_public_key}")
+
+
+@user_app.command("remove")
+def user_remove(
+    name: str = typer.Argument(..., help="User alias"),
+):
+    """Disable routing for a user while keeping data in place."""
+    config = _load_runtime_config()
+    identity = config.identities.registry.get(name)
+    if identity is None:
+        console.print(f"[red]Error: unknown user: {name}[/red]")
+        raise typer.Exit(1)
+    if name == config.owner_identity_name:
+        console.print("[red]Error: owner user cannot be removed[/red]")
+        raise typer.Exit(1)
+
+    identity.active = False
+    _remove_identity_routes(config, name)
+    _save_runtime_config(config)
+    console.print(f"[green]✓[/green] Disabled user '{name}' and removed inbound routes")
+
+
+@user_app.command("archive")
+def user_archive(
+    name: str = typer.Argument(..., help="User alias"),
+):
+    """Archive a user without deleting identity data."""
+    config = _load_runtime_config()
+    identity = config.identities.registry.get(name)
+    if identity is None:
+        console.print(f"[red]Error: unknown user: {name}[/red]")
+        raise typer.Exit(1)
+    if name == config.owner_identity_name:
+        console.print("[red]Error: owner user cannot be archived[/red]")
+        raise typer.Exit(1)
+
+    identity.active = False
+    identity.role = "archived"
+    _remove_identity_routes(config, name)
+    _save_runtime_config(config)
+    console.print(f"[green]✓[/green] Archived user '{name}'")
+
+
+@user_app.command("route")
+def user_route(
+    channel: str = typer.Argument(..., help="Route channel. Currently only 'nostr'."),
+    name: str = typer.Argument(..., help="User alias"),
+    pubkey: str = typer.Argument(..., help="Inbound sender Nostr pubkey as npub, nsec, or hex"),
+):
+    """Bind an inbound channel sender to a user."""
+    if channel != "nostr":
+        console.print("[red]Error: only nostr routes are supported[/red]")
+        raise typer.Exit(1)
+
+    config = _load_runtime_config()
+    identity = config.identities.registry.get(name)
+    if identity is None:
+        console.print(f"[red]Error: unknown user: {name}[/red]")
+        raise typer.Exit(1)
+    if not identity.active:
+        console.print(f"[red]Error: user is inactive: {name}[/red]")
+        raise typer.Exit(1)
+
+    try:
+        normalized = normalize_nostr_pubkey(pubkey)
+    except ValueError as exc:
+        console.print(f"[red]Error: {exc}[/red]")
+        raise typer.Exit(1) from exc
+
+    for existing_name, pubkeys in config.channels.nostr.identity_bindings.items():
+        if existing_name != name and normalized in {normalize_nostr_pubkey(value) for value in pubkeys}:
+            console.print(f"[red]Error: pubkey already routed to user '{existing_name}'[/red]")
+            raise typer.Exit(1)
+
+    routes = config.channels.nostr.identity_bindings.setdefault(name, [])
+    if normalized not in {normalize_nostr_pubkey(value) for value in routes}:
+        routes.append(normalized)
+    allowed = config.channels.nostr.allowed_pubkeys
+    allowed_modes = {value.strip().lower() for value in allowed}
+    allowed_pubkeys = {
+        normalize_nostr_pubkey(value)
+        for value in allowed
+        if value.strip().lower() not in {"*", "all"}
+    }
+    if not allowed_modes.intersection({"*", "all"}) and normalized not in allowed_pubkeys:
+        allowed.append(normalized)
+    _save_runtime_config(config)
+    console.print(f"[green]✓[/green] Routed Nostr sender to user '{name}'")
+    console.print(f"Pubkey: {normalized}")
+
+
+@user_app.command("models")
+def user_models(
+    name: str = typer.Argument(..., help="User alias"),
+    interactive: str | None = typer.Option(None, "--interactive", help="Named model for interactive responses"),
+):
+    """Set per-user model policy."""
+    config = _load_runtime_config()
+    identity = config.identities.registry.get(name)
+    if identity is None:
+        console.print(f"[red]Error: unknown user: {name}[/red]")
+        raise typer.Exit(1)
+    if interactive is None:
+        console.print("[red]Error: provide --interactive[/red]")
+        raise typer.Exit(1)
+    if interactive not in config.models:
+        console.print(f"[red]Error: unknown named model: {interactive}[/red]")
+        raise typer.Exit(1)
+
+    identity.models["interactiveResponse"] = interactive
+    _save_runtime_config(config)
+    console.print(f"[green]✓[/green] Set {name} interactive model to '{interactive}'")
+
+
+@user_app.command("status")
+def user_status(
+    name: str = typer.Argument(..., help="User alias"),
+    as_json: bool = typer.Option(False, "--json", help="Print user status as JSON"),
+):
+    """Inspect user heartbeat and cron state."""
+    config = _load_runtime_config()
+    identity = config.identities.registry.get(name)
+    if identity is None:
+        console.print(f"[red]Error: unknown user: {name}[/red]")
+        raise typer.Exit(1)
+
+    root = config.get_identity_path(name)
+    heartbeat_file = root / "HEARTBEAT.md"
+    cron_service = _build_cron_service(identity_root=root, identity_name=name)
+    cron_jobs = cron_service.list_jobs(include_disabled=True)
+    payload = {
+        "name": name,
+        "active": identity.active,
+        "role": identity.role,
+        "root": str(root),
+        "nostr_public_key": identity.nostr_public_key,
+        "heartbeat": {
+            "path": str(heartbeat_file),
+            "exists": heartbeat_file.exists(),
+        },
+        "cron": {
+            "path": str(cron_service.store_path),
+            "jobs": len(cron_jobs),
+            "enabled_jobs": len([job for job in cron_jobs if job.enabled]),
+            "next_wake_at_ms": cron_service.status()["next_wake_at_ms"],
+        },
+    }
+
+    if as_json:
+        typer.echo(json.dumps(payload, indent=2, ensure_ascii=False) + "\n", nl=False)
+        return
+
+    console.print(f"[bold]{name}[/bold]")
+    console.print(f"State: {'active' if identity.active else 'inactive'}")
+    console.print(f"Role: {identity.role}")
+    console.print(f"Root: {root}")
+    console.print(f"Nostr pubkey: {identity.nostr_public_key}")
+    console.print(f"Heartbeat: {'present' if heartbeat_file.exists() else 'missing'} ({heartbeat_file})")
+    console.print(f"Cron jobs: {payload['cron']['enabled_jobs']} enabled / {payload['cron']['jobs']} total")
 
 
 @workspaces_app.command("list")
