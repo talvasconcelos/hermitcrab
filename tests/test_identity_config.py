@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from hermitcrab.config.schema import Config
+from hermitcrab.config.schema import Config, nostr_pubkey_from_private_key
 
 
 def test_default_identity_paths_use_beta4_layout() -> None:
@@ -16,6 +16,10 @@ def test_default_identity_paths_use_beta4_layout() -> None:
     assert config.owner_identity_name == "owner"
     assert config.owner_identity_root_path.as_posix().endswith("/.hermitcrab/identities/owner")
     assert config.workspace_path == config.owner_identity_root_path
+    owner = config.identities.registry["owner"]
+    assert len(owner.nostr_private_key) == 64
+    assert len(owner.nostr_public_key) == 64
+    assert nostr_pubkey_from_private_key(owner.nostr_private_key) == owner.nostr_public_key
 
 
 def test_identity_paths_resolve_under_configured_root(tmp_path) -> None:
@@ -85,6 +89,62 @@ def test_identity_registry_rejects_reserved_or_unsafe_names() -> None:
                     "registry": {
                         "shared": {"root": "shared"},
                     }
+                }
+            }
+        )
+
+
+def test_identity_registry_accepts_private_key_and_derives_pubkey() -> None:
+    from pynostr.key import PrivateKey
+
+    private_key = PrivateKey().hex()
+    config = Config.model_validate(
+        {
+            "identities": {
+                "ownerIdentity": "alice",
+                "registry": {
+                    "alice": {"nostrPrivateKey": private_key},
+                },
+            }
+        }
+    )
+
+    identity = config.identities.registry["alice"]
+    assert identity.nostr_private_key == private_key
+    assert identity.nostr_public_key == nostr_pubkey_from_private_key(private_key)
+
+
+def test_identity_registry_rejects_pubkey_without_private_key() -> None:
+    from pynostr.key import PrivateKey
+
+    pubkey = PrivateKey().public_key.hex()
+
+    with pytest.raises(ValueError, match="nostrPrivateKey is required"):
+        Config.model_validate(
+            {
+                "identities": {
+                    "registry": {
+                        "alice": {"nostrPublicKey": pubkey},
+                    }
+                }
+            }
+        )
+
+
+def test_identity_registry_rejects_duplicate_pubkeys() -> None:
+    from pynostr.key import PrivateKey
+
+    private_key = PrivateKey().hex()
+
+    with pytest.raises(ValueError, match="pubkeys must be unique"):
+        Config.model_validate(
+            {
+                "identities": {
+                    "ownerIdentity": "alice",
+                    "registry": {
+                        "alice": {"nostrPrivateKey": private_key},
+                        "bob": {"nostrPrivateKey": private_key},
+                    },
                 }
             }
         )

@@ -28,6 +28,7 @@ def default_nostr_relays() -> list[str]:
 
 
 _HEX_PUBKEY_RE = re.compile(r"^[0-9a-fA-F]{64}$")
+_HEX_PRIVATE_KEY_RE = re.compile(r"^[0-9a-fA-F]{64}$")
 _IDENTITY_SLUG_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]*$")
 _RESERVED_IDENTITY_NAMES = frozenset({"shared", "system"})
 
@@ -49,6 +50,42 @@ def normalize_nostr_pubkey(value: str) -> str:
         raise ValueError("pubkey must be npub/nsec or 64-char hex") from exc
 
     raise ValueError("pubkey must be npub/nsec or 64-char hex")
+
+
+def normalize_nostr_private_key(value: str) -> str:
+    """Normalize configured Nostr private key to lowercase hex."""
+    key = value.strip()
+    if _HEX_PRIVATE_KEY_RE.fullmatch(key):
+        return key.lower()
+
+    try:
+        from pynostr.key import PrivateKey
+
+        if key.startswith("nsec"):
+            return PrivateKey.from_nsec(key).hex().lower()
+    except Exception as exc:
+        raise ValueError("private key must be nsec or 64-char hex") from exc
+
+    raise ValueError("private key must be nsec or 64-char hex")
+
+
+def nostr_pubkey_from_private_key(value: str) -> str:
+    """Return lowercase hex public key for a Nostr private key."""
+    private_key = normalize_nostr_private_key(value)
+    try:
+        from pynostr.key import PrivateKey
+
+        return PrivateKey.from_hex(private_key).public_key.hex().lower()
+    except Exception as exc:
+        raise ValueError("private key must be nsec or 64-char hex") from exc
+
+
+def generate_nostr_keypair() -> tuple[str, str]:
+    """Generate a Nostr private/public keypair as lowercase hex strings."""
+    from pynostr.key import PrivateKey
+
+    private_key = PrivateKey()
+    return private_key.hex().lower(), private_key.public_key.hex().lower()
 
 
 def _validate_identity_slug(value: str, *, field_name: str) -> str:
@@ -306,6 +343,8 @@ class IdentityConfig(Base):
 
     root: str | None = None
     label: str | None = None
+    nostr_public_key: str = ""
+    nostr_private_key: str = ""
     role: str = "managed"
     models: dict[str, str] = Field(default_factory=dict)
     excluded_models: list[str] = Field(default_factory=list)
@@ -318,6 +357,22 @@ class IdentityConfig(Base):
             self.root = self.root.strip()
             if not self.root:
                 raise ValueError("identity root must be non-empty when set")
+
+        self.nostr_public_key = self.nostr_public_key.strip()
+        self.nostr_private_key = self.nostr_private_key.strip()
+        if self.nostr_private_key:
+            self.nostr_private_key = normalize_nostr_private_key(self.nostr_private_key)
+            derived_pubkey = nostr_pubkey_from_private_key(self.nostr_private_key)
+            if self.nostr_public_key:
+                self.nostr_public_key = normalize_nostr_pubkey(self.nostr_public_key)
+                if self.nostr_public_key != derived_pubkey:
+                    raise ValueError("identity nostrPublicKey does not match nostrPrivateKey")
+            else:
+                self.nostr_public_key = derived_pubkey
+        elif self.nostr_public_key:
+            raise ValueError("identity nostrPrivateKey is required when nostrPublicKey is set")
+        else:
+            self.nostr_private_key, self.nostr_public_key = generate_nostr_keypair()
         return self
 
 
@@ -342,6 +397,18 @@ class IdentitiesConfig(Base):
         for name, identity in self.registry.items():
             slug = _validate_identity_slug(name, field_name="identity registry key")
             normalized[slug] = identity
+        if self.owner_identity not in normalized:
+            normalized[self.owner_identity] = IdentityConfig(role="owner")
+
+        seen_pubkeys: dict[str, str] = {}
+        for name, identity in normalized.items():
+            previous = seen_pubkeys.get(identity.nostr_public_key)
+            if previous is not None:
+                raise ValueError(
+                    "identity Nostr pubkeys must be unique; "
+                    f"{identity.nostr_public_key} is assigned to both '{previous}' and '{name}'"
+                )
+            seen_pubkeys[identity.nostr_public_key] = name
         self.registry = normalized
         return self
 

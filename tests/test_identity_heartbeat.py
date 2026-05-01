@@ -135,13 +135,18 @@ async def test_gateway_scheduler_registers_configured_active_identities(tmp_path
 
     await state.attach_configured_identity_agents()
 
-    assert "identity:alice" in state.agents
-    assert "identity:alice" in state.cron_services
-    assert state.cron_services["identity:alice"].store_path == (
+    alice_pubkey = config.identities.registry["alice"].nostr_public_key
+    alice_key = f"identity:{alice_pubkey}"
+    bob_pubkey = config.identities.registry["bob"].nostr_public_key
+    bob_key = f"identity:{bob_pubkey}"
+
+    assert alice_key in state.agents
+    assert alice_key in state.cron_services
+    assert state.cron_services[alice_key].store_path == (
         tmp_path / "identities" / "alice" / "cron" / "jobs.json"
     )
-    assert "identity:bob" not in state.agents
-    assert "identity:bob" not in state.cron_services
+    assert bob_key not in state.agents
+    assert bob_key not in state.cron_services
 
 
 @pytest.mark.asyncio

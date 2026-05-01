@@ -83,7 +83,9 @@ class GatewayWorkspaceRuntimeState:
         return workspace_name or "__admin__"
 
     def identity_agent_key(self, identity_name: str) -> str:
-        return f"identity:{identity_name}"
+        identity = self.config.identities.registry.get(identity_name)
+        stable_id = identity.nostr_public_key if identity else identity_name
+        return f"identity:{stable_id}"
 
     def find_cron_conflicts(
         self,
