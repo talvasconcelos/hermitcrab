@@ -854,13 +854,14 @@ class AgentLoop:
             if msg.metadata:
                 for field in (
                     "sender_pubkey",
-                    "workspace_target",
-                    "workspace_name",
-                    "workspace_path",
-                    "workspace_reason",
+                    "identity_target",
+                    "identity_path",
+                    "identity_reason",
                 ):
                     if msg.metadata.get(field) is not None:
                         payload[field] = msg.metadata.get(field)
+                if msg.metadata.get("identity_name") is not None:
+                    payload["routed_identity_name"] = msg.metadata.get("identity_name")
         try:
             self.audit.record(event, **payload)
         except OSError as exc:

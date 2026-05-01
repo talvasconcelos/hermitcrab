@@ -54,10 +54,10 @@ class StatusReport:
     selected_model: str
     resolved_model: str
     selected_provider: str | None
-    multi_workspace_routing_active: bool = False
+    identity_routing_active: bool = False
     named_workspaces: int = 0
     bootstrapped_named_workspaces: int = 0
-    nostr_workspace_bindings: int = 0
+    nostr_identity_bindings: int = 0
     provider_statuses: list[ProviderStatus] = field(default_factory=list)
     skill_statuses: list[SkillStatus] = field(default_factory=list)
     audit: AuditSummary | None = None
@@ -111,12 +111,10 @@ def build_status_report(config_path: Path | None = None) -> StatusReport:
     provider_statuses = _build_provider_statuses(config, selected_provider)
     skill_statuses = _build_skill_statuses(workspace)
     configured_workspaces = config.configured_workspaces()
-    nostr_workspace_bindings = sum(
-        len(pubkeys) for pubkeys in config.channels.nostr.workspace_bindings.values()
+    nostr_identity_bindings = sum(
+        len(pubkeys) for pubkeys in config.channels.nostr.identity_bindings.values()
     )
-    multi_workspace_routing_active = bool(config.workspaces.registry) and bool(
-        config.channels.nostr.workspace_bindings
-    )
+    identity_routing_active = bool(config.channels.nostr.identity_bindings)
     mcp_servers_valid = sum(
         1 for server in config.tools.mcp_servers.values() if _is_valid_mcp(server)
     )
@@ -152,12 +150,12 @@ def build_status_report(config_path: Path | None = None) -> StatusReport:
         selected_model=selected_model,
         resolved_model=resolved_model,
         selected_provider=selected_provider,
-        multi_workspace_routing_active=multi_workspace_routing_active,
+        identity_routing_active=identity_routing_active,
         named_workspaces=len(configured_workspaces),
         bootstrapped_named_workspaces=sum(
             1 for path in configured_workspaces.values() if (path / "AGENTS.md").exists()
         ),
-        nostr_workspace_bindings=nostr_workspace_bindings,
+        nostr_identity_bindings=nostr_identity_bindings,
         provider_statuses=provider_statuses,
         skill_statuses=skill_statuses,
         audit=audit,
@@ -325,10 +323,10 @@ def _build_audit_highlights(entries: list[dict[str, Any]]) -> list[str]:
             detail = str(payload.get("message") or "").strip()
             if detail:
                 message = f"Nostr relay notice from {relay_url}: {detail}"
-        elif event == "gateway.workspace_route_denied":
+        elif event == "gateway.identity_route_denied":
             sender = str(payload.get("sender_pubkey") or payload.get("chat_id") or "")[:8]
             reason = str(payload.get("reason") or "route denied")
-            message = f"Workspace routing denied for {sender}: {reason}"
+            message = f"Identity routing denied for {sender}: {reason}"
         elif event == "tool.policy_denied":
             tool_name = str(payload.get("tool_name") or "tool")
             permission = str(payload.get("permission_level") or "unknown")

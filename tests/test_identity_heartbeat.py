@@ -8,7 +8,7 @@ from unittest.mock import MagicMock
 import pytest
 
 from hermitcrab.bus.queue import MessageBus
-from hermitcrab.cli.commands import GatewayWorkspaceRuntimeState
+from hermitcrab.cli.commands import GatewayIdentityRuntimeState
 from hermitcrab.config.schema import Config
 from hermitcrab.cron.service import CronService
 from hermitcrab.cron.types import CronSchedule
@@ -55,7 +55,7 @@ def test_gateway_scheduler_rejects_cross_identity_cron_conflict(tmp_path: Path) 
     class Channels:
         enabled_channels: list[str] = []
 
-    state = GatewayWorkspaceRuntimeState(
+    state = GatewayIdentityRuntimeState(
         config=Config.model_validate({"root": str(tmp_path)}),
         bus=MagicMock(),
         channels=Channels(),
@@ -111,7 +111,7 @@ async def test_gateway_scheduler_registers_configured_active_identities(tmp_path
             },
         }
     )
-    state = GatewayWorkspaceRuntimeState(
+    state = GatewayIdentityRuntimeState(
         config=config,
         bus=MessageBus(),
         channels=Channels(),

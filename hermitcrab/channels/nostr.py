@@ -23,7 +23,7 @@ from hermitcrab.channels.nostr_nip17 import (
     parse_nip17_message,
     randomized_past_window_seconds,
 )
-from hermitcrab.config.schema import NostrConfig, NostrWorkspaceResolution, default_nostr_relays
+from hermitcrab.config.schema import NostrConfig, NostrIdentityResolution, default_nostr_relays
 
 
 def _split_message(content: str, max_len: int = 1800) -> list[str]:
@@ -61,12 +61,12 @@ class NostrChannel(BaseChannel):
         self,
         config: NostrConfig,
         bus: MessageBus,
-        workspace_resolver: Callable[[str], NostrWorkspaceResolution] | None = None,
+        identity_resolver: Callable[[str], NostrIdentityResolution] | None = None,
         audit_event: Callable[..., None] | None = None,
     ) -> None:
         super().__init__(config, bus)
         self.config: NostrConfig = config
-        self._workspace_resolver = workspace_resolver
+        self._identity_resolver = identity_resolver
         self._audit_event = audit_event
 
         try:
@@ -112,28 +112,28 @@ class NostrChannel(BaseChannel):
         except Exception as exc:
             logger.warning("Failed to append Nostr audit event {}: {}", event, exc)
 
-    def _workspace_metadata(self, sender_pubkey: str) -> dict[str, Any]:
-        """Return resolved workspace metadata for one inbound sender."""
-        if self._workspace_resolver is None:
+    def _identity_metadata(self, sender_pubkey: str) -> dict[str, Any]:
+        """Return resolved identity metadata for one inbound sender."""
+        if self._identity_resolver is None:
             return {}
-        resolution = self._workspace_resolver(sender_pubkey)
+        resolution = self._identity_resolver(sender_pubkey)
         return {
-            "workspace_target": resolution.target,
-            "workspace_name": resolution.workspace_name,
-            "workspace_path": (str(resolution.workspace_path) if resolution.workspace_path else None),
-            "workspace_reason": resolution.reason,
+            "identity_target": resolution.target,
+            "identity_name": resolution.identity_name,
+            "identity_path": (str(resolution.identity_path) if resolution.identity_path else None),
+            "identity_reason": resolution.reason,
         }
 
     def _session_key_for_sender(self, sender_pubkey: str, metadata: dict[str, Any] | None = None) -> str:
-        """Build session key, namespacing named-workspace senders only."""
-        workspace_name = (metadata or {}).get("workspace_name")
-        workspace_target = (metadata or {}).get("workspace_target")
-        if workspace_target == "workspace" and isinstance(workspace_name, str) and workspace_name:
-            return f"nostr:{workspace_name}:{sender_pubkey}"
-        return f"nostr:{sender_pubkey}"
+        """Build beta4 identity-scoped Nostr session key."""
+        identity_name = (metadata or {}).get("identity_name")
+        identity_target = (metadata or {}).get("identity_target")
+        if identity_target == "identity" and isinstance(identity_name, str) and identity_name:
+            return f"nostr:{identity_name}:{sender_pubkey}"
+        return f"nostr:unresolved:{sender_pubkey}"
 
     def _sender_pubkey_from_session_key(self, session_key: str) -> str | None:
-        """Extract sender pubkey from legacy or namespaced Nostr session key."""
+        """Extract sender pubkey from a beta4 Nostr session key."""
         if not session_key.startswith("nostr:"):
             return None
         remainder = session_key.removeprefix("nostr:")
@@ -654,7 +654,7 @@ class NostrChannel(BaseChannel):
                     "relay_url": relay_url,
                     "created_at": message_created_at,
                     "kind": event_kind,
-                    **self._workspace_metadata(sender_pubkey),
+                    **self._identity_metadata(sender_pubkey),
                 }
             if sender_pubkey is None:
                 return
@@ -739,7 +739,7 @@ class NostrChannel(BaseChannel):
             "created_at": parsed.rumor.created_at,
             "kind": parsed.rumor.kind,
             "gift_wrap_kind": parsed.gift_wrap.kind,
-            **self._workspace_metadata(sender_pubkey),
+            **self._identity_metadata(sender_pubkey),
         }
         return sender_pubkey, parsed.content, parsed.rumor.created_at or 0, metadata
 
@@ -758,6 +758,14 @@ class NostrChannel(BaseChannel):
     def _is_sender_allowed(self, sender_pubkey: str) -> bool:
         if self.is_allowed(sender_pubkey):
             return True
+        if self._identity_resolver is not None:
+            try:
+                resolution = self._identity_resolver(sender_pubkey)
+            except Exception as exc:
+                logger.warning("Nostr identity routing lookup failed for {}: {}", sender_pubkey[:8], exc)
+                resolution = None
+            if resolution is not None and resolution.target == "identity":
+                return True
         allowed_short = [p[:8] if p != "*" else "*" for p in sorted(self._allowed_pubkeys)]
         logger.warning(
             "Message from unauthorized pubkey {} (allowed={})",

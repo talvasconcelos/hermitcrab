@@ -53,17 +53,17 @@ _ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
 
 
 @dataclass(frozen=True)
-class GatewayWorkspaceRouteDecision:
-    """Deterministic inbound gateway workspace routing decision."""
+class GatewayIdentityRouteDecision:
+    """Deterministic inbound gateway identity routing decision."""
 
-    target: Literal["admin", "workspace", "denied"]
+    target: Literal["identity", "denied"]
     reason: str
-    workspace_name: str | None = None
+    identity_name: str | None = None
 
 
 @dataclass
-class GatewayWorkspaceRuntimeState:
-    """Stateful runtime helpers for admin + named workspace agents in gateway mode."""
+class GatewayIdentityRuntimeState:
+    """Stateful runtime helpers for owner + configured identity agents in gateway mode."""
 
     config: Config
     bus: Any
@@ -83,9 +83,6 @@ class GatewayWorkspaceRuntimeState:
     cron_services_running: bool = False
     heartbeat_services_running: bool = False
     reminder_services_running: bool = False
-
-    def workspace_agent_key(self, workspace_name: str | None) -> str:
-        return workspace_name or "__admin__"
 
     def identity_agent_key(self, identity_name: str) -> str:
         identity = self.config.identities.registry.get(identity_name)
@@ -224,8 +221,8 @@ class GatewayWorkspaceRuntimeState:
             )
             await self.attach_agent_services(key, loop, cron)
 
-    async def ensure_reminder_service(self, workspace_key: str, loop: Any) -> None:
-        if loop.reminders is None or workspace_key in self.reminder_services:
+    async def ensure_reminder_service(self, identity_key: str, loop: Any) -> None:
+        if loop.reminders is None or identity_key in self.reminder_services:
             return
         service = self.reminder_service_factory(
             loop.reminders,
@@ -233,23 +230,22 @@ class GatewayWorkspaceRuntimeState:
             interval_s=self.reminder_interval_s,
             enabled=True,
         )
-        self.reminder_services[workspace_key] = service
+        self.reminder_services[identity_key] = service
         if self.reminder_services_running:
             await service.start()
 
-    async def get_or_create_agent(self, workspace_name: str | None) -> Any:
-        key = self.workspace_agent_key(workspace_name)
+    async def get_or_create_agent(self, identity_name: str) -> Any:
+        key = self.identity_agent_key(identity_name)
         existing = self.agents.get(key)
         if existing is not None:
             return existing
 
-        assert workspace_name is not None
-        ready, reason = _workspace_ready_for_routing(self.config, workspace_name)
+        ready, reason = _identity_ready_for_routing(self.config, identity_name)
         if not ready:
-            raise ValueError(f"workspace routing blocked: {reason}")
+            raise ValueError(f"identity routing blocked: {reason}")
 
-        workspace_path = self.config.get_workspace_path(workspace_name)
-        cron = self.build_cron_service(workspace_path, workspace_name, key)
+        identity_root = self.config.get_identity_path(identity_name)
+        cron = self.build_cron_service(identity_root, identity_name, key)
         from hermitcrab.agent.loop import AgentLoop
         from hermitcrab.session.manager import SessionManager
 
@@ -258,18 +254,18 @@ class GatewayWorkspaceRuntimeState:
             **_build_agent_loop_kwargs(
                 self.config,
                 self.create_provider(),
-                workspace=workspace_path,
-                identity_name=workspace_name,
-                identity_root=workspace_path,
+                workspace=identity_root,
+                identity_name=identity_name,
+                identity_root=identity_root,
                 cron_service=cron,
-                session_manager=SessionManager(workspace_path),
+                session_manager=SessionManager(identity_root),
             ),
         )
         await self.attach_agent_services(key, loop, cron)
         return loop
 
     async def process_expired_sessions_all(self) -> int:
-        """Process session inactivity across every active workspace agent."""
+        """Process session inactivity across every active identity agent."""
         from loguru import logger
 
         expired = 0
@@ -277,7 +273,7 @@ class GatewayWorkspaceRuntimeState:
             try:
                 expired += await loop.process_expired_sessions()
             except Exception as e:
-                logger.error("Failed processing expired sessions for workspace agent: {}", e)
+                logger.error("Failed processing expired sessions for identity agent: {}", e)
         return expired
 
     async def start_reminder_services(self) -> None:
@@ -319,51 +315,53 @@ class GatewayWorkspaceRuntimeState:
             loop.stop()
 
 
-def _multi_workspace_routing_active(config: Config) -> bool:
-    """Enable multi-workspace routing only when registry and bindings are both configured."""
-    return bool(config.workspaces.registry) and bool(config.channels.nostr.workspace_bindings)
+def _identity_routing_active(config: Config) -> bool:
+    """Return whether explicit Nostr identity routing bindings are configured."""
+    return bool(config.channels.nostr.identity_bindings)
 
 
-def _resolve_gateway_workspace_route(
+def _resolve_gateway_identity_route(
     msg: Any,
     *,
-    multi_workspace_active: bool,
-) -> GatewayWorkspaceRouteDecision:
+    owner_identity_name: str,
+) -> GatewayIdentityRouteDecision:
     """Resolve gateway routing action for an inbound message."""
     if msg.channel != "nostr":
-        return GatewayWorkspaceRouteDecision("admin", "non_nostr_channel")
+        identity_name = str(getattr(msg, "metadata", {}).get("identity_name") or owner_identity_name)
+        return GatewayIdentityRouteDecision("identity", "non_nostr_owner_default", identity_name)
 
     metadata = msg.metadata or {}
-    target = metadata.get("workspace_target")
+    target = metadata.get("identity_target")
     if target == "denied":
-        return GatewayWorkspaceRouteDecision("denied", "channel_metadata_denied")
-    if target != "workspace":
-        return GatewayWorkspaceRouteDecision("admin", "admin_default")
-    if not multi_workspace_active:
-        return GatewayWorkspaceRouteDecision("denied", "workspace_mode_disabled")
+        return GatewayIdentityRouteDecision("denied", "channel_metadata_denied")
+    if target != "identity":
+        return GatewayIdentityRouteDecision("denied", "missing_identity_target")
 
-    workspace_name = metadata.get("workspace_name")
-    if isinstance(workspace_name, str) and workspace_name:
-        return GatewayWorkspaceRouteDecision("workspace", "workspace_binding", workspace_name)
-    return GatewayWorkspaceRouteDecision("denied", "missing_workspace_name")
+    identity_name = metadata.get("identity_name")
+    if isinstance(identity_name, str) and identity_name:
+        return GatewayIdentityRouteDecision("identity", "identity_binding", identity_name)
+    return GatewayIdentityRouteDecision("denied", "missing_identity_name")
 
 
-def _workspace_ready_for_routing(config: Config, workspace_name: str) -> tuple[bool, str]:
-    """Return whether a configured workspace is safe/ready for gateway routing."""
-    if workspace_name not in config.workspaces.registry:
-        return False, "workspace_not_configured"
-    workspace_path = config.get_workspace_path(workspace_name)
-    if not workspace_path.exists():
-        return False, "workspace_missing"
-    if not (workspace_path / "AGENTS.md").exists():
-        return False, "workspace_not_bootstrapped"
-    return True, "workspace_ready"
+def _identity_ready_for_routing(config: Config, identity_name: str) -> tuple[bool, str]:
+    """Return whether a configured identity is safe/ready for gateway routing."""
+    identity = config.identities.registry.get(identity_name)
+    if identity is None:
+        return False, "identity_not_configured"
+    if not identity.active:
+        return False, "identity_inactive"
+    identity_path = config.get_identity_path(identity_name)
+    if not identity_path.exists():
+        return False, "identity_missing"
+    if not (identity_path / "IDENTITY.md").exists():
+        return False, "identity_not_bootstrapped"
+    return True, "identity_ready"
 
 
 def _print_gateway_runtime_summary(
     *,
     channels: Any,
-    multi_workspace_active: bool,
+    identity_routing_active: bool,
     cron_statuses: dict[str, dict[str, Any]],
     heartbeat_interval_s: int,
     reminders_interval_s: int,
@@ -373,11 +371,11 @@ def _print_gateway_runtime_summary(
         console.print(f"[green]✓[/green] Channels enabled: {', '.join(channels.enabled_channels)}")
     else:
         console.print("[yellow]Warning: No channels enabled[/yellow]")
-    if multi_workspace_active:
-        console.print("[green]✓[/green] Multi-workspace routing: active (Nostr bindings)")
-        console.print("[dim]Unresolved/invalid workspace routes are denied (no admin fallback)[/dim]")
+    if identity_routing_active:
+        console.print("[green]✓[/green] Identity routing: active (Nostr bindings)")
+        console.print("[dim]Unresolved/invalid identity routes are denied[/dim]")
     else:
-        console.print("[dim]Multi-workspace routing: inactive[/dim]")
+        console.print("[dim]Identity routing: owner fallback only[/dim]")
 
     cron_jobs = sum(status.get("jobs", 0) for status in cron_statuses.values())
     if cron_jobs > 0:
@@ -391,55 +389,54 @@ def _print_gateway_runtime_summary(
 async def _run_gateway_inbound_router(
     *,
     bus: Any,
-    multi_workspace_active: bool,
-    admin_agent: Any,
-    get_or_create_agent: Callable[[str | None], Any],
-    workspace_agent_key: Callable[[str | None], str],
+    owner_agent: Any,
+    get_or_create_agent: Callable[[str], Any],
+    identity_agent_key: Callable[[str], str],
 ) -> None:
-    """Route inbound gateway messages to admin or workspace-specific agent loops."""
+    """Route inbound gateway messages to identity-specific agent loops."""
     from loguru import logger
 
     while True:
         try:
             msg = await asyncio.wait_for(bus.consume_inbound(), timeout=1.0)
-            route = _resolve_gateway_workspace_route(
+            route = _resolve_gateway_identity_route(
                 msg,
-                multi_workspace_active=multi_workspace_active,
+                owner_identity_name=owner_agent.identity_name,
             )
             logger.debug(
-                "Gateway inbound route: channel={} chat_id={} route_target={} route_reason={} workspace_agent={}",
+                "Gateway inbound route: channel={} chat_id={} route_target={} route_reason={} identity_agent={}",
                 msg.channel,
                 msg.chat_id,
                 route.target,
                 route.reason,
-                workspace_agent_key(route.workspace_name),
+                identity_agent_key(route.identity_name or owner_agent.identity_name),
             )
             if route.target == "denied":
-                admin_agent.audit_event(
-                    "gateway.workspace_route_denied",
+                owner_agent.audit_event(
+                    "gateway.identity_route_denied",
                     session_key=msg.session_key,
                     msg=msg,
-                    workspace_agent="__admin__",
+                    identity_agent=identity_agent_key(owner_agent.identity_name),
                     route_reason=route.reason,
                 )
                 continue
             try:
-                agent_for_msg = await get_or_create_agent(route.workspace_name)
+                agent_for_msg = await get_or_create_agent(route.identity_name or owner_agent.identity_name)
             except Exception as e:
-                logger.warning("Workspace route failed; denying message: {}", e)
-                admin_agent.audit_event(
-                    "gateway.workspace_route_denied",
+                logger.warning("Identity route failed; denying message: {}", e)
+                owner_agent.audit_event(
+                    "gateway.identity_route_denied",
                     session_key=msg.session_key,
                     msg=msg,
-                    workspace_agent="__admin__",
-                    route_reason=f"workspace_unavailable:{route.workspace_name}",
+                    identity_agent=identity_agent_key(owner_agent.identity_name),
+                    route_reason=f"identity_unavailable:{route.identity_name}",
                 )
                 continue
             agent_for_msg.audit_event(
-                "gateway.workspace_route",
+                "gateway.identity_route",
                 session_key=msg.session_key,
                 msg=msg,
-                workspace_agent=workspace_agent_key(route.workspace_name),
+                identity_agent=identity_agent_key(agent_for_msg.identity_name),
                 route_reason=route.reason,
             )
             response = await agent_for_msg.handle_inbound(msg)
@@ -455,16 +452,16 @@ async def _run_gateway_inbound_router(
 async def _shutdown_gateway_runtime(
     *,
     timeout_monitor: Any,
-    workspace_state: GatewayWorkspaceRuntimeState,
+    identity_state: GatewayIdentityRuntimeState,
     channels: Any,
 ) -> None:
     """Shutdown gateway runtime components in a stable order."""
     timeout_monitor.stop()
-    workspace_state.stop_heartbeat_services()
-    workspace_state.stop_reminder_services()
-    workspace_state.stop_cron_services()
-    await workspace_state.close_agents()
-    workspace_state.stop_agents()
+    identity_state.stop_heartbeat_services()
+    identity_state.stop_reminder_services()
+    identity_state.stop_cron_services()
+    await identity_state.close_agents()
+    identity_state.stop_agents()
     await channels.stop_all()
 
 
@@ -1339,9 +1336,9 @@ def gateway(
     bus = MessageBus()
     provider = _make_provider(config)
     session_manager = SessionManager(config.owner_identity_root_path)
-    multi_workspace_active = _multi_workspace_routing_active(config)
+    identity_routing_active = _identity_routing_active(config)
 
-    admin_key = "__admin__"
+    owner_key = f"identity:{config.identities.registry[config.owner_identity_name].nostr_public_key}"
     admin_cron = _build_cron_service(
         identity_root=config.owner_identity_root_path,
         identity_name=config.owner_identity_name,
@@ -1376,7 +1373,7 @@ def gateway(
         )
 
     hb_cfg = config.gateway.heartbeat
-    workspace_state = GatewayWorkspaceRuntimeState(
+    identity_state = GatewayIdentityRuntimeState(
         config=config,
         bus=bus,
         channels=channels,
@@ -1393,24 +1390,24 @@ def gateway(
         heartbeat_services={},
         reminder_services={},
     )
-    admin_cron.conflict_finder = lambda schedule, now_ms: workspace_state.find_cron_conflicts(
+    admin_cron.conflict_finder = lambda schedule, now_ms: identity_state.find_cron_conflicts(
         schedule,
         now_ms=now_ms,
-        exclude_key=admin_key,
+        exclude_key=owner_key,
     )
-    asyncio.run(workspace_state.attach_agent_services(admin_key, agent, admin_cron))
-    asyncio.run(workspace_state.attach_configured_identity_agents())
+    asyncio.run(identity_state.attach_agent_services(owner_key, agent, admin_cron))
+    asyncio.run(identity_state.attach_configured_identity_agents())
 
     timeout_monitor = SessionTimeoutService(
-        workspace_state.process_expired_sessions_all,
+        identity_state.process_expired_sessions_all,
         interval_s=min(60, max(5, config.agents.defaults.inactivity_timeout_s // 6)),
         enabled=True,
     )
 
-    cron_statuses = {key: service.status() for key, service in workspace_state.cron_services.items()}
+    cron_statuses = {key: service.status() for key, service in identity_state.cron_services.items()}
     _print_gateway_runtime_summary(
         channels=channels,
-        multi_workspace_active=multi_workspace_active,
+        identity_routing_active=identity_routing_active,
         cron_statuses=cron_statuses,
         heartbeat_interval_s=hb_cfg.interval_s,
         reminders_interval_s=config.gateway.reminders.interval_s,
@@ -1418,17 +1415,16 @@ def gateway(
 
     async def run():
         try:
-            await workspace_state.start_cron_services()
-            await workspace_state.start_heartbeat_services()
+            await identity_state.start_cron_services()
+            await identity_state.start_heartbeat_services()
             await timeout_monitor.start()
-            await workspace_state.start_reminder_services()
+            await identity_state.start_reminder_services()
             await asyncio.gather(
                 _run_gateway_inbound_router(
                     bus=bus,
-                    multi_workspace_active=multi_workspace_active,
-                    admin_agent=agent,
-                    get_or_create_agent=workspace_state.get_or_create_agent,
-                    workspace_agent_key=workspace_state.workspace_agent_key,
+                    owner_agent=agent,
+                    get_or_create_agent=identity_state.get_or_create_agent,
+                    identity_agent_key=identity_state.identity_agent_key,
                 ),
                 channels.start_all(),
             )
@@ -1437,7 +1433,7 @@ def gateway(
         finally:
             await _shutdown_gateway_runtime(
                 timeout_monitor=timeout_monitor,
-                workspace_state=workspace_state,
+                identity_state=identity_state,
                 channels=channels,
             )
 
@@ -2826,19 +2822,19 @@ def workspaces_init(
         bootstrap_workspace(workspace_path, announce=console.print)
 
 
-@workspaces_app.command("resolve-nostr")
-def workspaces_resolve_nostr(
+@user_app.command("resolve-nostr")
+def user_resolve_nostr(
     pubkey: str = typer.Argument(..., help="Inbound Nostr sender pubkey (64-char hex)"),
     as_json: bool = typer.Option(False, "--json", help="Print resolution as JSON"),
 ):
-    """Resolve inbound Nostr sender to admin workspace, named workspace, or denial."""
+    """Resolve inbound Nostr sender to an identity or denial."""
     config = _load_runtime_config()
-    resolution = config.resolve_nostr_sender_workspace(pubkey)
+    resolution = config.resolve_nostr_sender_identity(pubkey)
 
     payload = {
         "target": resolution.target,
-        "workspace_name": resolution.workspace_name,
-        "workspace_path": (str(resolution.workspace_path) if resolution.workspace_path else None),
+        "identity_name": resolution.identity_name,
+        "identity_path": (str(resolution.identity_path) if resolution.identity_path else None),
         "normalized_pubkey": resolution.normalized_pubkey,
         "reason": resolution.reason,
     }
@@ -2851,10 +2847,10 @@ def workspaces_resolve_nostr(
     console.print(f"Reason: {resolution.reason or '-'}")
     if resolution.normalized_pubkey:
         console.print(f"Pubkey: {resolution.normalized_pubkey}")
-    if resolution.workspace_name:
-        console.print(f"Workspace: {resolution.workspace_name}")
-    if resolution.workspace_path:
-        console.print(f"Path: {resolution.workspace_path}")
+    if resolution.identity_name:
+        console.print(f"Identity: {resolution.identity_name}")
+    if resolution.identity_path:
+        console.print(f"Path: {resolution.identity_path}")
 
 
 # ============================================================================
@@ -2901,17 +2897,17 @@ def status(
             "Named workspaces: "
             f"{report.bootstrapped_named_workspaces}/{report.named_workspaces} bootstrapped"
         )
-    if report.nostr_workspace_bindings:
-        console.print(f"Nostr workspace bindings: {report.nostr_workspace_bindings}")
+    if report.nostr_identity_bindings:
+        console.print(f"Nostr identity bindings: {report.nostr_identity_bindings}")
     console.print(
-        "Workspace routing: "
+        "Identity routing: "
         + (
-            "[green]active[/green] (Nostr bound senders can route to named workspaces)"
-            if report.multi_workspace_routing_active
-            else "[dim]inactive[/dim] (admin workspace only)"
+            "[green]active[/green] (Nostr bound senders route to identities)"
+            if report.identity_routing_active
+            else "[dim]owner fallback only[/dim]"
         )
     )
-    console.print("[dim]Cron/heartbeat remain admin-owned; unresolved workspace routes are denied[/dim]")
+    console.print("[dim]Cron/heartbeat/reminders run per active identity; unresolved routes are denied[/dim]")
 
     console.print(f"Selected model: {report.selected_model}")
     if report.resolved_model and report.resolved_model != report.selected_model:

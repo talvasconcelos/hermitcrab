@@ -9,6 +9,7 @@ from typer.testing import CliRunner
 
 from hermitcrab.agent.audit import AuditTrail
 from hermitcrab.agent.loop import AgentLoop
+from hermitcrab.bus.events import InboundMessage
 from hermitcrab.bus.queue import MessageBus
 from hermitcrab.cli.commands import app, bootstrap_beta4_layout
 from hermitcrab.cli.diagnostics import build_status_report
@@ -63,6 +64,31 @@ def test_audit_identity_metadata_uses_runtime_identity(tmp_path) -> None:
 
     entry = json.loads(loop.audit.path.read_text(encoding="utf-8").splitlines()[0])
     assert entry["identity_name"] == "tal"
+
+
+def test_audit_routed_identity_metadata_does_not_override_runtime_identity(tmp_path) -> None:
+    config = Config.model_validate({"root": str(tmp_path), "identities": {"ownerIdentity": "tal"}})
+    loop = AgentLoop(
+        bus=MessageBus(),
+        provider=_provider(),
+        workspace=config.owner_identity_root_path,
+        identity_name="tal",
+        identity_root=config.owner_identity_root_path,
+        system_root=config.system_root_path,
+    )
+    msg = InboundMessage(
+        channel="nostr",
+        sender_id="sender",
+        chat_id="sender",
+        content="hello",
+        metadata={"identity_name": "alice", "identity_target": "identity"},
+    )
+
+    loop.audit_event("gateway.identity_route", msg=msg)
+
+    entry = json.loads(loop.audit.path.read_text(encoding="utf-8").splitlines()[0])
+    assert entry["identity_name"] == "tal"
+    assert entry["routed_identity_name"] == "alice"
 
 
 def test_system_audit_rotation_uses_system_archive(tmp_path) -> None:

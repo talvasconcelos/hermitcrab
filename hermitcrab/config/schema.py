@@ -599,12 +599,12 @@ class ResolvedModelConfig:
 
 
 @dataclass(frozen=True)
-class NostrWorkspaceResolution:
-    """Resolved workspace target for one inbound Nostr sender."""
+class NostrIdentityResolution:
+    """Resolved identity target for one inbound Nostr sender."""
 
-    target: Literal["admin", "workspace", "denied"]
-    workspace_name: str | None = None
-    workspace_path: Path | None = None
+    target: Literal["identity", "denied"]
+    identity_name: str | None = None
+    identity_path: Path | None = None
     normalized_pubkey: str | None = None
     reason: str | None = None
 
@@ -633,7 +633,7 @@ class Config(BaseSettings):
         return self
 
     @model_validator(mode="after")
-    def validate_multi_workspace_nostr_bindings(self) -> "Config":
+    def validate_nostr_routing_bindings(self) -> "Config":
         """Validate additive Nostr routing binding rules."""
         workspace_bindings = self.channels.nostr.workspace_bindings
         identity_bindings = self.channels.nostr.identity_bindings
@@ -809,33 +809,56 @@ class Config(BaseSettings):
             normalized.add(normalize_nostr_pubkey(pubkey))
         return normalized
 
-    def resolve_nostr_sender_workspace(self, sender_pubkey: str) -> NostrWorkspaceResolution:
-        """Resolve inbound Nostr sender to named workspace, admin workspace, or denial."""
+    def resolve_nostr_sender_identity(self, sender_pubkey: str) -> NostrIdentityResolution:
+        """Resolve inbound Nostr sender to a beta4 identity or denial."""
         try:
             normalized_pubkey = normalize_nostr_pubkey(sender_pubkey)
         except ValueError:
-            return NostrWorkspaceResolution(target="denied", reason="invalid_pubkey")
+            return NostrIdentityResolution(target="denied", reason="invalid_pubkey")
 
-        for workspace_name, pubkeys in self.normalized_nostr_workspace_bindings().items():
+        for identity_name, pubkeys in self.normalized_nostr_identity_bindings().items():
             if normalized_pubkey in pubkeys:
-                return NostrWorkspaceResolution(
-                    target="workspace",
-                    workspace_name=workspace_name,
-                    workspace_path=self.get_workspace_path(workspace_name),
+                identity = self.identities.registry.get(identity_name)
+                if identity is None:
+                    return NostrIdentityResolution(
+                        target="denied",
+                        normalized_pubkey=normalized_pubkey,
+                        reason="identity_not_configured",
+                    )
+                if not identity.active:
+                    return NostrIdentityResolution(
+                        target="denied",
+                        identity_name=identity_name,
+                        normalized_pubkey=normalized_pubkey,
+                        reason="identity_inactive",
+                    )
+                return NostrIdentityResolution(
+                    target="identity",
+                    identity_name=identity_name,
+                    identity_path=self.get_identity_path(identity_name),
                     normalized_pubkey=normalized_pubkey,
-                    reason="workspace_binding",
+                    reason="identity_binding",
                 )
 
         allowed_pubkeys = self.normalized_nostr_allowed_pubkeys()
         if "*" in allowed_pubkeys or normalized_pubkey in allowed_pubkeys:
-            return NostrWorkspaceResolution(
-                target="admin",
-                workspace_path=self.admin_workspace_path,
+            owner_identity = self.identities.registry[self.owner_identity_name]
+            if not owner_identity.active:
+                return NostrIdentityResolution(
+                    target="denied",
+                    identity_name=self.owner_identity_name,
+                    normalized_pubkey=normalized_pubkey,
+                    reason="owner_identity_inactive",
+                )
+            return NostrIdentityResolution(
+                target="identity",
+                identity_name=self.owner_identity_name,
+                identity_path=self.owner_identity_root_path,
                 normalized_pubkey=normalized_pubkey,
-                reason="allowlist_admin_fallback",
+                reason="allowlist_owner_fallback",
             )
 
-        return NostrWorkspaceResolution(
+        return NostrIdentityResolution(
             target="denied",
             normalized_pubkey=normalized_pubkey,
             reason="not_allowed",
