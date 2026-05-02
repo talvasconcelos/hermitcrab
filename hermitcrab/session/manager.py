@@ -2,7 +2,6 @@
 
 import json
 import re
-import shutil
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -33,7 +32,7 @@ class Session:
 
     Important: Messages are append-only for LLM cache efficiency.
     Sessions are ephemeral conversation history, not long-term memory.
-    Long-term memory is stored separately in workspace/memory/ categories.
+    Long-term memory is stored separately in identity-root memory categories.
     """
 
     key: str  # channel:chat_id
@@ -156,18 +155,12 @@ class SessionManager:
         self.workspace = workspace
         self.sessions_dir = ensure_dir(self.workspace / "sessions")
         self.archive_dir = ensure_dir(self.sessions_dir / "archive")
-        self.legacy_sessions_dir = Path.home() / ".hermitcrab" / "sessions"
         self._cache: dict[str, Session] = {}
 
     def _get_session_path(self, key: str) -> Path:
         """Get the file path for a session."""
         safe_key = safe_filename(key.replace(":", "_"))
         return self.sessions_dir / f"{safe_key}.jsonl"
-
-    def _get_legacy_session_path(self, key: str) -> Path:
-        """Legacy global session path (~/.hermitcrab/sessions/)."""
-        safe_key = safe_filename(key.replace(":", "_"))
-        return self.legacy_sessions_dir / f"{safe_key}.jsonl"
 
     def _archived_session_paths(self, key: str) -> list[Path]:
         """Return archived session files for a key, newest first."""
@@ -206,15 +199,6 @@ class SessionManager:
     def _load(self, key: str) -> Session | None:
         """Load a session from disk."""
         path = self._get_session_path(key)
-        if not path.exists():
-            legacy_path = self._get_legacy_session_path(key)
-            if legacy_path.exists():
-                try:
-                    shutil.move(str(legacy_path), str(path))
-                    logger.info("Migrated session {} from legacy path", key)
-                except Exception:
-                    logger.exception("Failed to migrate session {}", key)
-
         if not path.exists():
             return None
 

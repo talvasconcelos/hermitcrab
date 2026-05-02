@@ -1,4 +1,4 @@
-"""Focused regressions for beta4 system audit logs."""
+"""Focused regressions for system audit logs."""
 
 from __future__ import annotations
 
@@ -11,7 +11,7 @@ from hermitcrab.agent.audit import AuditTrail
 from hermitcrab.agent.loop import AgentLoop
 from hermitcrab.bus.events import InboundMessage
 from hermitcrab.bus.queue import MessageBus
-from hermitcrab.cli.commands import app, bootstrap_beta4_layout
+from hermitcrab.cli.commands import app, bootstrap_standard_layout
 from hermitcrab.cli.diagnostics import build_status_report
 from hermitcrab.config.loader import save_config
 from hermitcrab.config.schema import Config
@@ -27,7 +27,7 @@ def _provider() -> MagicMock:
 
 def test_agent_loop_writes_audit_to_system_root_with_identity_metadata(tmp_path) -> None:
     config = Config.model_validate({"root": str(tmp_path), "identities": {"ownerIdentity": "tal"}})
-    bootstrap_beta4_layout(config)
+    bootstrap_standard_layout(config)
     loop = AgentLoop(
         bus=MessageBus(),
         provider=_provider(),
@@ -115,7 +115,7 @@ def test_status_report_reads_system_audit_log(tmp_path) -> None:
         }
     )
     save_config(config, config_path)
-    bootstrap_beta4_layout(config)
+    bootstrap_standard_layout(config)
     (config.system_root_path / "logs" / "audit.jsonl").write_text(
         '{"event":"model.switch","identity_name":"owner","ts":"2026-04-29T12:00:00+00:00"}\n',
         encoding="utf-8",
@@ -132,7 +132,7 @@ def test_status_report_reads_system_audit_log(tmp_path) -> None:
 
 def test_audit_command_reads_system_audit_log(monkeypatch, tmp_path) -> None:
     config = Config.model_validate({"root": str(tmp_path)})
-    bootstrap_beta4_layout(config)
+    bootstrap_standard_layout(config)
     (config.system_root_path / "logs" / "audit.jsonl").write_text(
         '{"event":"tool.policy_denied","identity_name":"owner","ts":"2026-04-29T12:00:00+00:00"}\n',
         encoding="utf-8",

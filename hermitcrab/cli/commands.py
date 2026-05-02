@@ -906,15 +906,15 @@ def onboard():
         save_config(config)
         console.print(f"[green]✓[/green] Created config at {config_path}")
 
-    bootstrap_beta4_layout(config, announce=console.print)
+    bootstrap_standard_layout(config, announce=console.print)
 
     console.print(f"\n{__logo__} hermitcrab is ready!")
     for line in _build_onboard_next_steps():
         console.print(line)
 
 
-def bootstrap_beta4_layout(config: Config, announce: Callable[[str], None] | None = None) -> None:
-    """Create or refresh the beta4 system and owner identity roots."""
+def bootstrap_standard_layout(config: Config, announce: Callable[[str], None] | None = None) -> None:
+    """Create or refresh the system and owner identity roots."""
     system_root = config.system_root_path
     owner_root = config.owner_identity_root_path
 
@@ -931,13 +931,6 @@ def bootstrap_beta4_layout(config: Config, announce: Callable[[str], None] | Non
         announce=announce,
     )
     _create_identity_directories(owner_root, announce=announce)
-
-
-def bootstrap_workspace(workspace: Path, announce: Callable[[str], None] | None = None) -> None:
-    """Create or refresh one workspace root with default structure."""
-    _ensure_root(workspace, "workspace", announce=announce)
-
-    _create_workspace_templates(workspace, announce=announce)
 
 
 def _ensure_root(
@@ -969,85 +962,11 @@ def _create_template_files(
                 announce(f"  [dim]Created {dest.name}[/dim]")
 
 
-def _create_workspace_templates(
-    workspace: Path,
-    announce: Callable[[str], None] | None = None,
-) -> None:
-    """Create default workspace template files from bundled templates."""
-    from importlib.resources import files as pkg_files
-
-    templates_dir = pkg_files("hermitcrab") / "templates"
-
-    for item in templates_dir.iterdir():
-        if not item.name.endswith(".md"):
-            continue
-        dest = workspace / item.name
-        if not dest.exists():
-            _atomic_write_text(dest, item.read_text(encoding="utf-8"))
-            if announce is not None:
-                announce(f"  [dim]Created {item.name}[/dim]")
-
-    # Create category-based memory directories
-    memory_dir = workspace / "memory"
-    memory_dir.mkdir(exist_ok=True)
-
-    for category in ["facts", "decisions", "goals", "tasks", "reflections"]:
-        category_dir = memory_dir / category
-        category_dir.mkdir(exist_ok=True)
-        if announce is not None:
-            announce(f"  [dim]Created memory/{category}/[/dim]")
-
-    # Create knowledge base directories (reference library, not memory)
-    knowledge_dir = workspace / "knowledge"
-    knowledge_dir.mkdir(exist_ok=True)
-
-    for category in ["articles", "books", "docs", "notes"]:
-        category_dir = knowledge_dir / category
-        category_dir.mkdir(exist_ok=True)
-        if announce is not None:
-            announce(f"  [dim]Created knowledge/{category}/[/dim]")
-
-    (workspace / "lists").mkdir(exist_ok=True)
-    if announce is not None:
-        announce("  [dim]Created lists/[/dim]")
-
-    people_dir = workspace / "people"
-    people_dir.mkdir(exist_ok=True)
-    (people_dir / "profiles").mkdir(exist_ok=True)
-    (people_dir / "interactions").mkdir(exist_ok=True)
-    if announce is not None:
-        announce("  [dim]Created people/profiles/ and people/interactions/[/dim]")
-
-    (workspace / "reminders").mkdir(exist_ok=True)
-    if announce is not None:
-        announce("  [dim]Created reminders/[/dim]")
-
-    scratchpads_dir = workspace / "scratchpads"
-    scratchpads_dir.mkdir(exist_ok=True)
-    (scratchpads_dir / "archive").mkdir(exist_ok=True)
-    if announce is not None:
-        announce("  [dim]Created scratchpads/ and scratchpads/archive/[/dim]")
-
-    (workspace / "skills").mkdir(exist_ok=True)
-
-    onboarding_flag = workspace / ".onboarding_mode"
-    if not onboarding_flag.exists():
-        _atomic_write_text(
-            onboarding_flag,
-            (
-                "Onboarding mode is enabled for this workspace.\n"
-                "Delete this file to disable onboarding prompt injection.\n"
-            ),
-        )
-        if announce is not None:
-            announce("  [dim]Enabled onboarding mode (.onboarding_mode)[/dim]")
-
-
 def _create_identity_directories(
     identity_root: Path,
     announce: Callable[[str], None] | None = None,
 ) -> None:
-    """Create beta4 per-identity runtime directories."""
+    """Create per-identity runtime directories."""
     for dirname in ["cron", "journal", "projects", "reports", "sessions", "skills"]:
         (identity_root / dirname).mkdir(exist_ok=True)
         if announce is not None:
@@ -1834,21 +1753,8 @@ app.add_typer(reminders_app, name="reminders")
 people_app = typer.Typer(help="Manage people profiles")
 app.add_typer(people_app, name="people")
 
-workspaces_app = typer.Typer(help="Manage named personal workspaces")
-app.add_typer(workspaces_app, name="workspaces")
-
 user_app = typer.Typer(help="Manage identity-scoped users")
 app.add_typer(user_app, name="user")
-
-
-def _configured_workspace_rows(config: Config) -> list[tuple[str, Path, str, bool]]:
-    """Return configured named workspaces for CLI display."""
-    rows: list[tuple[str, Path, str, bool]] = []
-    for name, workspace in config.workspaces.registry.items():
-        path = config.get_workspace_path(name)
-        label = workspace.label or "-"
-        rows.append((name, path, label, workspace.channel_only))
-    return rows
 
 
 def _save_runtime_config(config: Config) -> None:
@@ -1882,10 +1788,7 @@ def _remove_identity_routes(config: Config, identity_name: str) -> None:
 
     remaining_routed = {
         normalize_nostr_pubkey(pubkey)
-        for bindings in (
-            *config.channels.nostr.identity_bindings.values(),
-            *config.channels.nostr.workspace_bindings.values(),
-        )
+        for bindings in config.channels.nostr.identity_bindings.values()
         for pubkey in bindings
     }
     config.channels.nostr.allowed_pubkeys = [
@@ -1918,15 +1821,11 @@ def _build_cron_service(
 
 
 def _build_reminder_store() -> Any:
-    """Build the reminder store in the configured workspace."""
+    """Build the reminder store in the owner identity root."""
     from hermitcrab.agent.reminders import ReminderStore
-    from hermitcrab.config.loader import get_data_dir
 
     config = _load_runtime_config()
-    return ReminderStore(
-        config.owner_identity_root_path,
-        legacy_cron_store_path=get_data_dir() / "cron" / "jobs.json",
-    )
+    return ReminderStore(config.owner_identity_root_path)
 
 
 def _build_people_store() -> Any:
@@ -2736,92 +2635,6 @@ def user_status(
     console.print(f"Cron jobs: {payload['cron']['enabled_jobs']} enabled / {payload['cron']['jobs']} total")
 
 
-@workspaces_app.command("list")
-def workspaces_list(
-    as_json: bool = typer.Option(False, "--json", help="Print named workspaces as JSON"),
-):
-    """List configured named workspaces."""
-    config = _load_runtime_config()
-    rows = _configured_workspace_rows(config)
-
-    if as_json:
-        typer.echo(
-            json.dumps(
-                [
-                    {
-                        "name": name,
-                        "path": str(path),
-                        "label": label if label != "-" else None,
-                        "channel_only": channel_only,
-                        "exists": path.exists(),
-                        "bootstrapped": (path / "AGENTS.md").exists(),
-                    }
-                    for name, path, label, channel_only in rows
-                ],
-                indent=2,
-                ensure_ascii=False,
-            )
-            + "\n",
-            nl=False,
-        )
-        return
-
-    if not rows:
-        console.print("No named workspaces configured.")
-        return
-
-    table = Table(title="Named Workspaces")
-    table.add_column("Name", style="cyan")
-    table.add_column("Path")
-    table.add_column("Label")
-    table.add_column("Mode")
-    table.add_column("State")
-
-    for name, path, label, channel_only in rows:
-        mode = "channel-only" if channel_only else "interactive"
-        if not path.exists():
-            state = "[red]missing[/red]"
-        elif (path / "AGENTS.md").exists():
-            state = "[green]ready[/green]"
-        else:
-            state = "[yellow]needs bootstrap[/yellow]"
-        table.add_row(name, str(path), label, mode, state)
-
-    console.print(table)
-
-
-@workspaces_app.command("init")
-def workspaces_init(
-    name: str | None = typer.Argument(None, help="Configured workspace name"),
-    all: bool = typer.Option(False, "--all", help="Bootstrap all configured named workspaces"),
-):
-    """Bootstrap configured named workspaces without changing admin workspace behavior."""
-    if all and name is not None:
-        console.print("[red]Error: choose a workspace name or --all, not both[/red]")
-        raise typer.Exit(1)
-    if not all and name is None:
-        console.print("[red]Error: provide a configured workspace name or use --all[/red]")
-        raise typer.Exit(1)
-
-    config = _load_runtime_config()
-    rows = _configured_workspace_rows(config)
-    names = [workspace_name for workspace_name, _, _, _ in rows]
-    if not rows:
-        console.print("[red]Error: no named workspaces configured[/red]")
-        raise typer.Exit(1)
-
-    target_names = names if all else [name]
-    missing = [workspace_name for workspace_name in target_names if workspace_name not in names]
-    if missing:
-        console.print(f"[red]Error: unknown workspace: {missing[0]}[/red]")
-        raise typer.Exit(1)
-
-    for workspace_name in target_names:
-        workspace_path = config.get_workspace_path(workspace_name)
-        console.print(f"[bold]Bootstrapping {workspace_name}[/bold]")
-        bootstrap_workspace(workspace_path, announce=console.print)
-
-
 @user_app.command("resolve-nostr")
 def user_resolve_nostr(
     pubkey: str = typer.Argument(..., help="Inbound Nostr sender pubkey (64-char hex)"),
@@ -2892,11 +2705,6 @@ def status(
         "Bootstrap: "
         + ("[green]ready[/green]" if report.bootstrap_ready else "[yellow]incomplete[/yellow]")
     )
-    if report.named_workspaces:
-        console.print(
-            "Named workspaces: "
-            f"{report.bootstrapped_named_workspaces}/{report.named_workspaces} bootstrapped"
-        )
     if report.nostr_identity_bindings:
         console.print(f"Nostr identity bindings: {report.nostr_identity_bindings}")
     console.print(

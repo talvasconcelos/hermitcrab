@@ -149,7 +149,7 @@ class KnowledgeStore:
     Knowledge base store with search capabilities.
 
     The knowledge base is organized as:
-    workspace/knowledge/
+    identity-root knowledge/
     ├── articles/
     ├── books/
     ├── docs/

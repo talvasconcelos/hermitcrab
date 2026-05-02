@@ -1,4 +1,4 @@
-"""Focused regressions for beta4 identity config paths."""
+"""Focused regressions for identity config paths."""
 
 from __future__ import annotations
 
@@ -7,7 +7,7 @@ import pytest
 from hermitcrab.config.schema import Config, nostr_pubkey_from_private_key
 
 
-def test_default_identity_paths_use_beta4_layout() -> None:
+def test_default_identity_paths_use_standard_layout() -> None:
     config = Config()
 
     assert config.hermitcrab_root_path.as_posix().endswith("/.hermitcrab")
@@ -32,20 +32,20 @@ def test_identity_paths_resolve_under_configured_root(tmp_path) -> None:
     assert config.workspace_path == tmp_path / "identities" / "owner"
 
 
-def test_explicit_legacy_workspace_path_is_preserved(tmp_path) -> None:
-    legacy_workspace = tmp_path / "workspace"
+def test_explicit_workspace_default_does_not_override_identity_root(tmp_path) -> None:
+    old_workspace = tmp_path / "workspace"
     config = Config.model_validate(
         {
             "root": str(tmp_path),
             "agents": {
                 "defaults": {
-                    "workspace": str(legacy_workspace),
+                    "workspace": str(old_workspace),
                 }
             },
         }
     )
 
-    assert config.workspace_path == legacy_workspace
+    assert config.workspace_path == tmp_path / "identities" / "owner"
 
 
 def test_identity_paths_accept_configured_relative_and_absolute_roots(tmp_path) -> None:
@@ -150,7 +150,7 @@ def test_identity_registry_rejects_duplicate_pubkeys() -> None:
         )
 
 
-def test_nostr_identity_bindings_accept_known_identity_without_legacy_allowlist() -> None:
+def test_nostr_identity_bindings_accept_known_identity_without_allowlist() -> None:
     from pynostr.key import PrivateKey
 
     sender = PrivateKey().public_key.hex()
@@ -173,31 +173,21 @@ def test_nostr_identity_bindings_reject_unknown_identity() -> None:
         Config.model_validate({"channels": {"nostr": {"identityBindings": {"alice": [sender]}}}})
 
 
-def test_nostr_routing_rejects_pubkey_bound_to_identity_and_workspace(tmp_path) -> None:
+def test_nostr_workspace_bindings_are_rejected(tmp_path) -> None:
     from pynostr.key import PrivateKey
 
     sender = PrivateKey().public_key.hex()
 
-    with pytest.raises(ValueError, match="routing pubkeys must be unique"):
+    with pytest.raises(ValueError, match="workspace bindings were removed"):
         Config.model_validate(
             {
                 "root": str(tmp_path),
-                "workspaces": {"registry": {"side": {"path": str(tmp_path / "side")}}},
                 "identities": {"registry": {"alice": {}}},
                 "channels": {
                     "nostr": {
-                        "allowedPubkeys": [sender],
                         "identityBindings": {"alice": [sender]},
                         "workspaceBindings": {"side": [sender]},
                     }
                 },
             }
         )
-
-
-def test_legacy_workspace_layout_detection(tmp_path) -> None:
-    config = Config.model_validate({"root": str(tmp_path)})
-    assert config.detects_legacy_workspace_layout() is False
-
-    (tmp_path / "workspace").mkdir()
-    assert config.detects_legacy_workspace_layout() is True

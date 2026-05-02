@@ -167,9 +167,16 @@ class NostrConfig(Base):
     identity_bindings: dict[str, list[str]] = Field(
         default_factory=dict
     )  # {"identity-name": ["<sender-pubkey-hex>", ...]}
-    workspace_bindings: dict[str, list[str]] = Field(
-        default_factory=dict
-    )  # {"workspace-name": ["<sender-pubkey-hex>", ...]}
+
+    @model_validator(mode="before")
+    @classmethod
+    def reject_workspace_bindings(cls, data: Any) -> Any:
+        """Reject removed workspace routing config."""
+        if isinstance(data, dict) and (
+            "workspaceBindings" in data or "workspace_bindings" in data
+        ):
+            raise ValueError("Nostr workspace bindings were removed; use identityBindings")
+        return data
 
     def validate_for_use(self) -> None:
         """
@@ -290,41 +297,6 @@ class AgentDefaults(Base):
     memory_context_max_chars: int = 10000
     memory_context_max_items_per_category: int = 20
     memory_context_max_item_chars: int = 500
-
-
-class WorkspaceConfig(Base):
-    """Named personal workspace configuration."""
-
-    path: str
-    label: str | None = None
-    channel_only: bool = True
-
-    @model_validator(mode="after")
-    def validate_path(self) -> "WorkspaceConfig":
-        """Require non-empty path."""
-        self.path = self.path.strip()
-        if not self.path:
-            raise ValueError("workspace entries must include a non-empty path")
-        return self
-
-
-class WorkspacesConfig(Base):
-    """Owner-managed personal workspace registry."""
-
-    root: str = "~/.hermitcrab/workspaces"
-    registry: dict[str, WorkspaceConfig] = Field(default_factory=dict)
-
-    @model_validator(mode="after")
-    def normalize_registry(self) -> "WorkspacesConfig":
-        """Normalize names and reject blank registry keys."""
-        normalized: dict[str, WorkspaceConfig] = {}
-        for name, workspace in self.registry.items():
-            slug = name.strip()
-            if not slug:
-                raise ValueError("workspace registry keys must be non-empty")
-            normalized[slug] = workspace
-        self.registry = normalized
-        return self
 
 
 class SystemConfig(Base):
@@ -616,13 +588,20 @@ class Config(BaseSettings):
     system: SystemConfig = Field(default_factory=SystemConfig)
     identities: IdentitiesConfig = Field(default_factory=IdentitiesConfig)
     agents: AgentsConfig = Field(default_factory=AgentsConfig)
-    workspaces: WorkspacesConfig = Field(default_factory=WorkspacesConfig)
     models: dict[str, NamedModelConfig] = Field(default_factory=dict)
     channels: ChannelsConfig = Field(default_factory=ChannelsConfig)
     providers: ProvidersConfig = Field(default_factory=ProvidersConfig)
     gateway: GatewayConfig = Field(default_factory=GatewayConfig)
     tools: ToolsConfig = Field(default_factory=ToolsConfig)
     reflection: ReflectionConfig = Field(default_factory=ReflectionConfig)
+
+    @model_validator(mode="before")
+    @classmethod
+    def reject_removed_workspace_registry(cls, data: Any) -> Any:
+        """Reject removed named workspace registry config."""
+        if isinstance(data, dict) and "workspaces" in data:
+            raise ValueError("workspaces config was removed; use identities.registry")
+        return data
 
     @model_validator(mode="after")
     def validate_root(self) -> "Config":
@@ -634,22 +613,10 @@ class Config(BaseSettings):
 
     @model_validator(mode="after")
     def validate_nostr_routing_bindings(self) -> "Config":
-        """Validate additive Nostr routing binding rules."""
-        workspace_bindings = self.channels.nostr.workspace_bindings
+        """Validate Nostr identity routing binding rules."""
         identity_bindings = self.channels.nostr.identity_bindings
-        if not workspace_bindings and not identity_bindings:
+        if not identity_bindings:
             return self
-
-        allowlist = {value.strip().lower() for value in self.channels.nostr.allowed_pubkeys if value.strip()}
-        if workspace_bindings and ("*" in allowlist or "all" in allowlist):
-            raise ValueError(
-                "channels.nostr.allowed_pubkeys cannot use '*' or 'all' when workspace bindings are configured"
-            )
-
-        configured_workspaces = set(self.workspaces.registry)
-        normalized_allowlist: set[str] = set()
-        for pubkey in self.channels.nostr.allowed_pubkeys:
-            normalized_allowlist.add(normalize_nostr_pubkey(pubkey))
 
         seen_pubkeys: dict[str, str] = {}
         for identity_name, pubkeys in identity_bindings.items():
@@ -666,26 +633,6 @@ class Config(BaseSettings):
                         f"{normalized} is assigned to both '{previous}' and 'identity:{identity_name}'"
                     )
                 seen_pubkeys[normalized] = f"identity:{identity_name}"
-
-        for workspace_name, pubkeys in workspace_bindings.items():
-            if workspace_name not in configured_workspaces:
-                raise ValueError(
-                    f"channels.nostr.workspace_bindings references unknown workspace '{workspace_name}'"
-                )
-            for pubkey in pubkeys:
-                normalized = normalize_nostr_pubkey(pubkey)
-                previous = seen_pubkeys.get(normalized)
-                if previous is not None:
-                    raise ValueError(
-                        "channels.nostr routing pubkeys must be unique; "
-                        f"{normalized} is assigned to both '{previous}' and 'workspace:{workspace_name}'"
-                    )
-                if normalized not in normalized_allowlist:
-                    raise ValueError(
-                        "channels.nostr.workspace_bindings pubkeys must also appear in "
-                        "channels.nostr.allowed_pubkeys"
-                    )
-                seen_pubkeys[normalized] = f"workspace:{workspace_name}"
 
         return self
 
@@ -732,49 +679,15 @@ class Config(BaseSettings):
             for name in self.identities.registry
         }
 
-    def detects_legacy_workspace_layout(self) -> bool:
-        """Return true when legacy beta workspace roots exist under the HermitCrab root."""
-        root = self.hermitcrab_root_path
-        return (root / "workspace").exists() or (root / "workspaces").exists()
-
     @property
     def workspace_path(self) -> Path:
-        """Get expanded admin workspace path."""
-        workspace = self.agents.defaults.workspace
-        if workspace and workspace.strip():
-            return Path(workspace).expanduser()
+        """Get the owner identity root path."""
         return self.owner_identity_root_path
 
     @property
     def admin_workspace_path(self) -> Path:
-        """Get expanded admin workspace path."""
+        """Get the owner identity root path."""
         return self.workspace_path
-
-    @property
-    def workspaces_root_path(self) -> Path:
-        """Get expanded root path for additive personal workspaces."""
-        return Path(self.workspaces.root).expanduser()
-
-    def get_workspace_path(self, workspace_name: str | None = None) -> Path:
-        """Resolve admin workspace or configured named workspace path."""
-        if workspace_name is None:
-            return self.workspace_path
-
-        workspace = self.workspaces.registry.get(workspace_name)
-        if workspace is None:
-            raise KeyError(f"Unknown workspace: {workspace_name}")
-
-        path = Path(workspace.path).expanduser()
-        if not path.is_absolute():
-            path = self.workspaces_root_path / path
-        return path
-
-    def configured_workspaces(self) -> dict[str, Path]:
-        """Return configured named workspace paths."""
-        return {
-            name: self.get_workspace_path(name)
-            for name in self.workspaces.registry
-        }
 
     def _resolve_under_root(self, value: str) -> Path:
         """Resolve a config path under the HermitCrab root unless absolute."""
@@ -782,13 +695,6 @@ class Config(BaseSettings):
         if path.is_absolute():
             return path
         return self.hermitcrab_root_path / path
-
-    def normalized_nostr_workspace_bindings(self) -> dict[str, set[str]]:
-        """Return normalized Nostr workspace bindings."""
-        return {
-            workspace_name: {normalize_nostr_pubkey(pubkey) for pubkey in pubkeys}
-            for workspace_name, pubkeys in self.channels.nostr.workspace_bindings.items()
-        }
 
     def normalized_nostr_identity_bindings(self) -> dict[str, set[str]]:
         """Return normalized Nostr identity bindings."""
@@ -810,7 +716,7 @@ class Config(BaseSettings):
         return normalized
 
     def resolve_nostr_sender_identity(self, sender_pubkey: str) -> NostrIdentityResolution:
-        """Resolve inbound Nostr sender to a beta4 identity or denial."""
+        """Resolve inbound Nostr sender to an identity or denial."""
         try:
             normalized_pubkey = normalize_nostr_pubkey(sender_pubkey)
         except ValueError:

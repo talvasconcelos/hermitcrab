@@ -126,7 +126,7 @@ class MemoryStore:
     Category-based memory store with atomic file-backed storage.
 
     All memory is stored as individual markdown files with YAML frontmatter
-    in workspace/memory/{category}/ directories.
+    in identity-root memory/{category}/ directories.
 
     No LLM-based consolidation. No global memory files. No hidden state.
     """

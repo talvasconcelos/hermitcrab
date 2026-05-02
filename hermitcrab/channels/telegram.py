@@ -373,7 +373,7 @@ class TelegramChannel(BaseChannel):
                 file = await self._app.bot.get_file(media_file.file_id)
                 ext = self._get_extension(media_type, getattr(media_file, "mime_type", None))
 
-                # Save to workspace/media/
+                # Save to identity-root media/
                 from pathlib import Path
 
                 media_dir = Path.home() / ".hermitcrab" / "media"

@@ -1,4 +1,4 @@
-"""Focused regressions for beta4 user CLI."""
+"""Focused regressions for user CLI."""
 
 from __future__ import annotations
 

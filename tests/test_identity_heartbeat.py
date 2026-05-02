@@ -1,4 +1,4 @@
-"""Focused regressions for beta4 identity scheduling behavior."""
+"""Focused regressions for identity scheduling behavior."""
 
 from __future__ import annotations
 

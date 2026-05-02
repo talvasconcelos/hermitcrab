@@ -1,4 +1,4 @@
-"""Focused regressions for beta4 gateway identity routing."""
+"""Focused regressions for gateway identity routing."""
 
 from __future__ import annotations
 

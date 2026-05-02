@@ -281,10 +281,7 @@ class AgentLoop:
         self.knowledge = KnowledgeStore(self.identity_root)
         self.lists = ListStore(self.identity_root)
         self.people = PeopleStore(self.identity_root)
-        self.reminders = ReminderStore(
-            self.identity_root,
-            legacy_cron_store_path=(cron_service.store_path if cron_service else None),
-        )
+        self.reminders = ReminderStore(self.identity_root)
         self.tools = ToolRegistry(
             default_policy=build_main_agent_policy(),
             audit_event=self._audit_event,

@@ -55,8 +55,6 @@ class StatusReport:
     resolved_model: str
     selected_provider: str | None
     identity_routing_active: bool = False
-    named_workspaces: int = 0
-    bootstrapped_named_workspaces: int = 0
     nostr_identity_bindings: int = 0
     provider_statuses: list[ProviderStatus] = field(default_factory=list)
     skill_statuses: list[SkillStatus] = field(default_factory=list)
@@ -89,14 +87,12 @@ class DoctorReport:
 
 
 def _bootstrap_ready(config: Config, workspace: Path) -> bool:
-    """Return whether legacy or beta4 bootstrap files are present."""
-    legacy_ready = (workspace / "AGENTS.md").exists()
-    beta4_ready = (
+    """Return whether the standard bootstrap files are present."""
+    return (
         (config.system_root_path / "AGENTS.md").exists()
         and (config.system_root_path / "TOOLS.md").exists()
         and (workspace / "IDENTITY.md").exists()
     )
-    return legacy_ready or beta4_ready
 
 
 def build_status_report(config_path: Path | None = None) -> StatusReport:
@@ -110,7 +106,6 @@ def build_status_report(config_path: Path | None = None) -> StatusReport:
     selected_provider = config.get_provider_name(selected_model)
     provider_statuses = _build_provider_statuses(config, selected_provider)
     skill_statuses = _build_skill_statuses(workspace)
-    configured_workspaces = config.configured_workspaces()
     nostr_identity_bindings = sum(
         len(pubkeys) for pubkeys in config.channels.nostr.identity_bindings.values()
     )
@@ -151,10 +146,6 @@ def build_status_report(config_path: Path | None = None) -> StatusReport:
         resolved_model=resolved_model,
         selected_provider=selected_provider,
         identity_routing_active=identity_routing_active,
-        named_workspaces=len(configured_workspaces),
-        bootstrapped_named_workspaces=sum(
-            1 for path in configured_workspaces.values() if (path / "AGENTS.md").exists()
-        ),
         nostr_identity_bindings=nostr_identity_bindings,
         provider_statuses=provider_statuses,
         skill_statuses=skill_statuses,

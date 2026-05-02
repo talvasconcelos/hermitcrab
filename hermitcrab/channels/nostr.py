@@ -125,7 +125,7 @@ class NostrChannel(BaseChannel):
         }
 
     def _session_key_for_sender(self, sender_pubkey: str, metadata: dict[str, Any] | None = None) -> str:
-        """Build beta4 identity-scoped Nostr session key."""
+        """Build an identity-scoped Nostr session key."""
         identity_name = (metadata or {}).get("identity_name")
         identity_target = (metadata or {}).get("identity_target")
         if identity_target == "identity" and isinstance(identity_name, str) and identity_name:
@@ -133,7 +133,7 @@ class NostrChannel(BaseChannel):
         return f"nostr:unresolved:{sender_pubkey}"
 
     def _sender_pubkey_from_session_key(self, session_key: str) -> str | None:
-        """Extract sender pubkey from a beta4 Nostr session key."""
+        """Extract sender pubkey from an identity-scoped Nostr session key."""
         if not session_key.startswith("nostr:"):
             return None
         remainder = session_key.removeprefix("nostr:")

@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import json
-import shutil
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -128,65 +126,9 @@ class ReminderItem:
 class ReminderStore:
     """Manage reminder artifacts and their persisted delivery state."""
 
-    def __init__(self, workspace: Path, legacy_cron_store_path: Path | None = None):
+    def __init__(self, workspace: Path):
         self.workspace = workspace
-        self.legacy_reminders_dir = workspace / "knowledge" / "notes" / "reminders"
         self.reminders_dir = ensure_dir(workspace / "reminders")
-        self.legacy_cron_store_path = legacy_cron_store_path
-        self._migrate_legacy_reminder_files()
-        self._migrate_legacy_cron_metadata()
-
-    def _migrate_legacy_reminder_files(self) -> None:
-        if not self.legacy_reminders_dir.exists():
-            return
-
-        for old_path in sorted(self.legacy_reminders_dir.glob("*.md")):
-            new_path = self.reminders_dir / old_path.name
-            if new_path.exists():
-                continue
-            shutil.move(str(old_path), str(new_path))
-
-    def _migrate_legacy_cron_metadata(self) -> None:
-        if self.legacy_cron_store_path is None or not self.legacy_cron_store_path.exists():
-            return
-        try:
-            data = json.loads(self.legacy_cron_store_path.read_text(encoding="utf-8"))
-        except Exception:
-            return
-
-        jobs_by_id = {
-            str(job.get("id") or ""): job
-            for job in data.get("jobs", [])
-            if job.get("id")
-        }
-        for file_path in sorted(self.reminders_dir.glob("*.md")):
-            item = ReminderItem.from_file(file_path)
-            if item is None or not item.cron_job_id:
-                continue
-            if item.channel and item.chat_id and item.next_due_at:
-                continue
-            job = jobs_by_id.get(item.cron_job_id)
-            if not isinstance(job, dict):
-                continue
-            payload = job.get("payload", {}) or {}
-            state = job.get("state", {}) or {}
-            changed = False
-            if not item.channel and payload.get("channel"):
-                item.channel = str(payload["channel"])
-                changed = True
-            if not item.chat_id and payload.get("to"):
-                item.chat_id = str(payload["to"])
-                changed = True
-            if not item.next_due_at and state.get("nextRunAtMs"):
-                next_due = datetime.fromtimestamp(
-                    int(state["nextRunAtMs"]) / 1000,
-                    tz=timezone.utc,
-                ).isoformat()
-                item.next_due_at = next_due
-                changed = True
-            if changed:
-                item.updated_at = _utcnow().isoformat()
-                item.file_path.write_text(frontmatter.dumps(item.to_post()), encoding="utf-8")
 
     @staticmethod
     def _normalize(text: str) -> str:

@@ -1,4 +1,4 @@
-"""Focused regressions for beta4 identity-root runtime isolation."""
+"""Focused regressions for identity-root runtime isolation."""
 
 from __future__ import annotations
 
@@ -21,7 +21,7 @@ def test_agent_loop_accepts_identity_metadata_and_roots_runtime_state(tmp_path) 
     loop = AgentLoop(
         bus=MessageBus(),
         provider=_provider(),
-        workspace=tmp_path / "legacy-workspace",
+        workspace=tmp_path / "workspace-argument",
         identity_name="alice",
         identity_root=identity_root,
         system_root=tmp_path / "system",

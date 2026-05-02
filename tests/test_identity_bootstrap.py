@@ -1,11 +1,11 @@
-"""Focused regressions for beta4 identity bootstrap layout."""
+"""Focused regressions for identity bootstrap layout."""
 
 from __future__ import annotations
 
 from typer.testing import CliRunner
 
 from hermitcrab.agent.context import ContextBuilder
-from hermitcrab.cli.commands import app, bootstrap_beta4_layout
+from hermitcrab.cli.commands import app, bootstrap_standard_layout
 from hermitcrab.cli.diagnostics import build_status_report
 from hermitcrab.config.loader import save_config
 from hermitcrab.config.schema import Config
@@ -13,10 +13,10 @@ from hermitcrab.config.schema import Config
 runner = CliRunner()
 
 
-def test_bootstrap_beta4_layout_creates_system_and_owner_identity_roots(tmp_path) -> None:
+def test_bootstrap_standard_layout_creates_system_and_owner_identity_roots(tmp_path) -> None:
     config = Config.model_validate({"root": str(tmp_path)})
 
-    bootstrap_beta4_layout(config)
+    bootstrap_standard_layout(config)
 
     assert (tmp_path / "system" / "AGENTS.md").exists()
     assert (tmp_path / "system" / "TOOLS.md").exists()
@@ -47,19 +47,19 @@ def test_bootstrap_beta4_layout_creates_system_and_owner_identity_roots(tmp_path
         assert (owner_root / dirname).is_dir()
 
 
-def test_bootstrap_beta4_layout_is_idempotent_and_preserves_files(tmp_path) -> None:
+def test_bootstrap_standard_layout_is_idempotent_and_preserves_files(tmp_path) -> None:
     config = Config.model_validate({"root": str(tmp_path)})
 
-    bootstrap_beta4_layout(config)
+    bootstrap_standard_layout(config)
     agents_path = tmp_path / "system" / "AGENTS.md"
     agents_path.write_text("custom system guidance\n", encoding="utf-8")
 
-    bootstrap_beta4_layout(config)
+    bootstrap_standard_layout(config)
 
     assert agents_path.read_text(encoding="utf-8") == "custom system guidance\n"
 
 
-def test_onboard_creates_beta4_layout_without_legacy_workspace(monkeypatch, tmp_path) -> None:
+def test_onboard_creates_standard_identity_layout(monkeypatch, tmp_path) -> None:
     home = tmp_path / "home"
     config_path = home / ".hermitcrab" / "config.json"
     monkeypatch.setenv("HOME", str(home))
@@ -76,7 +76,7 @@ def test_onboard_creates_beta4_layout_without_legacy_workspace(monkeypatch, tmp_
     assert not (home / ".hermitcrab" / "workspace").exists()
 
 
-def test_status_treats_beta4_layout_as_bootstrapped(tmp_path) -> None:
+def test_status_treats_identity_layout_as_bootstrapped(tmp_path) -> None:
     config_path = tmp_path / "config.json"
     config = Config.model_validate(
         {
@@ -85,7 +85,7 @@ def test_status_treats_beta4_layout_as_bootstrapped(tmp_path) -> None:
         }
     )
     save_config(config, config_path)
-    bootstrap_beta4_layout(config)
+    bootstrap_standard_layout(config)
 
     report = build_status_report(config_path)
 
@@ -95,7 +95,7 @@ def test_status_treats_beta4_layout_as_bootstrapped(tmp_path) -> None:
 
 def test_context_builder_loads_system_and_identity_bootstrap_files(tmp_path) -> None:
     config = Config.model_validate({"root": str(tmp_path)})
-    bootstrap_beta4_layout(config)
+    bootstrap_standard_layout(config)
 
     (config.system_root_path / "AGENTS.md").write_text("system rules\n", encoding="utf-8")
     (config.owner_identity_root_path / "IDENTITY.md").write_text(
