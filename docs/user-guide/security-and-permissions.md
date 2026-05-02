@@ -71,11 +71,11 @@ When enabled, all file access is restricted to the workspace directory:
 }
 ```
 
-This prevents reads or writes outside `~/.hermitcrab/workspace/`.
+This prevents reads or writes outside `~/.hermitcrab/identities/owner/`.
 
 ### Allowed paths
 
-File tools (`read_file`, `write_file`, `edit_file`, `list_dir`) only access paths within the allowed set. By default, the workspace directory is the root of allowed paths.
+File tools (`read_file`, `write_file`, `edit_file`, `list_dir`) only access paths within the allowed set. By default, the active identity root is the root of allowed paths.
 
 ## Channel access control
 
@@ -148,11 +148,11 @@ Subagents receive:
 
 ## Audit trail
 
-Every significant action is logged to `workspace/logs/audit.jsonl`:
+Every significant action is logged to `system/logs/audit.jsonl`:
 
 - Tool policy denials
 - Tool policy redirections
-- Routing decisions (multi-workspace)
+- Routing decisions
 - Significant events
 
 Review with:

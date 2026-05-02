@@ -70,7 +70,7 @@ LLM provider abstraction layer. Supports 20+ providers via LiteLLM plus dedicate
 
 ### config/
 
-Pydantic-based typed configuration. Loads from `~/.hermitcrab/config.json` with environment variable overrides (`HERMITCRAB__` prefix). Includes multi-workspace validation and provider matching.
+Pydantic-based typed configuration. Loads from `~/.hermitcrab/config.json` with environment variable overrides (`HERMITCRAB__` prefix). Includes identity routing validation and provider matching.
 
 ### cli/
 
@@ -90,7 +90,7 @@ In-process message bus for decoupled communication between channels, agent loops
 User message
   -> Channel receives message
   -> Publishes to MessageBus
-  -> Gateway routes to workspace (single or multi-workspace)
+  -> Gateway routes to an identity
   -> AgentLoop processes the turn
      -> ContextBuilder assembles prompt (memory, session history, bootstrap files)
      -> LLM is called via Provider
@@ -110,9 +110,9 @@ These modules carry the most behavioral complexity:
 
 - `agent/loop.py` — main orchestration, job routing, background cognition scheduling
 - `agent/tools/registry.py` and `policy.py` — dynamic tool registration and permission enforcement
-- `channels/nostr.py` — NIP-04/NIP-17 handling, relay discovery, multi-workspace routing
+- `channels/nostr.py` — NIP-04/NIP-17 handling, relay discovery, identity routing
 - `cli/commands.py` — all CLI commands, gateway logic, inbound routing
-- `config/schema.py` — validation, provider matching, model resolution, workspace routing
+- `config/schema.py` — validation, provider matching, model resolution, identity routing
 - `agent/memory.py` — duplicate detection, category management, thread safety
 
 ## Extension points

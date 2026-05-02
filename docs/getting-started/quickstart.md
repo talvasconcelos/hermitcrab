@@ -114,7 +114,7 @@ The agent runs shell commands through a safety layer and shows you the results.
 Remember that my daughter's soccer practice is every Tuesday at 4pm.
 ```
 
-HermitCrab writes this to `workspace/memory/facts/` as a structured Markdown note.
+HermitCrab writes this to `identities/<name>/memory/facts/` as a structured Markdown note.
 
 ### Set a reminder
 

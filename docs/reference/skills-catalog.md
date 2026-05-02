@@ -116,7 +116,7 @@ This skill is loaded in every session. It provides guidance on using the memory 
 - `read_memory` — read by category or ID
 - `list_memories` — enumerate items in a category
 
-Memory is stored as atomic Markdown files with YAML frontmatter in `workspace/memory/<category>/`.
+Memory is stored as atomic Markdown files with YAML frontmatter in `identities/<name>/memory/<category>/`.
 
 ---
 
@@ -210,7 +210,7 @@ Uses wttr.in and Open-Meteo for weather data. Supports location lookup by city n
 
 ## Adding workspace skills
 
-Place custom skills in `workspace/skills/`. The `SkillsLoader` checks workspace skills before bundled skills, allowing you to override or extend built-in behavior.
+Place custom skills in `identities/<name>/skills/`. The `SkillsLoader` checks workspace skills before bundled skills, allowing you to override or extend built-in behavior.
 
 Each workspace skill needs a `SKILL.md` with frontmatter:
 

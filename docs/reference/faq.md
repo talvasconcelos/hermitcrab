@@ -28,7 +28,7 @@ No. Memory is deterministic and file-based — atomic Markdown files with YAML f
 
 ### Where is memory stored?
 
-`workspace/memory/` with subdirectories for facts, decisions, goals, tasks, and reflections. Each item is a Markdown file with YAML frontmatter.
+`identities/<name>/memory/` with subdirectories for facts, decisions, goals, tasks, and reflections. Each item is a Markdown file with YAML frontmatter.
 
 ### Can I edit memory?
 
@@ -40,7 +40,7 @@ When writing facts, the system tokenizes the content and checks existing items f
 
 ### Can I move memory to another machine?
 
-Copy the entire `workspace/` folder. Everything comes with it — memory, sessions, knowledge, personality files.
+Copy the entire `~/.hermitcrab/` root. Everything comes with it: config, system guidance, identities, memory, sessions, knowledge, and routines.
 
 ## Sessions
 
@@ -58,7 +58,7 @@ No. Sessions are stored as JSONL files in plain text. Use filesystem encryption 
 
 ### What happens to old sessions?
 
-They are archived to `workspace/sessions/archive/`. They are not deleted.
+They are archived to `identities/<name>/sessions/archive/`. They are not deleted.
 
 ## Channels
 
@@ -114,23 +114,23 @@ Default is 18790. Change with `--port` or in `gateway.port` config.
 
 Configure `Restart=on-failure` in the systemd service or use Docker restart policy. On restart, all services (cron, heartbeat, reminders) resume cleanly.
 
-## Multi-workspace
+## Identities
 
-### Should I use multi-workspace?
+### Should I use multiple identities?
 
-Only if you need isolated contexts for different people or purposes. Single workspace is the default and simpler model.
+Only if you need isolated contexts for different people, roles, customers, projects, or operating modes. A single owner identity is the default and simpler model.
 
-### Can sub-workspace users use the CLI?
+### Can non-owner identities use the CLI?
 
-No. Sub-workspaces are channel-only. CLI and config remain admin-owned.
+The CLI is owner/operator controlled. Non-owner identities primarily interact through routed channels.
 
-### Can workspaces share memory?
+### Can identities share memory?
 
-No. Each workspace has its own isolated memory, knowledge, people, and sessions.
+No. Each identity has its own isolated memory, knowledge, people, and sessions. Shared state is not part of the current model.
 
-### What happens to unbound senders in multi-workspace mode?
+### What happens to unbound Nostr senders?
 
-If a sender is in the `allowedPubkeys` list but not bound to a workspace, they land in the admin workspace. If not in the allowlist, they are denied.
+If a sender is in `allowedPubkeys` but not bound to an identity, they route to the owner identity. If not in the allowlist, they are denied.
 
 ## Upgrading
 
@@ -143,9 +143,9 @@ hermitcrab onboard  # picks up new config fields
 
 Then restart the gateway.
 
-### Will upgrading break my workspace?
+### Will upgrading preserve my data automatically?
 
-Workspace data is backward-compatible. New config fields are added by `hermitcrab onboard`. Existing data is preserved.
+Beta releases may introduce breaking filesystem or config changes. Back up `~/.hermitcrab/`, read the migration notes for the release, then run `hermitcrab onboard` and copy data intentionally.
 
 ### How do I know what changed?
 
@@ -179,7 +179,7 @@ Use `host.docker.internal` instead of `localhost`:
 
 ### The agent doesn't remember something
 
-Memory is file-based. Check if the file exists in `workspace/memory/<category>/`. If not, the agent may not have written it. Tell it again explicitly.
+Memory is file-based. Check if the file exists in `identities/<name>/memory/<category>/`. If not, the agent may not have written it. Tell it again explicitly.
 
 ### The agent is in a loop
 

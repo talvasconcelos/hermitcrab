@@ -56,7 +56,7 @@ Use `--json` for machine-readable output.
 
 ### What is logged
 
-The audit trail (`workspace/logs/audit.jsonl`) records:
+The audit trail (`system/logs/audit.jsonl`) records:
 
 - Tool policy denials (`tool.policy_denied`)
 - Tool policy redirections (`tool.policy_redirected`)
@@ -93,7 +93,7 @@ For piping to `jq` or other tools.
 ### Audit log rotation
 
 - Auto-rotates at 256KB
-- Archives to `workspace/logs/archive/`
+- Archives to `system/logs/archive/`
 - Keeps maximum 5 archived files
 
 ### Inspecting audit entries manually
@@ -101,7 +101,7 @@ For piping to `jq` or other tools.
 Each line is a JSON object:
 
 ```bash
-tail -5 ~/.hermitcrab/workspace/logs/audit.jsonl | python -m json.tool
+tail -5 ~/.hermitcrab/system/logs/audit.jsonl | python -m json.tool
 ```
 
 ## Monitoring gateway health
@@ -132,7 +132,7 @@ docker compose logs -f hermitcrab-gateway
 
 ## Inspecting route decisions
 
-### Multi-workspace routing status
+### Identity routing status
 
 ```bash
 hermitcrab status
@@ -141,9 +141,8 @@ hermitcrab status
 Look for:
 
 ```
-Multi-workspace routing: active
-  Workspaces configured: 2
-  Nostr bindings: 2
+Identity routing: active
+  Nostr identity bindings: 2
 ```
 
 ### Binding verification
@@ -156,15 +155,15 @@ import json
 with open('/home/user/.hermitcrab/config.json') as f:
     config = json.load(f)
 print('Allowlist:', config['channels']['nostr']['allowedPubkeys'])
-print('Bindings:', config['channels']['nostr']['workspaceBindings'])
+print('Bindings:', config['channels']['nostr']['identityBindings'])
 "
 ```
 
 Verify:
 
-1. Every pubkey in bindings appears in allowlist
-2. No pubkey appears in multiple bindings
-3. Every binding references a configured workspace
+1. No pubkey appears in multiple bindings
+2. Every binding references a configured identity
+3. Bound identities are active when they should receive messages
 
 ### Audit routing denials
 
@@ -179,17 +178,17 @@ Look for denied inbound attempts from unknown pubkeys.
 ### Count memory items
 
 ```bash
-echo "Facts: $(ls ~/.hermitcrab/workspace/memory/facts/ 2>/dev/null | wc -l)"
-echo "Tasks: $(ls ~/.hermitcrab/workspace/memory/tasks/ 2>/dev/null | wc -l)"
-echo "Goals: $(ls ~/.hermitcrab/workspace/memory/goals/ 2>/dev/null | wc -l)"
-echo "Decisions: $(ls ~/.hermitcrab/workspace/memory/decisions/ 2>/dev/null | wc -l)"
-echo "Reflections: $(ls ~/.hermitcrab/workspace/memory/reflections/ 2>/dev/null | wc -l)"
+echo "Facts: $(ls ~/.hermitcrab/identities/owner/memory/facts/ 2>/dev/null | wc -l)"
+echo "Tasks: $(ls ~/.hermitcrab/identities/owner/memory/tasks/ 2>/dev/null | wc -l)"
+echo "Goals: $(ls ~/.hermitcrab/identities/owner/memory/goals/ 2>/dev/null | wc -l)"
+echo "Decisions: $(ls ~/.hermitcrab/identities/owner/memory/decisions/ 2>/dev/null | wc -l)"
+echo "Reflections: $(ls ~/.hermitcrab/identities/owner/memory/reflections/ 2>/dev/null | wc -l)"
 ```
 
 ### Check for malformed files
 
 ```bash
-for f in ~/.hermitcrab/workspace/memory/facts/*.md; do
+for f in ~/.hermitcrab/identities/owner/memory/facts/*.md; do
   head -1 "$f" | grep -q '---' || echo "Missing frontmatter: $f"
 done
 ```
@@ -198,7 +197,7 @@ done
 
 ```bash
 # Sort by title (manual inspection)
-grep "^title:" ~/.hermitcrab/workspace/memory/facts/*.md | sort
+grep "^title:" ~/.hermitcrab/identities/owner/memory/facts/*.md | sort
 ```
 
 ## Session health
@@ -206,7 +205,7 @@ grep "^title:" ~/.hermitcrab/workspace/memory/facts/*.md | sort
 ### Active sessions
 
 ```bash
-ls -lt ~/.hermitcrab/workspace/sessions/
+ls -lt ~/.hermitcrab/identities/owner/sessions/
 ```
 
 Most recent session listed first.
@@ -214,7 +213,7 @@ Most recent session listed first.
 ### Archived sessions
 
 ```bash
-ls ~/.hermitcrab/workspace/sessions/archive/ | wc -l
+ls ~/.hermitcrab/identities/owner/sessions/archive/ | wc -l
 ```
 
 ### Check for truncated history
@@ -228,13 +227,13 @@ The session manager detects broken leading segments in session files. If you see
 The audit trail can reveal tool usage patterns:
 
 ```bash
-grep -o '"tool_name":"[^"]*"' ~/.hermitcrab/workspace/logs/audit.jsonl | sort | uniq -c | sort -rn
+grep -o '"tool_name":"[^"]*"' ~/.hermitcrab/system/logs/audit.jsonl | sort | uniq -c | sort -rn
 ```
 
 ### Policy denial patterns
 
 ```bash
-grep "policy_denied" ~/.hermitcrab/workspace/logs/audit.jsonl | python -m json.tool
+grep "policy_denied" ~/.hermitcrab/system/logs/audit.jsonl | python -m json.tool
 ```
 
 Frequent denials may indicate the agent is attempting unsafe operations or a user needs education on capabilities.

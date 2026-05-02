@@ -8,8 +8,10 @@ Config lives at `~/.hermitcrab/config.json`. It is created by `hermitcrab onboar
 
 ```json
 {
+  "root": "~/.hermitcrab",
+  "system": {},
+  "identities": {},
   "agents": {},
-  "workspaces": {},
   "models": {},
   "channels": {},
   "providers": {},
@@ -29,7 +31,6 @@ Agent behavior defaults and model configuration.
 {
   "agents": {
     "defaults": {
-      "workspace": "~/.hermitcrab/workspace",
       "model": "anthropic/claude-opus-4-5",
       "jobModels": {
         "interactiveResponse": "",
@@ -60,7 +61,6 @@ Agent behavior defaults and model configuration.
 
 | Field | Default | Description |
 |-------|---------|-------------|
-| `workspace` | `~/.hermitcrab/workspace` | Admin workspace path |
 | `model` | `anthropic/claude-opus-4-5` | Primary model for interactive responses |
 | `jobModels` | See below | Per-job-class model routing |
 | `enableDistillation` | `false` | Enable background distillation |
@@ -107,19 +107,39 @@ Shorthand aliases for model names:
 }
 ```
 
-## workspaces
-
-Workspace registry for multi-workspace mode.
+## system
 
 ```json
 {
-  "workspaces": {
-    "root": "~/.hermitcrab/workspaces",
+  "system": {
+    "root": "system"
+  }
+}
+```
+
+| Field | Default | Description |
+|-------|---------|-------------|
+| `root` | `system` | System-owned state root, relative to `root` unless absolute |
+
+## identities
+
+Identity registry and owner identity policy.
+
+```json
+{
+  "identities": {
+    "ownerIdentity": "owner",
+    "defaultIdentityModel": "main",
+    "root": "identities",
     "registry": {
-      "family": {
-        "path": "family",
-        "label": "Family workspace",
-        "channelOnly": true
+      "owner": {
+        "label": "Owner",
+        "role": "owner",
+        "root": "owner",
+        "active": true,
+        "models": {
+          "interactiveResponse": "main"
+        }
       }
     }
   }
@@ -128,16 +148,22 @@ Workspace registry for multi-workspace mode.
 
 | Field | Default | Description |
 |-------|---------|-------------|
-| `root` | `~/.hermitcrab/workspaces` | Root for sub-workspaces |
-| `registry` | `{}` | Named workspace entries |
+| `ownerIdentity` | `owner` | Identity used for owner/operator CLI and fallback routing |
+| `defaultIdentityModel` | `""` | Optional named model used by identities without an override |
+| `root` | `identities` | Identity root directory, relative to `root` unless absolute |
+| `registry` | owner entry | Identity entries keyed by identity name |
 
-### Workspace entry
+### Identity entry
 
 | Field | Required | Description |
 |-------|----------|-------------|
-| `path` | Yes | Workspace directory path (relative to root if not absolute) |
+| `root` | No | Identity directory path; defaults to the identity name |
 | `label` | No | Human-readable label |
-| `channelOnly` | Yes | Always `true` — sub-workspaces are channel-only |
+| `role` | No | `owner`, `managed`, `archived`, or another operator label |
+| `active` | No | Whether routing and background work should use this identity |
+| `models` | No | Per-identity named-model overrides |
+| `excludedModels` | No | Named models this identity may not use |
+| `nostrPrivateKey` | No | Identity key used for identity-bound Nostr behavior |
 
 ## models
 
@@ -231,7 +257,7 @@ Channel configuration and behavior.
 | `nip17RelayDiscoveryTimeoutS` | `4.0` | Relay discovery timeout |
 | `nip17RelayCacheTtlS` | `600` | Relay cache TTL |
 | `allowedPubkeys` | `[]` | Sender allowlist |
-| `workspaceBindings` | `{}` | Pubkey-to-workspace mapping |
+| `identityBindings` | `{}` | Pubkey-to-identity mapping |
 
 ## providers
 

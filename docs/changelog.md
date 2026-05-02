@@ -7,16 +7,16 @@ All notable changes to HermitCrab.
 ### Added
 
 - Nostr NIP-17 direct-message support alongside legacy NIP-04 handling
-- Owner-managed named workspaces with Nostr pubkey routing
-- `hermitcrab workspaces` commands for listing, bootstrapping, and resolving routes
+- Owner-managed identity roots with Nostr pubkey routing
+- `hermitcrab user` commands for listing, bootstrapping, and resolving routes
 - Durable audit trail views via `hermitcrab audit`
-- Expanded operator documentation for gateway operations, workspace routing, observability, and recovery
+- Expanded operator documentation for gateway operations, identity routing, observability, and recovery
 
 ### Changed
 
 - Strengthened tool permission policy behavior with structured denial hints and audit events
 - Improved runtime diagnostics surfaced through `status` and `doctor`
-- Kept multi-workspace support additive so existing admin workspace behavior remains unchanged
+- Standardized runtime state under `system/` and `identities/<name>/`
 
 ## [0.1.0b2] — 2025
 

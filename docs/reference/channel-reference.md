@@ -52,14 +52,13 @@ Primary channel. Encrypted DMs via NIP-04 (legacy) or NIP-17 (modern).
 
 Pubkeys are configured as lowercase 64-char hex strings. `npub` format is converted automatically.
 
-### Multi-workspace routing
+### Identity routing
 
-In multi-workspace mode, sender pubkeys are mapped to specific workspaces via `workspaceBindings`. See [Workspace model](../operator-guide/workspace-model.md).
+Sender pubkeys can be mapped to specific identities via `identityBindings`. See [Workspace model](../operator-guide/workspace-model.md).
 
 ### Session keys
 
-- `nostr:<sender_pubkey>` — single workspace
-- `nostr:<workspace>:<sender_pubkey>` — multi-workspace
+- `nostr:<identity>:<sender_pubkey>`
 
 ### Current behavior and known limits
 

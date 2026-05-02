@@ -11,7 +11,7 @@ The gateway is the always-on service that powers:
 - **Heartbeat service** — periodic agent wake-ups for task review
 - **Reminder service** — filesystem-backed reminder delivery
 - **Session timeout monitoring** — automatic session cleanup after inactivity
-- **Multi-workspace routing** — inbound message routing to isolated workspaces
+- **Identity routing** — inbound message routing to isolated identities
 
 The gateway is required for any channel-based interaction. It is not needed for local CLI sessions (`hermitcrab agent`).
 
@@ -115,7 +115,7 @@ When the gateway starts, it prints:
 ```
 HermitCrab gateway starting
   Channels: nostr, telegram
-  Multi-workspace: active (2 workspaces)
+  Identity routing: active
   Cron jobs: 3 registered
   Heartbeat: every 1800s
   Reminders: polling every 60s
@@ -133,7 +133,7 @@ HermitCrab gateway starting
 
 ### Heartbeat service
 
-- Reads `workspace/HEARTBEAT.md` for active tasks
+- Reads `identities/<name>/HEARTBEAT.md` for active tasks
 - Phase 1: lightweight model decides skip/run via virtual tool call
 - Phase 2: if "run", executes active tasks through agent loop
 - Can be disabled with `<!-- HEARTBEAT_DISABLED -->`
@@ -141,7 +141,7 @@ HermitCrab gateway starting
 
 ### Reminder service
 
-- Polls `workspace/reminders/` for due reminders
+- Polls `identities/<name>/reminders/` for due reminders
 - Default polling interval: 60 seconds
 - Delivers via the appropriate channel
 - Archives delivered reminders
@@ -151,23 +151,23 @@ HermitCrab gateway starting
 - Monitors all active sessions for inactivity
 - Default timeout: 30 minutes
 - Triggers session archival and background cognition
-- Runs across all workspaces in multi-workspace mode
+- Runs across all active identities
 
 ## Containment boundaries
 
-### Admin-owned surfaces
+### System-owned surfaces
 
-These are always admin-owned and never delegated to sub-workspaces:
+These are owner/operator controlled:
 
-- Cron service and job definitions
-- Heartbeat service and `HEARTBEAT.md`
 - Config file (`config.json`)
+- System guidance (`system/AGENTS.md`, `system/TOOLS.md`)
+- System audit logs
 - CLI commands
 - Provider configuration
 
-### Workspace-isolated surfaces
+### Identity-isolated surfaces
 
-Each workspace (admin and sub-workspaces) gets its own:
+Each identity gets its own:
 
 - Memory store
 - Session manager
@@ -176,11 +176,13 @@ Each workspace (admin and sub-workspaces) gets its own:
 - Lists
 - Reminders
 - Scratchpads
+- Cron jobs
+- Heartbeat file
 
 ### Failure isolation
 
 - Individual channel failures do not affect other channels
-- Per-workspace agent loop failures do not affect other workspaces
+- Per-identity agent loop failures do not affect other identities
 - Cron job failures are logged; subsequent jobs continue
 - Heartbeat failures are non-fatal; next cycle retries
 - Reminder delivery failures are logged; the reminder is not lost

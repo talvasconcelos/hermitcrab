@@ -81,7 +81,7 @@ Review startup logs for channel connection errors.
 
 ### Agent doesn remember something
 
-1. Check if the file exists: `ls workspace/memory/facts/`
+1. Check if the file exists: `ls identities/<name>/memory/facts/`
 2. Verify the frontmatter is valid YAML
 3. Check for duplicate rejection — the agent may have rejected a near-duplicate
 

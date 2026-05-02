@@ -110,13 +110,13 @@ The agent states incorrect facts or has conflicting information.
 1. Inspect memory files:
 
 ```bash
-grep -r "keyword" ~/.hermitcrab/workspace/memory/facts/
+grep -r "keyword" ~/.hermitcrab/identities/owner/memory/facts/
 ```
 
 2. Remove incorrect facts:
 
 ```bash
-rm ~/.hermitcrab/workspace/memory/facts/<incorrect-file>.md
+rm ~/.hermitcrab/identities/owner/memory/facts/<incorrect-file>.md
 ```
 
 3. Or tell the agent:
@@ -128,7 +128,7 @@ Forget that [incorrect fact].
 4. Check for duplicates:
 
 ```bash
-grep "^title:" ~/.hermitcrab/workspace/memory/facts/*.md | sort
+grep "^title:" ~/.hermitcrab/identities/owner/memory/facts/*.md | sort
 ```
 
 Remove near-duplicates manually.
@@ -158,7 +158,7 @@ The agent has built-in loop detection (max 40 iterations, 2 identical tool cycle
 3. Check memory for stale goals:
 
 ```bash
-ls ~/.hermitcrab/workspace/memory/goals/
+ls ~/.hermitcrab/identities/owner/memory/goals/
 ```
 
 Remove goals that may be causing repeated behavior.
@@ -264,7 +264,7 @@ Prevents further writes to a potentially corrupted state.
 
 ```bash
 hermitcrab doctor
-ls ~/.hermitcrab/workspace/memory/
+ls ~/.hermitcrab/identities/owner/memory/
 ```
 
 3. Restore from backup if available.
@@ -272,7 +272,7 @@ ls ~/.hermitcrab/workspace/memory/
 4. If no backup, check session archives:
 
 ```bash
-ls ~/.hermitcrab/workspace/sessions/archive/
+ls ~/.hermitcrab/identities/owner/sessions/archive/
 ```
 
 Session files contain conversation history that can be used to reconstruct memory.
@@ -322,7 +322,7 @@ cat ~/.hermitcrab/config.json
 5. Check workspace files for unauthorized modifications:
 
 ```bash
-ls -lt ~/.hermitcrab/workspace/
+ls -lt ~/.hermitcrab/identities/owner/
 ```
 
 6. Restore from a known-good backup.

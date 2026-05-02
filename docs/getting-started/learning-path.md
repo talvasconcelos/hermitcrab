@@ -35,7 +35,7 @@ Find the right documentation for what you want to do.
 
 ## I want to understand the workspace structure
 
-1. Read [Workspace model](../operator-guide/workspace-model.md) — single and multi-workspace
+1. Read [Workspace model](../operator-guide/workspace-model.md) — system and identity layout
 2. Read [Backups and recovery](../operator-guide/backups-and-recovery.md) — protect your data
 3. Read [Config reference](../reference/config-reference.md) — every config field explained
 
@@ -45,8 +45,8 @@ Find the right documentation for what you want to do.
 2. Read [Observability and audit](../operator-guide/observability-audit.md) — deep dive
 3. Read [Security and permissions](../user-guide/security-and-permissions.md) — safety model
 
-## I want to set up multiple isolated workspaces
+## I want to set up multiple isolated identities
 
-1. Read [Workspace model](../operator-guide/workspace-model.md) — multi-workspace architecture
+1. Read [Workspace model](../operator-guide/workspace-model.md) — identity architecture
 2. Read [Gateway routing](../developer-guide/gateway-routing.md) — how routing decisions work
-3. Read [Config reference](../reference/config-reference.md) — multi-workspace config fields
+3. Read [Config reference](../reference/config-reference.md) — identity config fields
