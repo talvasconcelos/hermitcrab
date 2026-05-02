@@ -98,5 +98,5 @@ sender is not allowed or routes to an inactive identity, the message is denied.
 Identity roots are separate by default. There is no shared memory root and no automatic promotion
 from one identity to another.
 
-Shared state is reserved for future design work. Until then, keep cross-identity sharing explicit and
-manual.
+Shared state is intentionally not part of this release. `shared` remains a reserved identity name
+for future design work.

@@ -176,6 +176,8 @@ When the agent replies, messages are dispatched through the same channel the use
 }
 ```
 
-## Multi-channel identity
+## Multi-channel Identity
 
-The same agent handles all channels. Memory, tasks, and knowledge are shared across channels. Sessions remain channel-scoped unless you explicitly target the same session key.
+The same identity can handle multiple channels. Memory, tasks, and knowledge are shared across
+channels only within that identity. Sessions remain channel-scoped unless you explicitly target the
+same session key.
