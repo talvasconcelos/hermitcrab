@@ -1,6 +1,7 @@
 from hermitcrab.agent.loop import AgentLoop
 from hermitcrab.config.schema import Config
 from hermitcrab.providers.base import LLMProvider, LLMResponse
+from hermitcrab.providers.ollama_provider import OllamaProvider
 from hermitcrab.providers.openai_codex_auth import codex_cloudflare_headers
 from hermitcrab.providers.registry import normalize_provider_name
 from hermitcrab.providers.routing_provider import RoutingProvider
@@ -109,6 +110,52 @@ def test_codex_model_discovery_has_fallbacks_without_local_cache(tmp_path, monke
 
     assert "gpt-5.4-mini" in models
     assert "gpt-5.3-codex" in models
+
+
+def test_ollama_named_model_provider_options_override_request_defaults(tmp_path) -> None:
+    config = Config.model_validate(
+        {
+            "root": str(tmp_path),
+            "models": {
+                "granite4": {
+                    "model": "ollama/granite4:350m",
+                    "providerOptions": {
+                        "num_ctx": 32000,
+                        "num_thread": 6,
+                        "temperature": 0.05,
+                        "max_tokens": 512,
+                    },
+                }
+            },
+            "providers": {"ollama": {"apiBase": "http://localhost:11434"}},
+        }
+    )
+
+    provider = OllamaProvider(
+        default_model="ollama/gemma4",
+        request_config_resolver=lambda model: {
+            "model": config.resolve_model_config(model).model or model,
+            "api_base": config.get_api_base(model),
+            "provider_name": config.get_provider_name(model),
+            "provider_options": config.resolve_model_config(model).provider_options or {},
+        },
+    )
+
+    body, _, _ = provider._prepare_request(
+        messages=[{"role": "user", "content": "hello"}],
+        tools=None,
+        model="granite4",
+        max_tokens=8192,
+        temperature=0.7,
+        reasoning_effort=None,
+    )
+
+    assert body["model"] == "granite4:350m"
+    assert body["options"]["num_ctx"] == 32000
+    assert body["options"]["num_thread"] == 6
+    assert body["options"]["temperature"] == 0.05
+    assert body["options"]["num_predict"] == 512
+    assert "max_tokens" not in body["options"]
 
 
 def test_codex_headers_use_codex_originator() -> None:

@@ -337,10 +337,13 @@ class OllamaProvider(LLMProvider):
             fallback = True
 
         provider_options = dict(request_config.get("provider_options") or {})
+        option_max_tokens = provider_options.pop("max_tokens", None)
+        if option_max_tokens is not None and "num_predict" not in provider_options:
+            provider_options["num_predict"] = option_max_tokens
         options: dict[str, Any] = {
-            **provider_options,
             "temperature": temperature,
             "num_predict": max(1, max_tokens),
+            **provider_options,
         }
 
         body: dict[str, Any] = {
