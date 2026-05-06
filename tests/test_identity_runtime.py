@@ -4,7 +4,11 @@ from __future__ import annotations
 
 from unittest.mock import MagicMock
 
+import pytest
+
 from hermitcrab.agent.loop import AgentLoop, JobClass
+from hermitcrab.agent.turn_runner import TurnOutcome, TurnResult
+from hermitcrab.bus.events import InboundMessage
 from hermitcrab.bus.queue import MessageBus
 from hermitcrab.cli.commands import _build_agent_loop_kwargs
 from hermitcrab.config.schema import Config
@@ -133,3 +137,33 @@ def test_agent_loop_kwargs_apply_identity_model_overrides(tmp_path) -> None:
     assert owner_kwargs["job_models"][JobClass.INTERACTIVE_RESPONSE] == "global"
     assert paula_kwargs["job_models"][JobClass.INTERACTIVE_RESPONSE] == "paula-model"
     assert paula_kwargs["job_models"][JobClass.REFLECTION] == "global"
+
+
+@pytest.mark.asyncio
+async def test_interactive_turn_passes_named_model_ref_to_provider_path(tmp_path, monkeypatch) -> None:
+    captured: dict[str, str | None] = {}
+    loop = AgentLoop(
+        bus=MessageBus(),
+        provider=_provider(),
+        workspace=tmp_path / "identities" / "paula",
+        identity_name="paula",
+        identity_root=tmp_path / "identities" / "paula",
+        job_models={JobClass.INTERACTIVE_RESPONSE: "granite4"},
+        named_models={"granite4": Config.model_validate({"models": {"granite4": {"model": "ollama/granite4:350m"}}}).models["granite4"]},
+    )
+
+    async def fake_run_agent_loop(*args, **kwargs):
+        captured["model_override"] = kwargs.get("model_override")
+        return TurnResult(
+            final_content="ok",
+            tools_used=[],
+            messages=[],
+            outcome=TurnOutcome.COMPLETED,
+        )
+
+    monkeypatch.setattr(loop, "_run_agent_loop", fake_run_agent_loop)
+    msg = InboundMessage(channel="cli", sender_id="user", chat_id="direct", content="hello")
+
+    await loop._process_message(msg, session_key="cli:direct")
+
+    assert captured["model_override"] == "granite4"

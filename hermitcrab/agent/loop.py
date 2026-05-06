@@ -1580,7 +1580,7 @@ class AgentLoop:
                 build_result.messages,
                 on_progress=progress_callback,
                 job_class=JobClass.INTERACTIVE_RESPONSE,
-                model_override=self._resolve_interactive_model(session)[1],
+                model_override=self._resolve_interactive_model(session)[0],
             )
             final_content = turn_result.final_content
             if is_empty_response(final_content) or is_placeholder_assistant_reply(final_content):
