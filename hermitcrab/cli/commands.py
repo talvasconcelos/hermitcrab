@@ -466,12 +466,13 @@ async def _shutdown_gateway_runtime(
     await channels.stop_all()
 
 
-def _build_job_models_from_config(config: Config) -> dict | None:
+def _build_job_models_from_config(config: Config, identity_name: str | None = None) -> dict | None:
     """
     Build job_models dict from config for AgentLoop initialization.
 
     Args:
         config: Root configuration object.
+        identity_name: Active identity whose model overrides should apply.
 
     Returns:
         Dict mapping JobClass to model string (or None to skip).
@@ -481,6 +482,9 @@ def _build_job_models_from_config(config: Config) -> dict | None:
 
     job_models_config = config.agents.defaults.job_models
 
+    identity = config.identities.registry.get(identity_name or config.owner_identity_name)
+    identity_models = identity.models if identity is not None else {}
+
     # Check if any job models are actually configured
     has_config = (
         job_models_config.interactive_response
@@ -489,14 +493,15 @@ def _build_job_models_from_config(config: Config) -> dict | None:
         or job_models_config.reflection is not None
         or job_models_config.summarisation is not None
         or job_models_config.subagent is not None
+        or bool(identity_models)
+        or bool(config.identities.default_identity_model)
     )
 
     if not has_config:
         return None  # Use AgentLoop defaults
 
     primary_model = config.agents.defaults.model
-
-    return {
+    job_models = {
         JobClass.INTERACTIVE_RESPONSE: job_models_config.get_model(
             "interactive_response", primary_model
         ),
@@ -506,6 +511,24 @@ def _build_job_models_from_config(config: Config) -> dict | None:
         JobClass.SUMMARISATION: job_models_config.get_model("summarisation", primary_model),
         JobClass.SUBAGENT: job_models_config.get_model("subagent", primary_model),
     }
+    if config.identities.default_identity_model and not identity_models.get("interactiveResponse"):
+        job_models[JobClass.INTERACTIVE_RESPONSE] = config.identities.default_identity_model
+
+    identity_job_keys = {
+        "interactiveResponse": JobClass.INTERACTIVE_RESPONSE,
+        "interactive_response": JobClass.INTERACTIVE_RESPONSE,
+        "journalSynthesis": JobClass.JOURNAL_SYNTHESIS,
+        "journal_synthesis": JobClass.JOURNAL_SYNTHESIS,
+        "distillation": JobClass.DISTILLATION,
+        "reflection": JobClass.REFLECTION,
+        "summarisation": JobClass.SUMMARISATION,
+        "subagent": JobClass.SUBAGENT,
+    }
+    for key, value in identity_models.items():
+        job_class = identity_job_keys.get(key)
+        if job_class is not None and isinstance(value, str) and value.strip():
+            job_models[job_class] = value.strip()
+    return job_models
 
 
 def _build_runtime_model_aliases(config: Config) -> dict[str, str | ModelAliasConfig]:
@@ -608,7 +631,7 @@ def _build_agent_loop_kwargs(
         "session_manager": session_manager,
         "mcp_servers": config.tools.mcp_servers,
         "channels_config": config.channels,
-        "job_models": _build_job_models_from_config(config),
+        "job_models": _build_job_models_from_config(config, target_identity_name),
         "distillation_enabled": config.agents.defaults.enable_distillation,
         "model_aliases": _build_runtime_model_aliases(config),
         "named_models": config.models,

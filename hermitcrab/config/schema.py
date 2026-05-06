@@ -243,7 +243,7 @@ class AgentJobModels(Base):
     subagent: str | None = None  # None = use primary (dedicated model for subagents)
 
     # Reasoning effort control (passed to LiteLLM, ignored by unsupported models)
-    reasoning_effort: Literal["none", "low", "medium", "high"] = "medium"
+    reasoning_effort: Literal["none", "low", "medium", "high"] | None = "medium"
 
     def get_model(self, job_class: str, primary_model: str) -> str | None:
         """

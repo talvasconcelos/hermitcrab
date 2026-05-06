@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from unittest.mock import MagicMock
 
-from hermitcrab.agent.loop import AgentLoop
+from hermitcrab.agent.loop import AgentLoop, JobClass
 from hermitcrab.bus.queue import MessageBus
 from hermitcrab.cli.commands import _build_agent_loop_kwargs
 from hermitcrab.config.schema import Config
@@ -99,3 +99,37 @@ def test_agent_loop_kwargs_include_owner_identity_metadata(tmp_path) -> None:
     assert kwargs["identity_root"] == tmp_path / "identities" / "tal"
     assert kwargs["workspace"] == kwargs["identity_root"]
     assert kwargs["system_root"] == tmp_path / "system"
+
+
+def test_agent_loop_kwargs_apply_identity_model_overrides(tmp_path) -> None:
+    config = Config.model_validate(
+        {
+            "root": str(tmp_path),
+            "models": {
+                "global": {"model": "openai-codex/gpt-5.4-mini"},
+                "paula-model": {"model": "ollama/granite4"},
+            },
+            "agents": {
+                "defaults": {
+                    "model": "ollama/gemma4",
+                    "jobModels": {
+                        "interactiveResponse": "global",
+                        "reflection": "global",
+                    },
+                },
+            },
+            "identities": {
+                "registry": {
+                    "owner": {},
+                    "paula": {"models": {"interactiveResponse": "paula-model"}},
+                }
+            },
+        }
+    )
+
+    owner_kwargs = _build_agent_loop_kwargs(config, _provider(), identity_name="owner")
+    paula_kwargs = _build_agent_loop_kwargs(config, _provider(), identity_name="paula")
+
+    assert owner_kwargs["job_models"][JobClass.INTERACTIVE_RESPONSE] == "global"
+    assert paula_kwargs["job_models"][JobClass.INTERACTIVE_RESPONSE] == "paula-model"
+    assert paula_kwargs["job_models"][JobClass.REFLECTION] == "global"
