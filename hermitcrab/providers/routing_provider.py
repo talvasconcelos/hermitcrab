@@ -13,6 +13,7 @@ from hermitcrab.providers.base import (
     ToolCallEvent,
 )
 from hermitcrab.providers.openai_codex_provider import OpenAICodexProvider
+from hermitcrab.providers.registry import normalize_provider_name
 
 
 class RoutingProvider(LLMProvider):
@@ -40,7 +41,7 @@ class RoutingProvider(LLMProvider):
         resolved_model = request_config.get("model") or model
         provider_name = request_config.get("provider_name")
 
-        if provider_name in {"openai_oauth", "openai_codex"}:
+        if normalize_provider_name(provider_name or "") == "openai_codex":
             return OpenAICodexProvider(default_model=resolved_model), resolved_model
         return None, resolved_model
 

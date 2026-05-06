@@ -388,7 +388,7 @@ def _provider_ready(spec_name: str, spec: Any, provider_config: Any) -> tuple[bo
 
 
 def _oauth_provider_ready(spec_name: str) -> tuple[bool, str]:
-    if spec_name in {"openai_oauth", "openai_codex"}:
+    if spec_name == "openai_codex":
         try:
             from hermitcrab.providers.openai_codex_auth import (
                 resolve_codex_runtime_credentials,
@@ -398,8 +398,7 @@ def _oauth_provider_ready(spec_name: str) -> tuple[bool, str]:
             return True, "OAuth login detected"
         except Exception:
             pass
-        command = "openai-oauth" if spec_name == "openai_oauth" else "openai-codex"
-        return False, f"Run `hermitcrab provider login {command}`"
+        return False, "Run `hermitcrab provider login openai-codex`"
 
     return False, "OAuth login required"
 
@@ -444,10 +443,10 @@ def _build_next_steps(
             steps.append(
                 "Install or start Ollama, pull the selected model, then run `hermitcrab doctor`."
             )
-        elif selected_provider in {"openai_oauth", "openai_codex"}:
-            command = "openai-oauth" if selected_provider == "openai_oauth" else "openai-codex"
+        elif selected_provider == "openai_codex":
             steps.append(
-                f"Run `hermitcrab provider login {command}`, then try `hermitcrab agent -m \"Hello!\"`."
+                "Run `hermitcrab provider login openai-codex`, then try "
+                '`hermitcrab agent -m "Hello!"`.'
             )
         elif selected_provider:
             steps.append(

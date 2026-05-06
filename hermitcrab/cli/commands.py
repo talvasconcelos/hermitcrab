@@ -1069,6 +1069,7 @@ def _make_provider(config: Config):
     from hermitcrab.providers.litellm_provider import LiteLLMProvider
     from hermitcrab.providers.ollama_provider import OllamaProvider
     from hermitcrab.providers.openai_codex_provider import OpenAICodexProvider
+    from hermitcrab.providers.registry import normalize_provider_name
     from hermitcrab.providers.routing_provider import RoutingProvider
 
     model = config.agents.defaults.model
@@ -1115,8 +1116,8 @@ def _make_provider(config: Config):
         return any(config.get_provider_name(candidate) == "ollama" for candidate in candidates)
 
     # OpenAI Codex (OAuth)
-    if provider_name in {"openai_codex", "openai_oauth"} or model.startswith(
-        ("openai-codex/", "openai-oauth/")
+    if provider_name == "openai_codex" or (
+        "/" in model and normalize_provider_name(model.split("/", 1)[0]) == "openai_codex"
     ):
         return OpenAICodexProvider(default_model=resolved_model.model or model)
 
@@ -3019,13 +3020,13 @@ def _register_login(name: str):
 @provider_app.command("login")
 def provider_login(
     provider: str = typer.Argument(
-        ..., help="OAuth provider (e.g. 'openai-oauth', 'openai-codex')"
+        ..., help="OAuth provider (e.g. 'openai-codex')"
     ),
 ):
     """Authenticate with an OAuth provider."""
-    from hermitcrab.providers.registry import PROVIDERS
+    from hermitcrab.providers.registry import PROVIDERS, normalize_provider_name
 
-    key = provider.replace("-", "_")
+    key = normalize_provider_name(provider)
     spec = next((s for s in PROVIDERS if s.name == key and s.is_oauth), None)
     if not spec:
         names = ", ".join(s.name.replace("_", "-") for s in PROVIDERS if s.is_oauth)
@@ -3041,7 +3042,6 @@ def provider_login(
     handler()
 
 
-@_register_login("openai_oauth")
 @_register_login("openai_codex")
 def _login_openai_codex() -> None:
     from hermitcrab.providers.openai_codex_auth import (

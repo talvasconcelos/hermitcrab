@@ -189,28 +189,10 @@ PROVIDERS: tuple[ProviderSpec, ...] = (
         strip_model_prefix=False,
         model_overrides=(),
     ),
-    # OpenAI OAuth: ChatGPT/Codex subscription-backed access via OAuth.
-    ProviderSpec(
-        name="openai_oauth",
-        keywords=("openai-oauth", "chatgpt-oauth"),
-        env_key="",
-        display_name="OpenAI OAuth",
-        litellm_prefix="",
-        skip_prefixes=(),
-        env_extras=(),
-        is_gateway=False,
-        is_local=False,
-        detect_by_key_prefix="",
-        detect_by_base_keyword="chatgpt",
-        default_api_base="https://chatgpt.com/backend-api",
-        strip_model_prefix=False,
-        model_overrides=(),
-        is_oauth=True,
-    ),
     # OpenAI Codex: uses OAuth, not API key.
     ProviderSpec(
         name="openai_codex",
-        keywords=("openai-codex", "codex"),
+        keywords=("openai-codex", "openai-oauth", "chatgpt-oauth", "codex"),
         env_key="",  # OAuth-based, no API key
         display_name="OpenAI Codex",
         litellm_prefix="",  # Not routed through LiteLLM
@@ -452,7 +434,10 @@ def normalize_provider_name(name: str) -> str:
     value = _CAMEL_BOUNDARY.sub("_", str(name or "").strip())
     value = _SEPARATORS.sub("_", value)
     value = _UNDERSCORES.sub("_", value)
-    return value.lower().strip("_")
+    normalized = value.lower().strip("_")
+    if normalized == "openai_oauth":
+        return "openai_codex"
+    return normalized
 
 
 def find_by_model(model: str) -> ProviderSpec | None:

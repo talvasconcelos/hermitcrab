@@ -1,3 +1,4 @@
+from hermitcrab.agent.loop import AgentLoop
 from hermitcrab.config.schema import Config
 from hermitcrab.providers.base import LLMProvider, LLMResponse
 from hermitcrab.providers.openai_codex_auth import codex_cloudflare_headers
@@ -6,10 +7,10 @@ from hermitcrab.providers.routing_provider import RoutingProvider
 
 
 def test_provider_name_normalization_accepts_config_alias_shapes() -> None:
-    assert normalize_provider_name("openaiOauth") == "openai_oauth"
-    assert normalize_provider_name("openaiOAuth") == "openai_oauth"
-    assert normalize_provider_name("openai-oauth") == "openai_oauth"
-    assert normalize_provider_name("openai_oauth") == "openai_oauth"
+    assert normalize_provider_name("openaiOauth") == "openai_codex"
+    assert normalize_provider_name("openaiOAuth") == "openai_codex"
+    assert normalize_provider_name("openai-oauth") == "openai_codex"
+    assert normalize_provider_name("openai_oauth") == "openai_codex"
     assert normalize_provider_name("openaiCodex") == "openai_codex"
     assert normalize_provider_name("githubCopilot") == "github_copilot"
     assert normalize_provider_name("nvidiaNim") == "nvidia_nim"
@@ -34,7 +35,7 @@ def test_camel_case_oauth_prefix_does_not_fall_back_to_openrouter(tmp_path) -> N
     )
 
     assert config.resolve_model_config("gpt-5.4").model == "openaiOauth/gpt-5.4-mini"
-    assert config.get_provider_name("gpt-5.4") == "openai_oauth"
+    assert config.get_provider_name("gpt-5.4") == "openai_codex"
 
 
 def test_camel_case_codex_prefix_does_not_fall_back_to_openrouter(tmp_path) -> None:
@@ -99,6 +100,15 @@ def test_routing_provider_dispatches_codex_directly(monkeypatch) -> None:
 
     assert response.content == "codex"
     assert calls == [("openaiCodex/gpt-5.4-mini", "openaiCodex/gpt-5.4-mini")]
+
+
+def test_codex_model_discovery_has_fallbacks_without_local_cache(tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("CODEX_HOME", str(tmp_path))
+
+    models = AgentLoop._read_local_codex_models()
+
+    assert "gpt-5.4-mini" in models
+    assert "gpt-5.3-codex" in models
 
 
 def test_codex_headers_use_codex_originator() -> None:

@@ -282,7 +282,12 @@ LLM provider credentials.
 
 Each provider supports: `apiKey`, `apiBase`, `extraHeaders`.
 
-Supported providers: `anthropic`, `openai`, `openrouter`, `ollama`, `deepseek`, `groq`, `gemini`, `zhipu`, `dashscope`, `moonshot`, `minimax`, `vllm`, `nvidia_nim`, `aihubmix`, `siliconflow`, `volcengine`, `openai_oauth`, `openai_codex`, `github_copilot`, `custom`.
+Supported providers: `anthropic`, `openai`, `openrouter`, `ollama`, `deepseek`, `groq`, `gemini`, `zhipu`, `dashscope`, `moonshot`, `minimax`, `vllm`, `nvidia_nim`, `aihubmix`, `siliconflow`, `volcengine`, `openai_codex`, `github_copilot`, `custom`.
+
+Use `openai_codex` for ChatGPT/Codex subscription-backed OAuth access. Model ids use the
+`openai-codex/<model>` prefix, for example `openai-codex/gpt-5.4-mini`. Older
+`openai-oauth/...` config values are accepted as aliases, but new config should use
+`openai-codex/...`.
 
 ## gateway
 

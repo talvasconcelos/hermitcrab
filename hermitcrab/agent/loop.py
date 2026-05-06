@@ -118,6 +118,7 @@ from hermitcrab.bus.events import InboundMessage, OutboundMessage
 from hermitcrab.bus.queue import MessageBus
 from hermitcrab.config.schema import ExecToolConfig, ModelAliasConfig, NamedModelConfig
 from hermitcrab.providers.base import LLMProvider
+from hermitcrab.providers.registry import normalize_provider_name
 from hermitcrab.session.manager import Session, SessionManager
 from hermitcrab.utils.helpers import resolve_model_alias_config
 
@@ -657,8 +658,10 @@ class AgentLoop:
             if request_config.get("provider_name"):
                 return True, resolved_model
 
-        if resolved_model.startswith(("openai-codex/", "openai-oauth/")):
-            return True, resolved_model
+        if "/" in resolved_model:
+            provider_prefix = normalize_provider_name(resolved_model.split("/", 1)[0])
+            if provider_prefix == "openai_codex":
+                return True, resolved_model
 
         return (
             False,
@@ -743,7 +746,7 @@ class AgentLoop:
             [
                 "",
                 "Use `/model <name>` to switch this conversation only.",
-                "You can use a named model, a configured alias, or a full model id like `openai-oauth/gpt-5.4`.",
+                "You can use a named model, a configured alias, or a full model id like `openai-codex/gpt-5.4-mini`.",
                 "Use `/model` with no argument to see the active model.",
                 "Use `/model default` to clear the conversation override.",
             ]
@@ -786,6 +789,15 @@ class AgentLoop:
             except Exception:
                 pass
 
+        for model in (
+            "gpt-5.5",
+            "gpt-5.4",
+            "gpt-5.4-mini",
+            "gpt-5.3-codex",
+            "gpt-5.2-codex",
+        ):
+            if model not in ordered:
+                ordered.append(model)
         return ordered
 
     def _build_provider_discovery_lines(self, session: Session, seen: set[str]) -> list[str]:
@@ -802,9 +814,9 @@ class AgentLoop:
             seen.add(key)
             lines.append(f"- `{value}`")
 
-        if provider_prefix in {"openai-codex", "openai-oauth"}:
+        if normalize_provider_name(provider_prefix) == "openai_codex":
             for model in self._read_local_codex_models():
-                _add(f"{provider_prefix}/{model}")
+                _add(f"openai-codex/{model}")
 
         return lines
 
