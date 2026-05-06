@@ -9,7 +9,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 from pydantic.alias_generators import to_camel
 from pydantic_settings import BaseSettings
 
-from hermitcrab.providers.registry import PROVIDERS, find_by_name
+from hermitcrab.providers.registry import PROVIDERS, find_by_name, normalize_provider_name
 
 
 class Base(BaseModel):
@@ -469,7 +469,6 @@ class ProvidersConfig(Base):
     )  # VolcEngine (火山引擎) API gateway
     openai_oauth: ProviderConfig = Field(default_factory=ProviderConfig)  # ChatGPT/Codex OAuth
     openai_codex: ProviderConfig = Field(default_factory=ProviderConfig)  # OpenAI Codex (OAuth)
-    qwen_oauth: ProviderConfig = Field(default_factory=ProviderConfig)  # Qwen Portal OAuth
     github_copilot: ProviderConfig = Field(default_factory=ProviderConfig)  # Github Copilot (OAuth)
     ollama: ProviderConfig = Field(default_factory=ProviderConfig)  # Ollama via LiteLLM routing
     nvidia_nim: ProviderConfig = Field(default_factory=ProviderConfig)  # NVIDIA NIM API
@@ -796,10 +795,11 @@ class Config(BaseSettings):
     ) -> tuple["ProviderConfig | None", str | None]:
         """Match provider config and its registry name. Returns (config, spec_name)."""
         resolved_model = self.resolve_model_config(model).model or ""
+        raw_model_prefix = resolved_model.split("/", 1)[0] if "/" in resolved_model else ""
         model_lower = resolved_model.lower()
         model_normalized = model_lower.replace("-", "_")
         model_prefix = model_lower.split("/", 1)[0] if "/" in model_lower else ""
-        normalized_prefix = model_prefix.replace("-", "_")
+        normalized_prefix = normalize_provider_name(raw_model_prefix)
 
         def _kw_matches(kw: str) -> bool:
             kw = kw.lower()

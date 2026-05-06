@@ -657,9 +657,7 @@ class AgentLoop:
             if request_config.get("provider_name"):
                 return True, resolved_model
 
-        if resolved_model.startswith(
-            ("openai-codex/", "openai-oauth/", "qwen-oauth/", "qwen-portal/")
-        ):
+        if resolved_model.startswith(("openai-codex/", "openai-oauth/")):
             return True, resolved_model
 
         return (
@@ -807,9 +805,6 @@ class AgentLoop:
         if provider_prefix in {"openai-codex", "openai-oauth"}:
             for model in self._read_local_codex_models():
                 _add(f"{provider_prefix}/{model}")
-        elif provider_prefix in {"qwen-oauth", "qwen-portal"}:
-            _add("qwen-oauth/coder-model")
-            _add("qwen-oauth/vision-model")
 
         return lines
 

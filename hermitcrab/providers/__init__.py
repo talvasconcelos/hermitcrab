@@ -4,7 +4,7 @@ from hermitcrab.providers.base import LLMProvider, LLMResponse
 from hermitcrab.providers.litellm_provider import LiteLLMProvider
 from hermitcrab.providers.ollama_provider import OllamaProvider
 from hermitcrab.providers.openai_codex_provider import OpenAICodexProvider
-from hermitcrab.providers.qwen_oauth_provider import QwenOAuthProvider
+from hermitcrab.providers.routing_provider import RoutingProvider
 
 __all__ = [
     "LLMProvider",
@@ -12,5 +12,5 @@ __all__ = [
     "LiteLLMProvider",
     "OllamaProvider",
     "OpenAICodexProvider",
-    "QwenOAuthProvider",
+    "RoutingProvider",
 ]

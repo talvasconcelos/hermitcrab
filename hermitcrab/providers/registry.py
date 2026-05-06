@@ -12,6 +12,7 @@ Every entry writes out all fields so you can copy-paste as a template.
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from typing import Any
 
@@ -223,25 +224,6 @@ PROVIDERS: tuple[ProviderSpec, ...] = (
         strip_model_prefix=False,
         model_overrides=(),
         is_oauth=True,  # OAuth-based authentication
-    ),
-    # Qwen Portal: OAuth-backed OpenAI-compatible endpoint.
-    ProviderSpec(
-        name="qwen_oauth",
-        keywords=("qwen-oauth", "qwen-portal"),
-        env_key="",
-        display_name="Qwen OAuth",
-        litellm_prefix="",
-        skip_prefixes=(),
-        env_extras=(),
-        is_gateway=False,
-        is_local=False,
-        detect_by_key_prefix="",
-        detect_by_base_keyword="portal.qwen.ai",
-        default_api_base="https://portal.qwen.ai/v1",
-        strip_model_prefix=False,
-        model_overrides=(),
-        is_oauth=True,
-        is_direct=True,
     ),
     # Github Copilot: uses OAuth, not API key.
     ProviderSpec(
@@ -460,14 +442,27 @@ PROVIDERS: tuple[ProviderSpec, ...] = (
 # Lookup helpers
 # ---------------------------------------------------------------------------
 
+_CAMEL_BOUNDARY = re.compile(r"(?<=[a-z0-9])(?=[A-Z])")
+_SEPARATORS = re.compile(r"[-\s]+")
+_UNDERSCORES = re.compile(r"_+")
+
+
+def normalize_provider_name(name: str) -> str:
+    """Canonicalize provider ids from config keys, model prefixes, and CLI input."""
+    value = _CAMEL_BOUNDARY.sub("_", str(name or "").strip())
+    value = _SEPARATORS.sub("_", value)
+    value = _UNDERSCORES.sub("_", value)
+    return value.lower().strip("_")
+
 
 def find_by_model(model: str) -> ProviderSpec | None:
     """Match a standard provider by model-name keyword (case-insensitive).
     Skips gateways/local — those are matched by api_key/api_base instead."""
+    raw_model_prefix = model.split("/", 1)[0] if "/" in model else ""
     model_lower = model.lower()
     model_normalized = model_lower.replace("-", "_")
     model_prefix = model_lower.split("/", 1)[0] if "/" in model_lower else ""
-    normalized_prefix = model_prefix.replace("-", "_")
+    normalized_prefix = normalize_provider_name(raw_model_prefix)
     std_specs = [s for s in PROVIDERS if not s.is_gateway and not s.is_local]
 
     # Prefer explicit provider prefix — prevents `github-copilot/...codex` matching openai_codex.
@@ -516,7 +511,8 @@ def find_gateway(
 
 def find_by_name(name: str) -> ProviderSpec | None:
     """Find a provider spec by config field name, e.g. "dashscope"."""
+    normalized = normalize_provider_name(name)
     for spec in PROVIDERS:
-        if spec.name == name:
+        if spec.name == normalized:
             return spec
     return None

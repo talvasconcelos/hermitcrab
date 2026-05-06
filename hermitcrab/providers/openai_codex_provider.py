@@ -9,12 +9,15 @@ from typing import Any, AsyncGenerator
 
 import httpx
 from loguru import logger
-from oauth_cli_kit import get_token as get_codex_token
 
 from hermitcrab.providers.base import LLMProvider, LLMResponse, ToolCallRequest
+from hermitcrab.providers.openai_codex_auth import (
+    DEFAULT_CODEX_BASE_URL,
+    codex_cloudflare_headers,
+    resolve_codex_runtime_credentials,
+)
 
-DEFAULT_CODEX_URL = "https://chatgpt.com/backend-api/codex/responses"
-DEFAULT_ORIGINATOR = "hermitcrab"
+DEFAULT_CODEX_URL = f"{DEFAULT_CODEX_BASE_URL}/responses"
 
 
 class OpenAICodexProvider(LLMProvider):
@@ -36,8 +39,9 @@ class OpenAICodexProvider(LLMProvider):
         model = model or self.default_model
         system_prompt, input_items = _convert_messages(messages)
 
-        token = await asyncio.to_thread(get_codex_token)
-        headers = _build_headers(token.account_id, token.access)
+        creds = await asyncio.to_thread(resolve_codex_runtime_credentials)
+        access_token = creds["api_key"]
+        headers = _build_headers(access_token)
 
         body: dict[str, Any] = {
             "model": _strip_model_prefix(model),
@@ -58,16 +62,26 @@ class OpenAICodexProvider(LLMProvider):
         if tools:
             body["tools"] = _convert_tools(tools)
 
-        url = DEFAULT_CODEX_URL
+        base_url = str(creds.get("base_url") or DEFAULT_CODEX_BASE_URL).rstrip("/")
+        url = f"{base_url}/responses"
 
         try:
             try:
-                content, tool_calls, finish_reason = await _request_codex(url, headers, body, verify=True)
+                content, tool_calls, finish_reason = await _request_codex_with_cert_retry(
+                    url,
+                    headers,
+                    body,
+                )
             except Exception as e:
-                if "CERTIFICATE_VERIFY_FAILED" not in str(e):
+                if "HTTP 401" not in str(e):
                     raise
-                logger.warning("SSL certificate verification failed for Codex API; retrying with verify=False")
-                content, tool_calls, finish_reason = await _request_codex(url, headers, body, verify=False)
+                creds = await asyncio.to_thread(resolve_codex_runtime_credentials, force_refresh=True)
+                headers = _build_headers(creds["api_key"])
+                content, tool_calls, finish_reason = await _request_codex_with_cert_retry(
+                    url,
+                    headers,
+                    body,
+                )
             return LLMResponse(
                 content=content,
                 tool_calls=tool_calls,
@@ -94,13 +108,11 @@ def _strip_model_prefix(model: str) -> str:
     return model
 
 
-def _build_headers(account_id: str, token: str) -> dict[str, str]:
+def _build_headers(token: str) -> dict[str, str]:
     return {
+        **codex_cloudflare_headers(token),
         "Authorization": f"Bearer {token}",
-        "chatgpt-account-id": account_id,
         "OpenAI-Beta": "responses=experimental",
-        "originator": DEFAULT_ORIGINATOR,
-        "User-Agent": "hermitcrab (python)",
         "accept": "text/event-stream",
         "content-type": "application/json",
     }
@@ -118,6 +130,20 @@ async def _request_codex(
                 text = await response.aread()
                 raise RuntimeError(_friendly_error(response.status_code, text.decode("utf-8", "ignore")))
             return await _consume_sse(response)
+
+
+async def _request_codex_with_cert_retry(
+    url: str,
+    headers: dict[str, str],
+    body: dict[str, Any],
+) -> tuple[str, list[ToolCallRequest], str]:
+    try:
+        return await _request_codex(url, headers, body, verify=True)
+    except Exception as e:
+        if "CERTIFICATE_VERIFY_FAILED" not in str(e):
+            raise
+        logger.warning("SSL certificate verification failed for Codex API; retrying with verify=False")
+        return await _request_codex(url, headers, body, verify=False)
 
 
 def _convert_tools(tools: list[dict[str, Any]]) -> list[dict[str, Any]]:

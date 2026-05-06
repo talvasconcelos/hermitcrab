@@ -30,7 +30,7 @@ from hermitcrab.providers.base import (
     ToolCallEvent,
     ToolCallRequest,
 )
-from hermitcrab.providers.registry import find_by_model, find_gateway
+from hermitcrab.providers.registry import find_by_model, find_gateway, normalize_provider_name
 from hermitcrab.providers.utils import function_parts
 
 # Standard OpenAI chat-completion message keys; extras (e.g. reasoning_content) are stripped for strict providers.
@@ -381,7 +381,7 @@ class LiteLLMProvider(LLMProvider):
         if "/" not in model:
             return model
         prefix, remainder = model.split("/", 1)
-        if prefix.lower().replace("-", "_") != spec_name:
+        if normalize_provider_name(prefix) != spec_name:
             return model
         return f"{canonical_prefix}/{remainder}"
 

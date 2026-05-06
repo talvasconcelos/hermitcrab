@@ -7,13 +7,14 @@ import re
 import select
 import shutil
 import signal
-import subprocess
 import sys
 import tempfile
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Literal
 
+import httpx
 import typer
 from prompt_toolkit import PromptSession
 from prompt_toolkit.formatted_text import HTML
@@ -1043,7 +1044,7 @@ def _build_onboard_next_steps() -> list[str]:
             "  1. Choose a provider in [cyan]~/.hermitcrab/config.json[/cyan]",
             "     - Local: install [cyan]Ollama[/cyan] from https://ollama.com and use its local OpenAI-compatible endpoint",
             "     - Cloud: add an API key such as OpenRouter from https://openrouter.ai/keys",
-            "     - OAuth: run [cyan]hermitcrab provider login openai-oauth[/cyan] or [cyan]hermitcrab provider login qwen-oauth[/cyan]",
+            "     - OAuth: run [cyan]hermitcrab provider login openai-codex[/cyan]",
             "  2. Run a quick readiness check: [cyan]hermitcrab doctor[/cyan]",
             '  3. Start chatting: [cyan]hermitcrab agent[/cyan] or [cyan]hermitcrab agent -m "Hello!"[/cyan]',
         ]
@@ -1068,7 +1069,7 @@ def _make_provider(config: Config):
     from hermitcrab.providers.litellm_provider import LiteLLMProvider
     from hermitcrab.providers.ollama_provider import OllamaProvider
     from hermitcrab.providers.openai_codex_provider import OpenAICodexProvider
-    from hermitcrab.providers.qwen_oauth_provider import QwenOAuthProvider
+    from hermitcrab.providers.routing_provider import RoutingProvider
 
     model = config.agents.defaults.model
     resolved_model = config.resolve_model_config(model)
@@ -1118,12 +1119,6 @@ def _make_provider(config: Config):
         ("openai-codex/", "openai-oauth/")
     ):
         return OpenAICodexProvider(default_model=resolved_model.model or model)
-
-    if provider_name == "qwen_oauth" or model.startswith(("qwen-oauth/", "qwen-portal/")):
-        return QwenOAuthProvider(
-            default_model=resolved_model.model or model,
-            api_base=config.get_api_base(model),
-        )
 
     # Custom: direct OpenAI-compatible endpoint, bypasses LiteLLM
     if provider_name == "custom":
@@ -1202,6 +1197,10 @@ def _make_provider(config: Config):
         provider_name=provider_name,
         request_config_resolver=_request_config_resolver,
     )
+    routed_fallback = RoutingProvider(
+        fallback_provider=fallback_provider,
+        request_config_resolver=_request_config_resolver,
+    )
 
     if provider_name == "ollama" or _uses_ollama_anywhere():
         return OllamaProvider(
@@ -1210,10 +1209,10 @@ def _make_provider(config: Config):
             default_model=model,
             extra_headers=p.extra_headers if p else None,
             request_config_resolver=_request_config_resolver,
-            fallback_provider=fallback_provider,
+            fallback_provider=routed_fallback,
         )
 
-    return fallback_provider
+    return routed_fallback
 
 
 # ============================================================================
@@ -3020,7 +3019,7 @@ def _register_login(name: str):
 @provider_app.command("login")
 def provider_login(
     provider: str = typer.Argument(
-        ..., help="OAuth provider (e.g. 'openai-oauth', 'openai-codex', 'qwen-oauth')"
+        ..., help="OAuth provider (e.g. 'openai-oauth', 'openai-codex')"
     ),
 ):
     """Authenticate with an OAuth provider."""
@@ -3045,62 +3044,129 @@ def provider_login(
 @_register_login("openai_oauth")
 @_register_login("openai_codex")
 def _login_openai_codex() -> None:
+    from hermitcrab.providers.openai_codex_auth import (
+        CODEX_OAUTH_CLIENT_ID,
+        CODEX_OAUTH_TOKEN_URL,
+        DEFAULT_CODEX_BASE_URL,
+        codex_access_token_is_expiring,
+        read_codex_cli_tokens,
+        resolve_codex_runtime_credentials,
+        save_codex_tokens,
+    )
+
     try:
-        from oauth_cli_kit import get_token, login_oauth_interactive
-
-        token = None
-        try:
-            token = get_token()
-        except Exception:
-            pass
-        if not (token and token.access):
-            console.print("[cyan]Starting interactive OAuth login...[/cyan]\n")
-            token = login_oauth_interactive(
-                print_fn=lambda s: console.print(s),
-                prompt_fn=lambda s: typer.prompt(s),
-            )
-        if not (token and token.access):
-            console.print("[red]✗ Authentication failed[/red]")
-            raise typer.Exit(1)
-        console.print(
-            f"[green]✓ Authenticated with OpenAI OAuth[/green]  [dim]{token.account_id}[/dim]"
-        )
-    except ImportError:
-        console.print("[red]oauth_cli_kit not installed. Run: pip install oauth-cli-kit[/red]")
-        raise typer.Exit(1)
-
-
-@_register_login("qwen_oauth")
-def _login_qwen_oauth() -> None:
-    from hermitcrab.providers.qwen_oauth_provider import resolve_qwen_runtime_credentials
-
-    qwen_binary = shutil.which("qwen")
-    try:
-        creds = resolve_qwen_runtime_credentials(refresh_if_expiring=False)
-        console.print(f"[green]✓ Authenticated with Qwen OAuth[/green]  [dim]{creds['auth_file']}[/dim]")
-        return
+        existing = resolve_codex_runtime_credentials()
+        access_token = str(existing.get("api_key", "") or "")
+        if access_token and not codex_access_token_is_expiring(access_token, 60):
+            console.print("[green]✓ Existing Codex OAuth credentials are valid[/green]")
+            return
     except Exception:
         pass
 
-    if qwen_binary:
-        console.print("[cyan]Starting Qwen CLI OAuth flow...[/cyan]\n")
-        result = subprocess.run([qwen_binary, "auth", "qwen-oauth"], check=False)
-        if result.returncode != 0:
-            console.print("[red]Qwen CLI login failed.[/red]")
-            raise typer.Exit(1)
-        try:
-            creds = resolve_qwen_runtime_credentials(refresh_if_expiring=False)
-            console.print(
-                f"[green]✓ Authenticated with Qwen OAuth[/green]  [dim]{creds['auth_file']}[/dim]"
-            )
+    cli_tokens = read_codex_cli_tokens()
+    if cli_tokens:
+        console.print("Found existing Codex CLI credentials at [cyan]~/.codex/auth.json[/cyan].")
+        console.print("HermitCrab can import them, but a separate login avoids token rotation conflicts.")
+        if typer.confirm("Import Codex CLI credentials instead of starting a new login?", default=False):
+            save_codex_tokens(cli_tokens)
+            console.print("[green]✓ Imported Codex OAuth credentials[/green]")
             return
-        except Exception as exc:
-            console.print(f"[red]Qwen OAuth credentials were not usable after login: {exc}[/red]")
-            raise typer.Exit(1) from exc
 
-    console.print("[red]Qwen CLI not found and no existing Qwen OAuth credentials were detected.[/red]")
-    console.print("Install the Qwen CLI, then run: [cyan]qwen auth qwen-oauth[/cyan]")
-    raise typer.Exit(1)
+    issuer = "https://auth.openai.com"
+    try:
+        with httpx.Client(timeout=httpx.Timeout(15.0)) as client:
+            response = client.post(
+                f"{issuer}/api/accounts/deviceauth/usercode",
+                json={"client_id": CODEX_OAUTH_CLIENT_ID},
+                headers={"Content-Type": "application/json"},
+            )
+    except Exception as exc:
+        console.print(f"[red]Failed to request Codex device code: {exc}[/red]")
+        raise typer.Exit(1)
+
+    if response.status_code != 200:
+        console.print(f"[red]Codex device code request failed: HTTP {response.status_code}[/red]")
+        raise typer.Exit(1)
+
+    device_data = response.json()
+    user_code = str(device_data.get("user_code", "") or "")
+    device_auth_id = str(device_data.get("device_auth_id", "") or "")
+    poll_interval = max(3, int(device_data.get("interval", "5") or 5))
+    if not user_code or not device_auth_id:
+        console.print("[red]Codex device code response was missing required fields[/red]")
+        raise typer.Exit(1)
+
+    console.print("To continue, open this URL in your browser:")
+    console.print(f"[cyan]{issuer}/codex/device[/cyan]\n")
+    console.print("Enter this code:")
+    console.print(f"[bold cyan]{user_code}[/bold cyan]\n")
+    console.print("Waiting for sign-in... press Ctrl+C to cancel.")
+
+    code_response = None
+    deadline = time.monotonic() + 15 * 60
+    try:
+        with httpx.Client(timeout=httpx.Timeout(15.0)) as client:
+            while time.monotonic() < deadline:
+                time.sleep(poll_interval)
+                poll_response = client.post(
+                    f"{issuer}/api/accounts/deviceauth/token",
+                    json={"device_auth_id": device_auth_id, "user_code": user_code},
+                    headers={"Content-Type": "application/json"},
+                )
+                if poll_response.status_code == 200:
+                    code_response = poll_response.json()
+                    break
+                if poll_response.status_code in (403, 404):
+                    continue
+                console.print(
+                    f"[red]Codex device auth polling failed: HTTP {poll_response.status_code}[/red]"
+                )
+                raise typer.Exit(1)
+    except KeyboardInterrupt:
+        console.print("\n[yellow]Login cancelled[/yellow]")
+        raise typer.Exit(130)
+
+    if code_response is None:
+        console.print("[red]Codex login timed out after 15 minutes[/red]")
+        raise typer.Exit(1)
+
+    authorization_code = str(code_response.get("authorization_code", "") or "")
+    code_verifier = str(code_response.get("code_verifier", "") or "")
+    if not authorization_code or not code_verifier:
+        console.print("[red]Codex device auth response was missing exchange fields[/red]")
+        raise typer.Exit(1)
+
+    try:
+        with httpx.Client(timeout=httpx.Timeout(15.0)) as client:
+            token_response = client.post(
+                CODEX_OAUTH_TOKEN_URL,
+                data={
+                    "grant_type": "authorization_code",
+                    "code": authorization_code,
+                    "redirect_uri": f"{issuer}/deviceauth/callback",
+                    "client_id": CODEX_OAUTH_CLIENT_ID,
+                    "code_verifier": code_verifier,
+                },
+                headers={"Content-Type": "application/x-www-form-urlencoded"},
+            )
+    except Exception as exc:
+        console.print(f"[red]Codex token exchange failed: {exc}[/red]")
+        raise typer.Exit(1)
+
+    if token_response.status_code != 200:
+        console.print(f"[red]Codex token exchange failed: HTTP {token_response.status_code}[/red]")
+        raise typer.Exit(1)
+
+    tokens = token_response.json()
+    access_token = str(tokens.get("access_token", "") or "")
+    refresh_token = str(tokens.get("refresh_token", "") or "")
+    if not access_token or not refresh_token:
+        console.print("[red]Codex token exchange did not return complete credentials[/red]")
+        raise typer.Exit(1)
+
+    save_codex_tokens({"access_token": access_token, "refresh_token": refresh_token})
+    console.print("[green]✓ Authenticated with OpenAI Codex OAuth[/green]")
+    console.print(f"[dim]Endpoint: {DEFAULT_CODEX_BASE_URL}[/dim]")
 
 
 @_register_login("github_copilot")

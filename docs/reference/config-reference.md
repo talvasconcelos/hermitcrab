@@ -276,7 +276,7 @@ LLM provider credentials.
 
 Each provider supports: `apiKey`, `apiBase`, `extraHeaders`.
 
-Supported providers: `anthropic`, `openai`, `openrouter`, `ollama`, `deepseek`, `groq`, `gemini`, `zhipu`, `dashscope`, `moonshot`, `minimax`, `vllm`, `nvidia_nim`, `aihubmix`, `siliconflow`, `volcengine`, `openai_oauth`, `openai_codex`, `qwen_oauth`, `github_copilot`, `custom`.
+Supported providers: `anthropic`, `openai`, `openrouter`, `ollama`, `deepseek`, `groq`, `gemini`, `zhipu`, `dashscope`, `moonshot`, `minimax`, `vllm`, `nvidia_nim`, `aihubmix`, `siliconflow`, `volcengine`, `openai_oauth`, `openai_codex`, `github_copilot`, `custom`.
 
 ## gateway
 
