@@ -114,6 +114,51 @@ def test_identity_registry_accepts_private_key_and_derives_pubkey() -> None:
     assert identity.nostr_public_key == nostr_pubkey_from_private_key(private_key)
 
 
+def test_identity_registry_accepts_nsec_private_key_and_derives_pubkey() -> None:
+    from pynostr.key import PrivateKey
+
+    private_key = PrivateKey()
+    nsec = private_key.bech32()
+    config = Config.model_validate(
+        {
+            "identities": {
+                "ownerIdentity": "alice",
+                "registry": {
+                    "alice": {"nostrPrivateKey": nsec},
+                },
+            }
+        }
+    )
+
+    identity = config.identities.registry["alice"]
+    assert identity.nostr_private_key == private_key.hex()
+    assert identity.nostr_public_key == private_key.public_key.hex()
+
+
+def test_identity_registry_private_key_overrides_stale_pubkey() -> None:
+    from pynostr.key import PrivateKey
+
+    private_key = PrivateKey()
+    stale_pubkey = PrivateKey().public_key.bech32()
+    config = Config.model_validate(
+        {
+            "identities": {
+                "ownerIdentity": "alice",
+                "registry": {
+                    "alice": {
+                        "nostrPrivateKey": private_key.hex(),
+                        "nostrPublicKey": stale_pubkey,
+                    },
+                },
+            }
+        }
+    )
+
+    identity = config.identities.registry["alice"]
+    assert identity.nostr_private_key == private_key.hex()
+    assert identity.nostr_public_key == private_key.public_key.hex()
+
+
 def test_identity_registry_rejects_pubkey_without_private_key() -> None:
     from pynostr.key import PrivateKey
 

@@ -337,13 +337,7 @@ class IdentityConfig(Base):
         self.nostr_private_key = self.nostr_private_key.strip()
         if self.nostr_private_key:
             self.nostr_private_key = normalize_nostr_private_key(self.nostr_private_key)
-            derived_pubkey = nostr_pubkey_from_private_key(self.nostr_private_key)
-            if self.nostr_public_key:
-                self.nostr_public_key = normalize_nostr_pubkey(self.nostr_public_key)
-                if self.nostr_public_key != derived_pubkey:
-                    raise ValueError("identity nostrPublicKey does not match nostrPrivateKey")
-            else:
-                self.nostr_public_key = derived_pubkey
+            self.nostr_public_key = nostr_pubkey_from_private_key(self.nostr_private_key)
         elif self.nostr_public_key:
             raise ValueError("identity nostrPrivateKey is required when nostrPublicKey is set")
         else:

@@ -136,6 +136,7 @@ Identity registry and owner identity policy.
         "label": "Owner",
         "role": "owner",
         "root": "owner",
+        "nostrPrivateKey": "nsec1...",
         "active": true,
         "models": {
           "interactiveResponse": "main"
@@ -163,7 +164,12 @@ Identity registry and owner identity policy.
 | `active` | No | Whether routing and background work should use this identity |
 | `models` | No | Per-identity named-model overrides |
 | `excludedModels` | No | Named models this identity may not use |
-| `nostrPrivateKey` | No | Identity key used for identity-bound Nostr behavior |
+| `nostrPrivateKey` | No | Identity Nostr private key as `nsec` or hex; generated if omitted |
+| `nostrPublicKey` | No | Derived from `nostrPrivateKey`; omit in hand-written config |
+
+For identity entries, prefer setting only `nostrPrivateKey`. HermitCrab stores keys internally as
+hex and derives the public key from the private key. Nostr sender routing belongs in
+`channels.nostr.identityBindings`, not in the identity registry.
 
 ## models
 
