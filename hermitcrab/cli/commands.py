@@ -397,57 +397,82 @@ async def _run_gateway_inbound_router(
     """Route inbound gateway messages to identity-specific agent loops."""
     from loguru import logger
 
-    while True:
-        try:
-            msg = await asyncio.wait_for(bus.consume_inbound(), timeout=1.0)
-            route = _resolve_gateway_identity_route(
-                msg,
-                owner_identity_name=owner_agent.identity_name,
-            )
-            logger.debug(
-                "Gateway inbound route: channel={} chat_id={} route_target={} route_reason={} identity_agent={}",
-                msg.channel,
-                msg.chat_id,
-                route.target,
-                route.reason,
-                identity_agent_key(route.identity_name or owner_agent.identity_name),
-            )
-            if route.target == "denied":
-                owner_agent.audit_event(
-                    "gateway.identity_route_denied",
-                    session_key=msg.session_key,
-                    msg=msg,
-                    identity_agent=identity_agent_key(owner_agent.identity_name),
-                    route_reason=route.reason,
-                )
-                continue
-            try:
-                agent_for_msg = await get_or_create_agent(route.identity_name or owner_agent.identity_name)
-            except Exception as e:
-                logger.warning("Identity route failed; denying message: {}", e)
-                owner_agent.audit_event(
-                    "gateway.identity_route_denied",
-                    session_key=msg.session_key,
-                    msg=msg,
-                    identity_agent=identity_agent_key(owner_agent.identity_name),
-                    route_reason=f"identity_unavailable:{route.identity_name}",
-                )
-                continue
-            agent_for_msg.audit_event(
-                "gateway.identity_route",
+    pending_tasks: set[asyncio.Task[None]] = set()
+
+    async def handle_routed_message(msg: Any) -> None:
+        route = _resolve_gateway_identity_route(
+            msg,
+            owner_identity_name=owner_agent.identity_name,
+        )
+        logger.debug(
+            "Gateway inbound route: channel={} chat_id={} route_target={} route_reason={} identity_agent={}",
+            msg.channel,
+            msg.chat_id,
+            route.target,
+            route.reason,
+            identity_agent_key(route.identity_name or owner_agent.identity_name),
+        )
+        if route.target == "denied":
+            owner_agent.audit_event(
+                "gateway.identity_route_denied",
                 session_key=msg.session_key,
                 msg=msg,
-                identity_agent=identity_agent_key(agent_for_msg.identity_name),
+                identity_agent=identity_agent_key(owner_agent.identity_name),
                 route_reason=route.reason,
             )
-            response = await agent_for_msg.handle_inbound(msg)
-            if response is not None:
-                await bus.publish_outbound(response)
-        except asyncio.TimeoutError:
-            continue
+            return
+        try:
+            agent_for_msg = await get_or_create_agent(route.identity_name or owner_agent.identity_name)
         except Exception as e:
-            logger.error("Gateway inbound router loop error: {}", e)
-            continue
+            logger.warning("Identity route failed; denying message: {}", e)
+            owner_agent.audit_event(
+                "gateway.identity_route_denied",
+                session_key=msg.session_key,
+                msg=msg,
+                identity_agent=identity_agent_key(owner_agent.identity_name),
+                route_reason=f"identity_unavailable:{route.identity_name}",
+            )
+            return
+        agent_for_msg.audit_event(
+            "gateway.identity_route",
+            session_key=msg.session_key,
+            msg=msg,
+            identity_agent=identity_agent_key(agent_for_msg.identity_name),
+            route_reason=route.reason,
+        )
+        response = await agent_for_msg.handle_inbound(msg)
+        if response is not None:
+            await bus.publish_outbound(response)
+
+    def track_task(task: asyncio.Task[None]) -> None:
+        pending_tasks.add(task)
+
+        def on_done(done_task: asyncio.Task[None]) -> None:
+            pending_tasks.discard(done_task)
+            if done_task.cancelled():
+                return
+            exc = done_task.exception()
+            if exc is not None:
+                logger.error("Gateway inbound routed task error: {}", exc)
+
+        task.add_done_callback(on_done)
+
+    try:
+        while True:
+            try:
+                msg = await asyncio.wait_for(bus.consume_inbound(), timeout=1.0)
+                task = asyncio.create_task(handle_routed_message(msg))
+                track_task(task)
+            except asyncio.TimeoutError:
+                continue
+            except Exception as e:
+                logger.error("Gateway inbound router loop error: {}", e)
+                continue
+    finally:
+        for task in pending_tasks:
+            task.cancel()
+        if pending_tasks:
+            await asyncio.gather(*pending_tasks, return_exceptions=True)
 
 
 async def _shutdown_gateway_runtime(
