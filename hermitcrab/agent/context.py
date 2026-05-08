@@ -26,7 +26,7 @@ class ContextBuilder:
     """
 
     SYSTEM_BOOTSTRAP_FILES = ["AGENTS.md", "TOOLS.md"]
-    IDENTITY_BOOTSTRAP_FILES = ["SOUL.md", "USER.md", "IDENTITY.md"]
+    IDENTITY_BOOTSTRAP_FILES = ["IDENTITY.md", "SOUL.md", "USER.md"]
     ONBOARDING_FLAG_FILE = ".onboarding_mode"
     ONBOARDING_PROMPT_FILE = "ONBOARDING_MODE.md"
 
@@ -77,18 +77,10 @@ class ContextBuilder:
         auto_skills = self.skills.select_skills(current_message, history or [])
         selected_skills = list(dict.fromkeys((skill_names or []) + auto_skills))
 
-        fixed_parts = []
-
-        # Core identity
-        fixed_parts.append(self._get_identity())
-
-        fixed_parts.append(
-            "You are the assistant. Treat this workspace as your working area and follow the "
-            "bootstrap files below as the authoritative operating rules."
-        )
+        fixed_parts = [self._load_identity_contract(), self._get_identity()]
 
         # Bootstrap files
-        bootstrap = self._load_bootstrap_files()
+        bootstrap = self._load_system_bootstrap_files()
         if bootstrap:
             fixed_parts.append(bootstrap)
         onboarding_prompt = self._load_onboarding_prompt()
@@ -101,7 +93,7 @@ class ContextBuilder:
         if scratchpad_path:
             fixed_parts.append(
                 "# Scratchpad\n\n"
-                f"Session scratchpad: {scratchpad_path}\n"
+                "A session scratchpad may be provided near the active user turn. "
                 "Use it as transient working memory only. It is archived and not long-term memory."
             )
 
@@ -226,19 +218,43 @@ class ContextBuilder:
                 parts.append(path.read_text(encoding="utf-8").strip())
         return "\n\n".join(p for p in parts if p)
 
+    def _load_identity_contract(self) -> str:
+        """Load the identity-defining prompt layer."""
+        parts = []
+        for filename in self.IDENTITY_BOOTSTRAP_FILES:
+            file_path = self.workspace / filename
+            if not file_path.exists():
+                continue
+            content = file_path.read_text(encoding="utf-8").strip()
+            if content:
+                parts.append(f"## {filename}\n\n{content}")
+
+        if not parts:
+            parts.append("HermitCrab is a durable local AI collaborator rooted in this workspace.")
+
+        return (
+            "# Identity Contract\n\n"
+            "This section defines HermitCrab's identity, personality, user relationship, and "
+            "communication style. The model provider is only the execution backend; preserve "
+            "this identity across model changes. Follow this contract unless a higher-priority "
+            "safety, security, or user instruction explicitly conflicts.\n\n"
+            "Do not identify as ChatGPT, OpenAI, Anthropic, or any other backend unless the user "
+            "asks which provider/model is being used.\n\n"
+            "## Output Style\n\n"
+            "- Default to concise, direct replies.\n"
+            "- Do not add generic assistant closers or offers for next steps.\n"
+            "- Match the active identity files and channel context before provider defaults.\n\n"
+            + "\n\n".join(parts)
+        )
+
     def _get_identity(self) -> str:
-        """Get the core identity section."""
-        now = datetime.now().strftime("%Y-%m-%d %H:%M (%A)")
-        tz = _time.strftime("%Z") or "UTC"
+        """Get the runtime operating context section."""
         workspace_root = self.workspace.expanduser().resolve()
         workspace_path = str(workspace_root)
         system = platform.system()
         runtime = f"{'macOS' if system == 'Darwin' else system} {platform.machine()}, Python {platform.python_version()}"
 
-        return f"""# hermitcrab
-
-## Current Time
-{now} ({tz})
+        return f"""# HermitCrab Runtime
 
 ## Runtime
 {runtime}
@@ -246,7 +262,7 @@ class ContextBuilder:
 ## Workspace
 Your workspace is at: {workspace_path}
 - Custom skills: {workspace_path}/skills/{{skill-name}}/SKILL.md
-- Bootstrap files in the workspace define repo policy, file placement, and long-term memory rules.
+- Bootstrap files define repo policy, file placement, operating rules, and long-term memory rules.
 
 ## Surroundings
 - Workspace surfaces by purpose:
@@ -324,19 +340,14 @@ Use subagents for complex, time-consuming, or specialized tasks. For substantial
             '- spawn(task="...", label="...", model="qwen")'
         )
 
-    def _load_bootstrap_files(self) -> str:
-        """Load system and identity bootstrap files."""
+    def _load_system_bootstrap_files(self) -> str:
+        """Load operational bootstrap files that do not define identity."""
         parts = []
 
         roots_and_files: list[tuple[Path, list[str]]] = []
         if self.system_root is not None:
             roots_and_files.append((self.system_root, self.SYSTEM_BOOTSTRAP_FILES))
-        roots_and_files.append(
-            (
-                self.workspace,
-                self.SYSTEM_BOOTSTRAP_FILES + self.IDENTITY_BOOTSTRAP_FILES,
-            )
-        )
+        roots_and_files.append((self.workspace, self.SYSTEM_BOOTSTRAP_FILES))
 
         seen: set[Path] = set()
         for root, filenames in roots_and_files:
@@ -349,6 +360,18 @@ Use subagents for complex, time-consuming, or specialized tasks. For substantial
                 parts.append(f"## {filename}\n\n{content}")
 
         return "\n\n".join(parts) if parts else ""
+
+    def _load_bootstrap_files(self) -> str:
+        """Load all bootstrap files for compatibility with older callers."""
+        parts = [self._load_system_bootstrap_files()]
+        identity = []
+        for filename in self.IDENTITY_BOOTSTRAP_FILES:
+            file_path = self.workspace / filename
+            if file_path.exists():
+                identity.append(f"## {filename}\n\n{file_path.read_text(encoding='utf-8')}")
+        if identity:
+            parts.append("\n\n".join(identity))
+        return "\n\n".join(p for p in parts if p)
 
     def _load_onboarding_prompt(self) -> str:
         """Load onboarding instructions when workspace onboarding flag is enabled."""
@@ -400,7 +423,7 @@ Use subagents for complex, time-consuming, or specialized tasks. For substantial
             history=history,
         )
         if channel and chat_id:
-            system_prompt += f"\n\n## Current Session\nChannel: {channel}\nChat ID: {chat_id}"
+            system_prompt += "\n\n## Session Context\nRuntime session details are provided near the active user turn."
         messages.append({"role": "system", "content": system_prompt})
 
         # History (last N messages, for conversation context and to limit token usage)
@@ -409,11 +432,28 @@ Use subagents for complex, time-consuming, or specialized tasks. For substantial
         else:
             messages.extend(history)
 
+        runtime_context = self._build_runtime_context(channel, chat_id, scratchpad_path)
+        if runtime_context:
+            messages.append({"role": "user", "content": runtime_context})
+
         # Current message (with optional image attachments)
         user_content = self._build_user_content(current_message, media)
         messages.append({"role": "user", "content": user_content})
 
         return messages
+
+    def _build_runtime_context(
+        self, channel: str | None, chat_id: str | None, scratchpad_path: str | None
+    ) -> str:
+        """Build volatile per-turn context outside the stable system prompt prefix."""
+        now = datetime.now().strftime("%Y-%m-%d %H:%M (%A)")
+        tz = _time.strftime("%Z") or "UTC"
+        lines = ["## Runtime Context", f"Current time: {now} ({tz})"]
+        if channel and chat_id:
+            lines.extend((f"Channel: {channel}", f"Chat ID: {chat_id}"))
+        if scratchpad_path:
+            lines.append(f"Session scratchpad: {scratchpad_path}")
+        return "\n".join(lines)
 
     def _build_memory_queries(
         self, current_message: str | None, history: list[dict[str, Any]]

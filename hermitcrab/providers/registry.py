@@ -14,7 +14,9 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Literal
+
+InstructionRole = Literal["system", "developer"]
 
 
 @dataclass(frozen=True)
@@ -60,6 +62,9 @@ class ProviderSpec:
 
     # Provider supports cache_control on content blocks (e.g. Anthropic prompt caching)
     supports_prompt_caching: bool = False
+
+    # Strongest chat-completions role this provider supports for harness instructions.
+    instruction_role: InstructionRole = "system"
 
     @property
     def label(self) -> str:
@@ -188,6 +193,7 @@ PROVIDERS: tuple[ProviderSpec, ...] = (
         default_api_base="",
         strip_model_prefix=False,
         model_overrides=(),
+        instruction_role="developer",
     ),
     # OpenAI Codex: uses OAuth, not API key.
     ProviderSpec(

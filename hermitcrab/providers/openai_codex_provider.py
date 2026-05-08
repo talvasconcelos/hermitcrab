@@ -18,6 +18,7 @@ from hermitcrab.providers.openai_codex_auth import (
 )
 
 DEFAULT_CODEX_URL = f"{DEFAULT_CODEX_BASE_URL}/responses"
+CODEX_PROMPT_CACHE_FAMILY = "hermitcrab-codex-v1"
 
 
 class OpenAICodexProvider(LLMProvider):
@@ -49,9 +50,9 @@ class OpenAICodexProvider(LLMProvider):
             "stream": True,
             "instructions": system_prompt,
             "input": input_items,
-            "text": {"verbosity": "medium"},
+            "text": {"verbosity": "low"},
             "include": ["reasoning.encrypted_content"],
-            "prompt_cache_key": _prompt_cache_key(messages),
+            "prompt_cache_key": _prompt_cache_key(model),
             "tool_choice": "auto",
             "parallel_tool_calls": True,
         }
@@ -67,7 +68,7 @@ class OpenAICodexProvider(LLMProvider):
 
         try:
             try:
-                content, tool_calls, finish_reason = await _request_codex_with_cert_retry(
+                content, tool_calls, finish_reason, usage = await _request_codex_with_cert_retry(
                     url,
                     headers,
                     body,
@@ -77,7 +78,7 @@ class OpenAICodexProvider(LLMProvider):
                     raise
                 creds = await asyncio.to_thread(resolve_codex_runtime_credentials, force_refresh=True)
                 headers = _build_headers(creds["api_key"])
-                content, tool_calls, finish_reason = await _request_codex_with_cert_retry(
+                content, tool_calls, finish_reason, usage = await _request_codex_with_cert_retry(
                     url,
                     headers,
                     body,
@@ -86,6 +87,7 @@ class OpenAICodexProvider(LLMProvider):
                 content=content,
                 tool_calls=tool_calls,
                 finish_reason=finish_reason,
+                usage=usage,
             )
         except Exception as e:
             return LLMResponse(
@@ -123,7 +125,7 @@ async def _request_codex(
     headers: dict[str, str],
     body: dict[str, Any],
     verify: bool,
-) -> tuple[str, list[ToolCallRequest], str]:
+) -> tuple[str, list[ToolCallRequest], str, dict[str, int]]:
     async with httpx.AsyncClient(timeout=60.0, verify=verify) as client:
         async with client.stream("POST", url, headers=headers, json=body) as response:
             if response.status_code != 200:
@@ -136,7 +138,7 @@ async def _request_codex_with_cert_retry(
     url: str,
     headers: dict[str, str],
     body: dict[str, Any],
-) -> tuple[str, list[ToolCallRequest], str]:
+) -> tuple[str, list[ToolCallRequest], str, dict[str, int]]:
     try:
         return await _request_codex(url, headers, body, verify=True)
     except Exception as e:
@@ -252,8 +254,15 @@ def _split_tool_call_id(tool_call_id: Any) -> tuple[str, str | None]:
     return "call_0", None
 
 
-def _prompt_cache_key(messages: list[dict[str, Any]]) -> str:
-    raw = json.dumps(messages, ensure_ascii=True, sort_keys=True)
+def _prompt_cache_key(model: str) -> str:
+    raw = json.dumps(
+        {
+            "family": CODEX_PROMPT_CACHE_FAMILY,
+            "model": _strip_model_prefix(model),
+        },
+        ensure_ascii=True,
+        sort_keys=True,
+    )
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
 
@@ -277,11 +286,12 @@ async def _iter_sse(response: httpx.Response) -> AsyncGenerator[dict[str, Any], 
         buffer.append(line)
 
 
-async def _consume_sse(response: httpx.Response) -> tuple[str, list[ToolCallRequest], str]:
+async def _consume_sse(response: httpx.Response) -> tuple[str, list[ToolCallRequest], str, dict[str, int]]:
     content = ""
     tool_calls: list[ToolCallRequest] = []
     tool_call_buffers: dict[str, dict[str, Any]] = {}
     finish_reason = "stop"
+    usage: dict[str, int] = {}
 
     async for event in _iter_sse(response):
         event_type = event.get("type")
@@ -326,12 +336,39 @@ async def _consume_sse(response: httpx.Response) -> tuple[str, list[ToolCallRequ
                     )
                 )
         elif event_type == "response.completed":
-            status = (event.get("response") or {}).get("status")
+            response_payload = event.get("response") or {}
+            status = response_payload.get("status")
             finish_reason = _map_finish_reason(status)
+            usage = _parse_usage(response_payload.get("usage"))
         elif event_type in {"error", "response.failed"}:
             raise RuntimeError("Codex response failed")
 
-    return content, tool_calls, finish_reason
+    return content, tool_calls, finish_reason, usage
+
+
+def _parse_usage(raw_usage: Any) -> dict[str, int]:
+    if not isinstance(raw_usage, dict):
+        return {}
+
+    usage: dict[str, int] = {}
+    for source_key, target_key in (
+        ("prompt_tokens", "prompt_tokens"),
+        ("input_tokens", "prompt_tokens"),
+        ("completion_tokens", "completion_tokens"),
+        ("output_tokens", "completion_tokens"),
+        ("total_tokens", "total_tokens"),
+    ):
+        value = raw_usage.get(source_key)
+        if isinstance(value, int):
+            usage[target_key] = value
+
+    details = raw_usage.get("prompt_tokens_details") or raw_usage.get("input_tokens_details")
+    if isinstance(details, dict):
+        cached_tokens = details.get("cached_tokens")
+        if isinstance(cached_tokens, int):
+            usage["cached_tokens"] = cached_tokens
+
+    return usage
 
 
 _FINISH_REASON_MAP = {"completed": "stop", "incomplete": "length", "failed": "error", "cancelled": "error"}

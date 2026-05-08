@@ -110,3 +110,31 @@ def test_context_builder_loads_system_and_identity_bootstrap_files(tmp_path) -> 
 
     assert "system rules" in prompt
     assert "identity rules" in prompt
+
+
+def test_context_builder_keeps_volatile_session_context_out_of_system_prefix(tmp_path) -> None:
+    config = Config.model_validate({"root": str(tmp_path)})
+    bootstrap_standard_layout(config)
+
+    builder = ContextBuilder(
+        config.owner_identity_root_path,
+        system_root=config.system_root_path,
+    )
+
+    messages = builder.build_messages(
+        history=[],
+        current_message="hello",
+        channel="nostr",
+        chat_id="abc123",
+        scratchpad_path="/tmp/session.md",
+    )
+
+    system_prompt = messages[0]["content"]
+    runtime_context = messages[-2]["content"]
+
+    assert "Current time:" not in system_prompt
+    assert "Chat ID: abc123" not in system_prompt
+    assert "Session scratchpad: /tmp/session.md" not in system_prompt
+    assert "Current time:" in runtime_context
+    assert "Chat ID: abc123" in runtime_context
+    assert "Session scratchpad: /tmp/session.md" in runtime_context
