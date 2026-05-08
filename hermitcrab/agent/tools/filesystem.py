@@ -40,7 +40,7 @@ class ReadFileTool(Tool):
 
     @property
     def description(self) -> str:
-        return "Read the contents of a file at the given path."
+        return "Read the contents of a file at the given path, optionally from a character offset."
 
     @property
     def parameters(self) -> dict[str, Any]:
@@ -50,12 +50,28 @@ class ReadFileTool(Tool):
                 "path": {
                     "type": "string",
                     "description": "The file path to read"
-                }
+                },
+                "offset": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "description": "Optional zero-based character offset to start reading from",
+                },
+                "limit": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "description": "Optional maximum number of characters to return",
+                },
             },
             "required": ["path"]
         }
 
-    async def execute(self, path: str, **kwargs: Any) -> str:
+    async def execute(
+        self,
+        path: str,
+        offset: int | None = None,
+        limit: int | None = None,
+        **kwargs: Any,
+    ) -> str:
         try:
             file_path = _resolve_path(path, self._workspace, self._allowed_dir)
             if (
@@ -72,7 +88,24 @@ class ReadFileTool(Tool):
                 return f"Error: Not a file: {path}"
 
             content = file_path.read_text(encoding="utf-8")
-            return content
+            if offset is None and limit is None:
+                return content
+
+            start = offset or 0
+            if start > len(content):
+                return (
+                    f"[read_file slice path={file_path} offset={start} limit={limit or 'all'} "
+                    f"total_chars={len(content)} returned_chars=0 next_offset=null]\n"
+                )
+            end = len(content) if limit is None else min(len(content), start + limit)
+            sliced = content[start:end]
+            next_offset = end if end < len(content) else None
+            return (
+                f"[read_file slice path={file_path} offset={start} limit={limit or 'all'} "
+                f"total_chars={len(content)} returned_chars={len(sliced)} "
+                f"next_offset={next_offset if next_offset is not None else 'null'}]\n"
+                f"{sliced}"
+            )
         except PermissionError as e:
             return f"Error: {e}"
         except Exception as e:
