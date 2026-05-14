@@ -32,6 +32,7 @@ from hermitcrab.config.schema import (
     Config,
     IdentityConfig,
     ModelAliasConfig,
+    NamedModelConfig,
     normalize_nostr_pubkey,
 )
 
@@ -962,6 +963,67 @@ def onboard():
         console.print(line)
 
 
+@app.command()
+def setup(
+    yes: bool = typer.Option(False, "--yes", "-y", help="Run non-interactively with safe defaults"),
+    provider: str | None = typer.Option(None, "--provider", help="Provider to configure, e.g. openrouter or ollama"),
+    model: str | None = typer.Option(None, "--model", help="Default model id or existing named model"),
+    model_name: str = typer.Option("main", "--model-name", help="Name to save the default model under"),
+    api_key_env: str | None = typer.Option(
+        None, "--api-key-env", help="Read provider API key from this environment variable"
+    ),
+    owner_label: str | None = typer.Option(None, "--owner-label", help="Display label for the owner identity"),
+):
+    """Guided admin setup for config, owner identity, and default model."""
+    from hermitcrab.config.loader import get_config_path, load_config, save_config
+
+    config_path = get_config_path()
+    config = load_config() if config_path.exists() else Config(root=str(config_path.parent))
+
+    if not yes:
+        console.print(f"{__logo__} hermitcrab setup\n")
+        console.print("This configures the admin CLI and the owner identity.")
+        console.print(
+            "Other users can be added later and should normally talk through channels like Nostr DMs.\n"
+        )
+
+        if provider is None:
+            provider = typer.prompt(
+                "Provider (ollama/openrouter/custom, blank to keep current)", default=""
+            ) or None
+        if model is None:
+            model = typer.prompt("Default model id or named model (blank to keep current)", default="") or None
+        if owner_label is None:
+            owner_label = typer.prompt("Owner display label (blank to keep current)", default="") or None
+
+    if provider:
+        _configure_provider(config, provider, api_key=_api_key_from_env(api_key_env))
+
+    if model:
+        if model in config.models:
+            config.agents.defaults.model = model
+        else:
+            provider_options = _provider_options(provider)
+            config.models[model_name] = NamedModelConfig(model=model, provider_options=provider_options)
+            config.agents.defaults.model = model_name
+
+    owner = config.identities.registry[config.owner_identity_name]
+    if owner_label:
+        owner.label = owner_label
+
+    validated = Config.model_validate(config.model_dump(by_alias=True))
+    save_config(validated)
+    bootstrap_standard_layout(validated, announce=console.print)
+
+    console.print(f"[green]✓[/green] Setup saved at {config_path}")
+    console.print(f"Owner identity: [cyan]{validated.owner_identity_name}[/cyan]")
+    console.print(f"Default model: [cyan]{validated.agents.defaults.model}[/cyan]")
+    console.print("\nNext steps:")
+    console.print("  1. Run [cyan]hermitcrab doctor[/cyan]")
+    console.print('  2. Try [cyan]hermitcrab agent -m "Hello"[/cyan]')
+    console.print("  3. Add users when needed: [cyan]hermitcrab user add alice --label Alice[/cyan]")
+
+
 def bootstrap_standard_layout(config: Config, announce: Callable[[str], None] | None = None) -> None:
     """Create or refresh the system and owner identity roots."""
     system_root = config.system_root_path
@@ -1804,6 +1866,9 @@ app.add_typer(people_app, name="people")
 user_app = typer.Typer(help="Manage identity-scoped users")
 app.add_typer(user_app, name="user")
 
+model_app = typer.Typer(help="Manage named models and defaults")
+app.add_typer(model_app, name="model")
+
 
 def _save_runtime_config(config: Config) -> None:
     """Validate and save the runtime config after CLI mutation."""
@@ -1815,6 +1880,52 @@ def _save_runtime_config(config: Config) -> None:
         console.print(f"[red]Error: {exc}[/red]")
         raise typer.Exit(1) from exc
     save_config(validated)
+
+
+def _configure_provider(config: Config, provider: str, *, api_key: str | None = None) -> None:
+    """Apply a provider choice to config without forcing manual JSON edits."""
+    provider_key = provider.strip().lower().replace("-", "_")
+    if provider_key == "openrouter":
+        config.providers.openrouter.api_key = api_key or config.providers.openrouter.api_key
+    elif provider_key == "ollama":
+        config.providers.ollama.api_base = config.providers.ollama.api_base or "http://localhost:11434"
+    elif provider_key == "custom":
+        config.providers.custom.api_key = api_key or config.providers.custom.api_key
+    else:
+        console.print(f"[red]Error: unsupported provider for setup/model UX: {provider}[/red]")
+        raise typer.Exit(1)
+
+
+def _api_key_from_env(env_name: str | None) -> str | None:
+    """Read an API key from an explicit environment variable name."""
+    if not env_name:
+        return None
+    api_key = os.environ.get(env_name)
+    if not api_key:
+        console.print(f"[red]Error: environment variable is empty or missing: {env_name}[/red]")
+        raise typer.Exit(1)
+    return api_key
+
+
+def _provider_options(provider: str | None) -> dict[str, Any]:
+    """Persist the admin-selected provider with a named model."""
+    if not provider:
+        return {}
+    provider_key = provider.strip().lower().replace("-", "_")
+    if provider_key not in {"openrouter", "ollama", "custom"}:
+        console.print(f"[red]Error: unsupported provider for setup/model UX: {provider}[/red]")
+        raise typer.Exit(1)
+    return {"provider": provider_key}
+
+
+def _effective_identity_model(config: Config, identity: IdentityConfig) -> str:
+    """Return the effective interactive model ref for one identity."""
+    return (
+        identity.models.get("interactiveResponse")
+        or identity.models.get("interactive_response")
+        or config.identities.default_identity_model
+        or config.agents.defaults.model
+    )
 
 
 def _identity_rows(config: Config) -> list[tuple[str, IdentityConfig, Path]]:
@@ -2431,6 +2542,100 @@ def people_history(
         console.print(store.render_interaction_summary(interaction))
 
 
+@model_app.command("list")
+def model_list(as_json: bool = typer.Option(False, "--json", help="Print models as JSON")):
+    """List named models and the current default."""
+    config = _load_runtime_config()
+    rows = [
+        {
+            "name": name,
+            "model": model.model,
+            "reasoning_effort": model.reasoning_effort,
+            "default": name == config.agents.defaults.model,
+        }
+        for name, model in sorted(config.models.items())
+    ]
+    if config.agents.defaults.model not in config.models:
+        rows.insert(
+            0,
+            {
+                "name": "(default)",
+                "model": config.agents.defaults.model,
+                "reasoning_effort": None,
+                "default": True,
+            },
+        )
+
+    if as_json:
+        typer.echo(json.dumps(rows, indent=2, ensure_ascii=False) + "\n", nl=False)
+        return
+
+    table = Table(title="Models")
+    table.add_column("Name", style="cyan")
+    table.add_column("Model")
+    table.add_column("Reasoning")
+    table.add_column("Default")
+    for row in rows:
+        table.add_row(
+            row["name"],
+            row["model"],
+            row["reasoning_effort"] or "-",
+            "yes" if row["default"] else "",
+        )
+    console.print(table)
+
+
+@model_app.command("add")
+def model_add(
+    name: str = typer.Argument(..., help="Friendly model name"),
+    model_id: str = typer.Argument(..., help="Provider model id, e.g. openrouter/anthropic/..."),
+    provider: str | None = typer.Option(None, "--provider", help="Provider to configure/ensure"),
+    api_key_env: str | None = typer.Option(
+        None, "--api-key-env", help="Read provider API key from this environment variable"
+    ),
+    reasoning_effort: str | None = typer.Option(
+        None, "--reasoning-effort", help="none, low, medium, or high"
+    ),
+):
+    """Add or update a named model."""
+    config = _load_runtime_config()
+    provider_options = _provider_options(provider)
+    if provider:
+        _configure_provider(config, provider, api_key=_api_key_from_env(api_key_env))
+    if reasoning_effort not in {None, "none", "low", "medium", "high"}:
+        console.print("[red]Error: --reasoning-effort must be none, low, medium, or high[/red]")
+        raise typer.Exit(1)
+    config.models[name] = NamedModelConfig(
+        model=model_id,
+        reasoning_effort=reasoning_effort,
+        provider_options=provider_options,
+    )
+    _save_runtime_config(config)
+    console.print(f"[green]✓[/green] Saved model '{name}' -> {model_id}")
+
+
+@model_app.command("set-default")
+def model_set_default(name_or_model_id: str = typer.Argument(..., help="Named model or raw model id")):
+    """Set the default model used by the owner/solo assistant."""
+    config = _load_runtime_config()
+    config.agents.defaults.model = name_or_model_id
+    _save_runtime_config(config)
+    console.print(f"[green]✓[/green] Default model set to '{name_or_model_id}'")
+
+
+@model_app.command("test")
+def model_test(name_or_model_id: str = typer.Argument(..., help="Named model or raw model id")):
+    """Validate that a model resolves to a configured provider."""
+    config = _load_runtime_config()
+    resolved = config.resolve_model_config(name_or_model_id)
+    provider_name = config.get_provider_name(name_or_model_id)
+    if provider_name is None:
+        console.print(f"[red]Error: no configured provider found for {name_or_model_id}[/red]")
+        raise typer.Exit(1)
+    console.print(f"[green]✓[/green] {name_or_model_id} resolves to {resolved.model}")
+    console.print(f"Provider: [cyan]{provider_name}[/cyan]")
+
+
 @user_app.command("list")
 def user_list(
     as_json: bool = typer.Option(False, "--json", help="Print users as JSON"),
@@ -2617,23 +2822,63 @@ def user_route(
 def user_models(
     name: str = typer.Argument(..., help="User alias"),
     interactive: str | None = typer.Option(None, "--interactive", help="Named model for interactive responses"),
+    exclude: list[str] = typer.Option([], "--exclude", help="Model name to block for this user"),
+    clear_interactive: bool = typer.Option(False, "--clear-interactive", help="Use the global default again"),
+    as_json: bool = typer.Option(False, "--json", help="Print model policy as JSON"),
 ):
-    """Set per-user model policy."""
+    """Show or set per-user model policy."""
     config = _load_runtime_config()
     identity = config.identities.registry.get(name)
     if identity is None:
         console.print(f"[red]Error: unknown user: {name}[/red]")
         raise typer.Exit(1)
-    if interactive is None:
-        console.print("[red]Error: provide --interactive[/red]")
-        raise typer.Exit(1)
-    if interactive not in config.models:
-        console.print(f"[red]Error: unknown named model: {interactive}[/red]")
-        raise typer.Exit(1)
 
-    identity.models["interactiveResponse"] = interactive
-    _save_runtime_config(config)
-    console.print(f"[green]✓[/green] Set {name} interactive model to '{interactive}'")
+    changed = False
+    if interactive is not None:
+        if interactive not in config.models:
+            console.print(f"[red]Error: unknown named model: {interactive}[/red]")
+            raise typer.Exit(1)
+        if interactive in identity.excluded_models:
+            console.print(f"[red]Error: model '{interactive}' is excluded for user '{name}'[/red]")
+            raise typer.Exit(1)
+        identity.models["interactiveResponse"] = interactive
+        changed = True
+
+    if clear_interactive:
+        identity.models.pop("interactiveResponse", None)
+        identity.models.pop("interactive_response", None)
+        changed = True
+
+    for model_name in exclude:
+        if model_name not in config.models:
+            console.print(f"[red]Error: unknown named model: {model_name}[/red]")
+            raise typer.Exit(1)
+        if model_name == _effective_identity_model(config, identity):
+            console.print(f"[red]Error: cannot exclude effective model '{model_name}'[/red]")
+            raise typer.Exit(1)
+        if model_name not in identity.excluded_models:
+            identity.excluded_models.append(model_name)
+            changed = True
+
+    if changed:
+        _save_runtime_config(config)
+        if not as_json:
+            console.print(f"[green]✓[/green] Updated model policy for '{name}'")
+
+    payload = {
+        "name": name,
+        "effective_interactive_model": _effective_identity_model(config, identity),
+        "explicit_models": dict(identity.models),
+        "excluded_models": list(identity.excluded_models),
+        "available_models": [m for m in sorted(config.models) if m not in identity.excluded_models],
+    }
+    if as_json:
+        typer.echo(json.dumps(payload, indent=2, ensure_ascii=False) + "\n", nl=False)
+        return
+    console.print(f"[bold]{name} model policy[/bold]")
+    console.print(f"Effective interactive model: [cyan]{payload['effective_interactive_model']}[/cyan]")
+    console.print(f"Excluded models: {', '.join(identity.excluded_models) or '-'}")
+    console.print(f"Available named models: {', '.join(payload['available_models']) or '-'}")
 
 
 @user_app.command("status")
@@ -2652,12 +2897,25 @@ def user_status(
     heartbeat_file = root / "HEARTBEAT.md"
     cron_service = _build_cron_service(identity_root=root, identity_name=name)
     cron_jobs = cron_service.list_jobs(include_disabled=True)
+    effective_model = _effective_identity_model(config, identity)
+    nostr_routes = config.channels.nostr.identity_bindings.get(name, [])
     payload = {
         "name": name,
         "active": identity.active,
         "role": identity.role,
         "root": str(root),
         "nostr_public_key": identity.nostr_public_key,
+        "models": {
+            "effective_interactive": effective_model,
+            "explicit": dict(identity.models),
+            "excluded": list(identity.excluded_models),
+        },
+        "routes": {
+            "nostr": {
+                "enabled": config.channels.nostr.enabled,
+                "bound_senders": len(nostr_routes),
+            }
+        },
         "heartbeat": {
             "path": str(heartbeat_file),
             "exists": heartbeat_file.exists(),
@@ -2678,7 +2936,12 @@ def user_status(
     console.print(f"State: {'active' if identity.active else 'inactive'}")
     console.print(f"Role: {identity.role}")
     console.print(f"Root: {root}")
+    console.print(f"Interactive model: {effective_model}")
+    console.print(f"Excluded models: {', '.join(identity.excluded_models) or '-'}")
     console.print(f"Nostr pubkey: {identity.nostr_public_key}")
+    console.print(
+        f"Nostr routes: {len(nostr_routes)} sender(s), channel {'enabled' if config.channels.nostr.enabled else 'disabled'}"
+    )
     console.print(f"Heartbeat: {'present' if heartbeat_file.exists() else 'missing'} ({heartbeat_file})")
     console.print(f"Cron jobs: {payload['cron']['enabled_jobs']} enabled / {payload['cron']['jobs']} total")
 

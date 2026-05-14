@@ -165,23 +165,11 @@ The installer itself is meant to be generic for Unix-like systems; the `systemd 
    - Subagents can use named models directly, or aliases when you want shorter operator-facing names.
    
    **Option B: Cloud model (OpenRouter)**
+
+   Set your OpenRouter key in an environment variable or secret manager, then configure a named model:
    ```bash
-   # Get API key at https://openrouter.ai/keys
-   ```
-   Edit `~/.hermitcrab/config.json`:
-   ```json
-   {
-     "providers": {
-       "openrouter": {
-         "apiKey": "sk-or-..."
-       }
-     },
-     "agents": {
-       "defaults": {
-         "model": "anthropic/claude-sonnet-4"
-       }
-     }
-   }
+   hermitcrab model add main anthropic/claude-sonnet-4 --provider openrouter --api-key-env HERMITCRAB_OPENROUTER_API_KEY
+   hermitcrab model set-default main
    ```
 
    Then run:

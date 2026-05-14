@@ -267,15 +267,21 @@ Channel configuration and behavior.
 
 ## providers
 
-LLM provider credentials.
+LLM provider credentials. Prefer CLI/environment-based setup for secrets instead of pasting keys into docs or shell history:
+
+```bash
+hermitcrab model add main anthropic/claude-sonnet-4 --provider openrouter --api-key-env HERMITCRAB_OPENROUTER_API_KEY
+```
+
+Config shape:
 
 ```json
 {
   "providers": {
-    "anthropic": { "apiKey": "sk-ant-..." },
-    "openrouter": { "apiKey": "sk-or-..." },
+    "anthropic": { "apiKey": "<anthropic-api-key>" },
+    "openrouter": { "apiKey": "<openrouter-api-key>" },
     "ollama": { "apiBase": "http://localhost:11434" },
-    "openai": { "apiKey": "sk-..." }
+    "openai": { "apiKey": "<openai-api-key>" }
   }
 }
 ```
@@ -396,6 +402,6 @@ Reflection system configuration.
 Config can be set via environment variables with the `HERMITCRAB_` prefix and `__` delimiter for nesting:
 
 ```bash
-export HERMITCRAB__PROVIDERS__ANTHROPIC__API_KEY="sk-ant-..."
+export HERMITCRAB__PROVIDERS__ANTHROPIC__API_KEY="<anthropic-api-key>"
 export HERMITCRAB__AGENTS__DEFAULTS__MODEL="anthropic/claude-opus-4-5"
 ```

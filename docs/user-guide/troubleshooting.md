@@ -24,16 +24,11 @@ Check your config:
 hermitcrab status
 ```
 
-Look for the selected provider. If it shows "not configured," add the API key:
+Look for the selected provider. If it shows "not configured," set the provider key in an environment variable or secret manager, then wire it through the model CLI:
 
-```json
-{
-  "providers": {
-    "openrouter": {
-      "apiKey": "sk-or-..."
-    }
-  }
-}
+```bash
+hermitcrab model add main anthropic/claude-sonnet-4 --provider openrouter --api-key-env HERMITCRAB_OPENROUTER_API_KEY
+hermitcrab model test main
 ```
 
 ### Ollama connection refused
