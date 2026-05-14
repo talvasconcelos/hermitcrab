@@ -230,6 +230,8 @@ class ExecTool(Tool):
 
         if cls._looks_destructive(first, tokens, lowered):
             return "destructive"
+        if cls._has_shell_redirection(lowered):
+            return "workspace_write"
         if cls._looks_read_only(first, lowered):
             return "read_only"
         return "workspace_write"
@@ -252,9 +254,6 @@ class ExecTool(Tool):
         }:
             return True
 
-        if first == "mv":
-            return True
-
         if first == "git":
             destructive_git_patterns = (
                 "git reset",
@@ -266,13 +265,14 @@ class ExecTool(Tool):
             if any(pattern in lowered for pattern in destructive_git_patterns):
                 return True
 
-        if any(operator in lowered for operator in (" > ", " >> ")):
-            return True
-
         if len(tokens) >= 2 and first in {"python", "python3"} and tokens[1] == "-c":
             return True
 
         return False
+
+    @staticmethod
+    def _has_shell_redirection(lowered: str) -> bool:
+        return any(operator in lowered for operator in (" > ", " >> "))
 
     @staticmethod
     def _looks_read_only(first: str, lowered: str) -> bool:

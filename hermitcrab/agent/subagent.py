@@ -45,7 +45,7 @@ class SubagentManager:
         max_tokens: int = 4096,
         brave_api_key: str | None = None,
         exec_config: ExecToolConfig | None = None,
-        restrict_to_workspace: bool = False,
+        restrict_to_workspace: bool = True,
         model_aliases: dict[str, str | ModelAliasConfig] | None = None,
         named_models: dict[str, NamedModelConfig] | None = None,
     ):

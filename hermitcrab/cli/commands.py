@@ -652,7 +652,7 @@ def _build_agent_loop_kwargs(
         "brave_api_key": config.tools.web.search.api_key or None,
         "exec_config": config.tools.exec,
         "cron_service": cron_service,
-        "restrict_to_workspace": config.tools.restrict_to_workspace,
+        "restrict_to_workspace": True,
         "session_manager": session_manager,
         "mcp_servers": config.tools.mcp_servers,
         "channels_config": config.channels,

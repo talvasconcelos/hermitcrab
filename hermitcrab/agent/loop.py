@@ -192,7 +192,7 @@ class AgentLoop:
         brave_api_key: str | None = None,
         exec_config: ExecToolConfig | None = None,
         cron_service: CronService | None = None,
-        restrict_to_workspace: bool = False,
+        restrict_to_workspace: bool = True,
         session_manager: SessionManager | None = None,
         mcp_servers: dict | None = None,
         channels_config: ChannelsConfig | None = None,

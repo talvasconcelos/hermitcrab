@@ -103,6 +103,69 @@ def test_agent_loop_kwargs_include_owner_identity_metadata(tmp_path) -> None:
     assert kwargs["identity_root"] == tmp_path / "identities" / "tal"
     assert kwargs["workspace"] == kwargs["identity_root"]
     assert kwargs["system_root"] == tmp_path / "system"
+    assert kwargs["restrict_to_workspace"] is True
+
+
+def test_cli_identities_are_bounded_even_if_legacy_config_disables_workspace_restriction(
+    tmp_path,
+) -> None:
+    config = Config.model_validate(
+        {
+            "root": str(tmp_path),
+            "tools": {"restrictToWorkspace": False},
+            "identities": {"registry": {"owner": {}, "alice": {}}},
+        }
+    )
+
+    owner_kwargs = _build_agent_loop_kwargs(config, _provider(), identity_name="owner")
+    alice_kwargs = _build_agent_loop_kwargs(config, _provider(), identity_name="alice")
+
+    assert owner_kwargs["restrict_to_workspace"] is True
+    assert alice_kwargs["restrict_to_workspace"] is True
+
+
+@pytest.mark.asyncio
+async def test_identity_file_tools_deny_listing_outside_identity_root_by_default(tmp_path) -> None:
+    alice_root = tmp_path / "identities" / "alice"
+    bob_root = tmp_path / "identities" / "bob"
+    alice_root.mkdir(parents=True)
+    bob_root.mkdir(parents=True)
+    (bob_root / "secret.md").write_text("bob only", encoding="utf-8")
+
+    loop = AgentLoop(
+        bus=MessageBus(),
+        provider=_provider(),
+        workspace=alice_root,
+        identity_name="alice",
+        identity_root=alice_root,
+    )
+
+    result = await loop.tools.execute("list_dir", {"path": str(bob_root)})
+
+    assert "outside allowed directory" in result
+
+
+@pytest.mark.asyncio
+async def test_identity_exec_denies_shell_discovery_outside_identity_root_by_default(
+    tmp_path,
+) -> None:
+    alice_root = tmp_path / "identities" / "alice"
+    alice_root.mkdir(parents=True)
+
+    loop = AgentLoop(
+        bus=MessageBus(),
+        provider=_provider(),
+        workspace=alice_root,
+        identity_name="alice",
+        identity_root=alice_root,
+    )
+
+    result = await loop.tools.execute(
+        "exec",
+        {"command": f"find {tmp_path} -maxdepth 1 -type d", "working_dir": str(alice_root)},
+    )
+
+    assert "path outside working dir" in result
 
 
 def test_agent_loop_kwargs_apply_identity_model_overrides(tmp_path) -> None:
