@@ -146,7 +146,7 @@ async def test_identity_file_tools_deny_listing_outside_identity_root_by_default
 
 
 @pytest.mark.asyncio
-async def test_identity_exec_denies_shell_discovery_outside_identity_root_by_default(
+async def test_identity_exec_is_not_available_when_restricted_by_default(
     tmp_path,
 ) -> None:
     alice_root = tmp_path / "identities" / "alice"
@@ -160,12 +160,26 @@ async def test_identity_exec_denies_shell_discovery_outside_identity_root_by_def
         identity_root=alice_root,
     )
 
-    result = await loop.tools.execute(
-        "exec",
-        {"command": f"find {tmp_path} -maxdepth 1 -type d", "working_dir": str(alice_root)},
+    assert not loop.tools.has("exec")
+
+
+@pytest.mark.asyncio
+async def test_identity_exec_can_be_enabled_only_when_workspace_restriction_is_disabled(
+    tmp_path,
+) -> None:
+    alice_root = tmp_path / "identities" / "alice"
+    alice_root.mkdir(parents=True)
+
+    loop = AgentLoop(
+        bus=MessageBus(),
+        provider=_provider(),
+        workspace=alice_root,
+        identity_name="alice",
+        identity_root=alice_root,
+        restrict_to_workspace=False,
     )
 
-    assert "path outside working dir" in result
+    assert loop.tools.has("exec")
 
 
 def test_agent_loop_kwargs_apply_identity_model_overrides(tmp_path) -> None:

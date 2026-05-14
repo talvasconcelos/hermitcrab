@@ -235,12 +235,12 @@ class SubagentManager:
                     fallback_dir=(None if self.restrict_to_workspace else Path.cwd()),
                 )
             )
-        if "exec" in allowed_tools:
+        if "exec" in allowed_tools and not self.restrict_to_workspace:
             tools.register(
                 ExecTool(
                     working_dir=str(self.workspace),
                     timeout=self.exec_config.timeout,
-                    restrict_to_workspace=self.restrict_to_workspace,
+                    restrict_to_workspace=False,
                 )
             )
         if "web_search" in allowed_tools:

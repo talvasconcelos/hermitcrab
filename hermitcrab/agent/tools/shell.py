@@ -195,24 +195,41 @@ class ExecTool(Tool):
         if self.restrict_to_workspace:
             if "..\\" in cmd or "../" in cmd:
                 return "Error: Command blocked by safety guard (path traversal detected)"
-
+            if re.search(r"(?:^|[\s=:])(?:~|\$\{?HOME\}?)(?:/|$)", cmd):
+                return "Error: Command blocked by safety guard (home path outside working dir)"
             cwd_path = Path(cwd).resolve()
+            workspace_root = Path(self.working_dir or cwd).resolve()
+            if cwd_path != workspace_root and workspace_root not in cwd_path.parents:
+                return "Error: Command blocked by safety guard (working dir outside workspace)"
 
-            win_paths = re.findall(r"[A-Za-z]:\\[^\\\"']+", cmd)
-            # Only match absolute paths — avoid false positives on relative
-            # paths like ".venv/bin/python" where "/bin/python" would be
-            # incorrectly extracted by the old pattern.
-            posix_paths = re.findall(r"(?:^|[\s|>])(/[^\s\"'>]+)", cmd)
-
-            for raw in win_paths + posix_paths:
-                try:
-                    p = Path(raw.strip()).resolve()
-                except Exception:
-                    continue
-                if p.is_absolute() and cwd_path not in p.parents and p != cwd_path:
+            for p in self._extract_command_paths(cmd):
+                if p.is_absolute() and workspace_root not in p.parents and p != workspace_root:
                     return "Error: Command blocked by safety guard (path outside working dir)"
 
         return None
+
+    @staticmethod
+    def _extract_command_paths(command: str) -> list[Path]:
+        """Extract obvious absolute paths from shell commands for workspace checks."""
+        paths: list[Path] = []
+        try:
+            tokens = shlex.split(command, posix=True)
+        except ValueError:
+            tokens = command.split()
+
+        for token in tokens:
+            # Handle env assignments like FOO=/abs/path and args like --out=/abs/path.
+            candidates = [token]
+            if "=" in token:
+                candidates.append(token.split("=", 1)[1])
+            for candidate in candidates:
+                if candidate.startswith("/") or re.match(r"^[A-Za-z]:\\", candidate):
+                    paths.append(Path(candidate))
+
+        # Catch paths adjacent to shell operators/redirections that shlex may leave embedded.
+        paths.extend(Path(match) for match in re.findall(r"(?:^|[\s|>&;])(/[^\s\"'<>|;&]+)", command))
+        paths.extend(Path(match) for match in re.findall(r"[A-Za-z]:\\[^\\\"'\s<>|;&]+", command))
+        return paths
 
     @classmethod
     def _classify_command_risk(cls, command: str) -> CommandRisk:
