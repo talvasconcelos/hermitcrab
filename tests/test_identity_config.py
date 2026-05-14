@@ -75,6 +75,54 @@ def test_identity_paths_accept_configured_relative_and_absolute_roots(tmp_path) 
     }
 
 
+def test_identity_roots_must_be_unique(tmp_path) -> None:
+    with pytest.raises(ValueError, match="identity roots must be unique"):
+        Config.model_validate(
+            {
+                "root": str(tmp_path),
+                "identities": {
+                    "ownerIdentity": "alice",
+                    "registry": {
+                        "alice": {"root": "same"},
+                        "bob": {"root": "same"},
+                    },
+                },
+            }
+        )
+
+
+def test_identity_roots_must_not_overlap(tmp_path) -> None:
+    with pytest.raises(ValueError, match="identity roots must be isolated"):
+        Config.model_validate(
+            {
+                "root": str(tmp_path),
+                "identities": {
+                    "ownerIdentity": "alice",
+                    "registry": {
+                        "alice": {"root": "alice"},
+                        "bob": {"root": "alice/bob"},
+                    },
+                },
+            }
+        )
+
+
+def test_identity_roots_must_not_alias_with_traversal(tmp_path) -> None:
+    with pytest.raises(ValueError, match="identity roots must be unique"):
+        Config.model_validate(
+            {
+                "root": str(tmp_path),
+                "identities": {
+                    "ownerIdentity": "alice",
+                    "registry": {
+                        "alice": {"root": "alice"},
+                        "bob": {"root": "bob/../alice"},
+                    },
+                },
+            }
+        )
+
+
 @pytest.mark.parametrize("name", ["", " shared ", "system", "../alice", "bad/name", "-bad"])
 def test_identity_config_rejects_reserved_or_unsafe_names(name: str) -> None:
     with pytest.raises(ValueError):

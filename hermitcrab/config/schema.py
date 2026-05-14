@@ -103,6 +103,15 @@ def _validate_identity_slug(value: str, *, field_name: str) -> str:
     return slug
 
 
+def _path_contains(parent: Path, child: Path) -> bool:
+    """Return true when child is inside parent after path normalization."""
+    try:
+        child.relative_to(parent)
+    except ValueError:
+        return False
+    return True
+
+
 class TelegramConfig(Base):
     """Telegram channel configuration."""
 
@@ -629,6 +638,29 @@ class Config(BaseSettings):
 
         return self
 
+    @model_validator(mode="after")
+    def validate_identity_roots_are_isolated(self) -> "Config":
+        """Ensure identity workspaces are disjoint security boundaries."""
+        roots = {
+            name: self.get_identity_path(name).expanduser().resolve(strict=False)
+            for name in self.identities.registry
+        }
+        items = list(roots.items())
+        for index, (left_name, left_path) in enumerate(items):
+            for right_name, right_path in items[index + 1 :]:
+                if left_path == right_path:
+                    raise ValueError(
+                        "identity roots must be unique; "
+                        f"'{left_name}' and '{right_name}' both resolve to {left_path}"
+                    )
+                if _path_contains(left_path, right_path) or _path_contains(right_path, left_path):
+                    raise ValueError(
+                        "identity roots must be isolated and non-overlapping; "
+                        f"'{left_name}' resolves to {left_path} and "
+                        f"'{right_name}' resolves to {right_path}"
+                    )
+        return self
+
     @property
     def hermitcrab_root_path(self) -> Path:
         """Get expanded HermitCrab root path."""
@@ -788,7 +820,21 @@ class Config(BaseSettings):
         self, model: str | None = None
     ) -> tuple["ProviderConfig | None", str | None]:
         """Match provider config and its registry name. Returns (config, spec_name)."""
-        resolved_model = self.resolve_model_config(model).model or ""
+        resolved = self.resolve_model_config(model)
+        resolved_model = resolved.model or ""
+        explicit_provider = None
+        if resolved.provider_options:
+            explicit_provider = resolved.provider_options.get("provider")
+        if isinstance(explicit_provider, str):
+            explicit_provider = normalize_provider_name(explicit_provider)
+            spec = find_by_name(explicit_provider)
+            p = getattr(self.providers, explicit_provider, None)
+            if spec is None or p is None:
+                return None, None
+            if spec.is_oauth or spec.is_local or p.api_key:
+                return p, explicit_provider
+            return None, None
+
         raw_model_prefix = resolved_model.split("/", 1)[0] if "/" in resolved_model else ""
         model_lower = resolved_model.lower()
         model_normalized = model_lower.replace("-", "_")
