@@ -112,6 +112,22 @@ def test_context_builder_loads_system_and_identity_bootstrap_files(tmp_path) -> 
     assert "identity rules" in prompt
 
 
+def test_context_builder_warns_filesystem_tools_are_identity_scoped(tmp_path) -> None:
+    config = Config.model_validate({"root": str(tmp_path)})
+    bootstrap_standard_layout(config)
+
+    prompt = ContextBuilder(
+        config.owner_identity_root_path,
+        system_root=config.system_root_path,
+    ).build_system_prompt()
+
+    assert f"filesystem tool boundary is: {config.owner_identity_root_path}" in prompt
+    assert "Use relative paths like `memory/`, `knowledge/`, or `scratchpads/...`" in prompt
+    assert f"parent HermitCrab directories such as `{config.hermitcrab_root_path}`" in prompt
+    assert f"`{config.identities_root_path}`" in prompt
+    assert "outside this identity's allowed workspace" in prompt
+
+
 def test_context_builder_keeps_volatile_session_context_out_of_system_prefix(tmp_path) -> None:
     config = Config.model_validate({"root": str(tmp_path)})
     bootstrap_standard_layout(config)

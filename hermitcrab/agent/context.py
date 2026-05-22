@@ -260,7 +260,9 @@ class ContextBuilder:
 {runtime}
 
 ## Workspace
-Your workspace is at: {workspace_path}
+Your workspace and filesystem tool boundary is: {workspace_path}
+- Use relative paths like `memory/`, `knowledge/`, or `scratchpads/...`, or absolute paths under `{workspace_path}`.
+- Do not call filesystem tools on parent HermitCrab directories such as `{workspace_root.parent.parent}` or `{workspace_root.parent}`; they are outside this identity's allowed workspace and will be denied.
 - Custom skills: {workspace_path}/skills/{{skill-name}}/SKILL.md
 - Bootstrap files define repo policy, file placement, operating rules, and long-term memory rules.
 
