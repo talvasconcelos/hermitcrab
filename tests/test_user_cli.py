@@ -44,8 +44,104 @@ def test_user_add_creates_identity_config_and_bootstrap_root(monkeypatch, tmp_pa
     assert "alice" in config.identities.registry
     assert config.identities.registry["alice"].label == "Alice"
     assert len(config.identities.registry["alice"].nostr_public_key) == 64
+    assert config.identities.registry["alice"].nostr_private_key == ""
+    assert config.channels.nostr.identity_bindings["alice"] == [
+        config.identities.registry["alice"].nostr_public_key
+    ]
+    assert config.identities.registry["alice"].nostr_public_key in config.channels.nostr.allowed_pubkeys
+    resolution = config.resolve_nostr_sender_identity(config.identities.registry["alice"].nostr_public_key)
+    assert resolution.identity_name == "alice"
+    assert resolution.reason == "identity_binding"
     assert (tmp_path / "identities" / "alice" / "IDENTITY.md").exists()
     assert (tmp_path / "identities" / "alice" / "cron").is_dir()
+    assert "Generated onboarding Nostr keypair" in result.stdout
+    assert "private key is NOT stored in config" in result.stdout
+
+
+def test_user_add_accepts_nostr_public_key_only(monkeypatch, tmp_path) -> None:
+    from hermitcrab.config.schema import normalize_nostr_pubkey
+    from pynostr.key import PrivateKey
+
+    pubkey = PrivateKey().public_key.bech32()
+    _use_config(monkeypatch, tmp_path, Config.model_validate({"root": str(tmp_path)}))
+
+    result = runner.invoke(app, ["user", "add", "alice", "--nostr-public-key", pubkey])
+
+    assert result.exit_code == 0
+    config = load_config(tmp_path / "config.json", strict=True)
+    identity = config.identities.registry["alice"]
+    assert identity.nostr_public_key == normalize_nostr_pubkey(pubkey)
+    assert identity.nostr_private_key == ""
+    resolution = config.resolve_nostr_sender_identity(identity.nostr_public_key)
+    assert resolution.identity_name == "alice"
+    assert resolution.reason == "identity_binding"
+    assert "User added with provided public key." in result.stdout
+
+
+def test_user_add_accepts_hex_nostr_public_key(monkeypatch, tmp_path) -> None:
+    from pynostr.key import PrivateKey
+
+    pubkey = PrivateKey().public_key.hex()
+    _use_config(monkeypatch, tmp_path, Config.model_validate({"root": str(tmp_path)}))
+
+    result = runner.invoke(app, ["user", "add", "alice", "--nostr-public-key", pubkey])
+
+    assert result.exit_code == 0
+    config = load_config(tmp_path / "config.json", strict=True)
+    assert config.identities.registry["alice"].nostr_public_key == pubkey
+    resolution = config.resolve_nostr_sender_identity(pubkey)
+    assert resolution.identity_name == "alice"
+    assert resolution.reason == "identity_binding"
+
+
+def test_user_add_accepts_private_key_for_backwards_compat(monkeypatch, tmp_path) -> None:
+    from pynostr.key import PrivateKey
+
+    private_key = PrivateKey().bech32()
+    _use_config(monkeypatch, tmp_path, Config.model_validate({"root": str(tmp_path)}))
+
+    result = runner.invoke(app, ["user", "add", "alice", "--nostr-private-key", private_key])
+
+    assert result.exit_code == 0
+    config = load_config(tmp_path / "config.json", strict=True)
+    identity = config.identities.registry["alice"]
+    assert identity.nostr_private_key
+    assert len(identity.nostr_public_key) == 64
+    assert "Private key accepted for backward compatibility." in result.stdout
+
+
+def test_user_add_rejects_invalid_nostr_public_or_private_keys(monkeypatch, tmp_path) -> None:
+    from pynostr.key import PrivateKey
+
+    _use_config(monkeypatch, tmp_path, Config.model_validate({"root": str(tmp_path)}))
+
+    bad_pub = runner.invoke(app, ["user", "add", "alice", "--nostr-public-key", "bad"])
+    assert bad_pub.exit_code == 1
+    assert "pubkey must be npub or 64-char hex" in bad_pub.stdout
+
+    nsec_as_pub = runner.invoke(app, ["user", "add", "alice", "--nostr-public-key", PrivateKey().bech32()])
+    assert nsec_as_pub.exit_code == 1
+    assert "pubkey must be npub or 64-char hex" in nsec_as_pub.stdout
+
+    bad_priv = runner.invoke(app, ["user", "add", "bob", "--nostr-private-key", "bad"])
+    assert bad_priv.exit_code == 1
+    assert "private key must be nsec or 64-char hex" in bad_priv.stdout
+
+
+def test_user_add_best_effort_intro_message_does_not_crash(monkeypatch, tmp_path) -> None:
+    _use_config(monkeypatch, tmp_path, Config.model_validate({"root": str(tmp_path)}))
+    calls: list[tuple[str, str]] = []
+
+    async def fake_intro(config: Config, recipient_pubkey: str, identity_name: str) -> bool:
+        calls.append((recipient_pubkey, identity_name))
+        return False
+
+    monkeypatch.setattr("hermitcrab.cli.commands._send_nostr_onboarding_intro", fake_intro)
+    result = runner.invoke(app, ["user", "add", "alice"])
+
+    assert result.exit_code == 0
+    assert calls and calls[0][1] == "alice"
+    assert "Best-effort Nostr intro message: skipped/unavailable." in result.stdout
 
 
 def test_user_add_rejects_reserved_name(monkeypatch, tmp_path) -> None:
@@ -77,6 +173,33 @@ def test_user_remove_disables_identity_and_routes(monkeypatch, tmp_path) -> None
     assert reloaded.identities.registry["alice"].active is False
     assert "alice" not in reloaded.channels.nostr.identity_bindings
     assert sender not in reloaded.channels.nostr.allowed_pubkeys
+
+
+def test_user_remove_only_drops_removed_user_pubkeys_from_allowlist(monkeypatch, tmp_path) -> None:
+    from pynostr.key import PrivateKey
+
+    alice_sender = PrivateKey().public_key.hex()
+    bob_sender = PrivateKey().public_key.hex()
+    config = Config.model_validate(
+        {
+            "root": str(tmp_path),
+            "identities": {"ownerIdentity": "owner", "registry": {"owner": {}, "alice": {}, "bob": {}}},
+            "channels": {
+                "nostr": {
+                    "allowedPubkeys": [alice_sender, bob_sender],
+                    "identityBindings": {"alice": [alice_sender], "bob": [bob_sender]},
+                }
+            },
+        }
+    )
+    _use_config(monkeypatch, tmp_path, config)
+
+    result = runner.invoke(app, ["user", "remove", "alice"])
+    assert result.exit_code == 0
+    reloaded = load_config(tmp_path / "config.json", strict=True)
+    assert reloaded.channels.nostr.identity_bindings["bob"] == [bob_sender]
+    assert alice_sender not in reloaded.channels.nostr.allowed_pubkeys
+    assert bob_sender in reloaded.channels.nostr.allowed_pubkeys
 
 
 def test_user_archive_marks_archived_without_deleting_root(monkeypatch, tmp_path) -> None:
@@ -126,6 +249,18 @@ def test_user_route_rejects_duplicate_sender_pubkey(monkeypatch, tmp_path) -> No
 
     assert result.exit_code == 1
     assert "already routed" in result.stdout
+
+
+def test_user_route_rejects_nsec_as_public_key(monkeypatch, tmp_path) -> None:
+    from pynostr.key import PrivateKey
+
+    config = Config.model_validate({"root": str(tmp_path), "identities": {"registry": {"alice": {}}}})
+    _use_config(monkeypatch, tmp_path, config)
+
+    result = runner.invoke(app, ["user", "route", "nostr", "alice", PrivateKey().bech32()])
+
+    assert result.exit_code == 1
+    assert "pubkey must be npub or 64-char hex" in result.stdout
 
 
 def test_user_models_sets_interactive_named_model(monkeypatch, tmp_path) -> None:

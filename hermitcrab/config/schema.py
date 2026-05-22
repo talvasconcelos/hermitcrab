@@ -34,22 +34,20 @@ _RESERVED_IDENTITY_NAMES = frozenset({"shared", "system"})
 
 
 def normalize_nostr_pubkey(value: str) -> str:
-    """Normalize configured Nostr key to lowercase pubkey hex."""
+    """Normalize a configured Nostr public key to lowercase pubkey hex."""
     key = value.strip()
     if _HEX_PUBKEY_RE.fullmatch(key):
         return key.lower()
 
     try:
-        from pynostr.key import PrivateKey, PublicKey
+        from pynostr.key import PublicKey
 
         if key.startswith("npub"):
             return PublicKey.from_npub(key).hex().lower()
-        if key.startswith("nsec"):
-            return PrivateKey.from_nsec(key).public_key.hex().lower()
     except Exception as exc:
-        raise ValueError("pubkey must be npub/nsec or 64-char hex") from exc
+        raise ValueError("pubkey must be npub or 64-char hex") from exc
 
-    raise ValueError("pubkey must be npub/nsec or 64-char hex")
+    raise ValueError("pubkey must be npub or 64-char hex")
 
 
 def normalize_nostr_private_key(value: str) -> str:
@@ -86,6 +84,12 @@ def generate_nostr_keypair() -> tuple[str, str]:
 
     private_key = PrivateKey()
     return private_key.hex().lower(), private_key.public_key.hex().lower()
+
+
+def generate_nostr_pubkey() -> str:
+    """Generate a Nostr public key without persisting a private key."""
+    _, public_key = generate_nostr_keypair()
+    return public_key
 
 
 def _validate_identity_slug(value: str, *, field_name: str) -> str:
@@ -348,9 +352,11 @@ class IdentityConfig(Base):
             self.nostr_private_key = normalize_nostr_private_key(self.nostr_private_key)
             self.nostr_public_key = nostr_pubkey_from_private_key(self.nostr_private_key)
         elif self.nostr_public_key:
-            raise ValueError("identity nostrPrivateKey is required when nostrPublicKey is set")
+            self.nostr_public_key = normalize_nostr_pubkey(self.nostr_public_key)
+            self.nostr_private_key = ""
         else:
-            self.nostr_private_key, self.nostr_public_key = generate_nostr_keypair()
+            self.nostr_public_key = generate_nostr_pubkey()
+            self.nostr_private_key = ""
         return self
 
 

@@ -33,6 +33,7 @@ from hermitcrab.config.schema import (
     IdentityConfig,
     ModelAliasConfig,
     NamedModelConfig,
+    generate_nostr_keypair,
     normalize_nostr_pubkey,
 )
 
@@ -1959,6 +1960,71 @@ def _remove_identity_routes(config: Config, identity_name: str) -> None:
     ]
 
 
+def _bind_nostr_pubkey_to_identity(config: Config, identity_name: str, pubkey: str) -> str:
+    """Bind one normalized sender pubkey to an identity and maintain allowlist."""
+    normalized = normalize_nostr_pubkey(pubkey)
+    for existing_name, pubkeys in config.channels.nostr.identity_bindings.items():
+        if existing_name == identity_name:
+            continue
+        if normalized in {normalize_nostr_pubkey(value) for value in pubkeys}:
+            raise ValueError(f"pubkey already routed to user '{existing_name}'")
+
+    routes = config.channels.nostr.identity_bindings.setdefault(identity_name, [])
+    if normalized not in {normalize_nostr_pubkey(value) for value in routes}:
+        routes.append(normalized)
+
+    allowed = config.channels.nostr.allowed_pubkeys
+    allowed_modes = {value.strip().lower() for value in allowed}
+    allowed_pubkeys = {
+        normalize_nostr_pubkey(value)
+        for value in allowed
+        if value.strip().lower() not in {"*", "all"}
+    }
+    if not allowed_modes.intersection({"*", "all"}) and normalized not in allowed_pubkeys:
+        allowed.append(normalized)
+    return normalized
+
+
+async def _send_nostr_onboarding_intro(config: Config, recipient_pubkey: str, identity_name: str) -> bool:
+    """Best-effort onboarding intro DM; never raise to caller."""
+    if not config.channels.nostr.enabled or not config.channels.nostr.private_key:
+        return False
+
+    try:
+        from hermitcrab.bus.events import OutboundMessage
+        from hermitcrab.bus.queue import MessageBus
+        from hermitcrab.channels.nostr import NostrChannel
+    except Exception:
+        return False
+
+    bus = MessageBus()
+    channel = NostrChannel(
+        config.channels.nostr,
+        bus,
+        identity_resolver=config.resolve_nostr_sender_identity,
+    )
+    try:
+        await channel.start()
+        await channel.send(
+            OutboundMessage(
+                channel="nostr",
+                chat_id=recipient_pubkey,
+                content=(
+                    f"Hello from HermitCrab. You were added as user '{identity_name}'. "
+                    "If this was unexpected, contact the operator."
+                ),
+            )
+        )
+        return True
+    except Exception:
+        return False
+    finally:
+        try:
+            await channel.stop()
+        except Exception:
+            pass
+
+
 def _build_cron_service(
     *,
     identity_root: Path | None = None,
@@ -2693,10 +2759,15 @@ def user_list(
 def user_add(
     name: str = typer.Argument(..., help="User alias"),
     label: str | None = typer.Option(None, "--label", help="Display label"),
+    nostr_public_key: str | None = typer.Option(
+        None,
+        "--nostr-public-key",
+        help="Identity Nostr public key as npub or hex.",
+    ),
     nostr_private_key: str | None = typer.Option(
         None,
         "--nostr-private-key",
-        help="Identity Nostr private key as nsec or hex. Generated if omitted.",
+        help="(Backward compatibility) Identity Nostr private key as nsec or hex.",
     ),
 ):
     """Add a user identity and bootstrap its identity root."""
@@ -2705,10 +2776,29 @@ def user_add(
         console.print(f"[red]Error: user already exists: {name}[/red]")
         raise typer.Exit(1)
 
-    config.identities.registry[name] = IdentityConfig(
-        label=label,
-        nostr_private_key=nostr_private_key or "",
-    )
+    if nostr_public_key and nostr_private_key:
+        console.print("[red]Error: provide either --nostr-public-key or --nostr-private-key, not both[/red]")
+        raise typer.Exit(1)
+
+    generated_private_key: str | None = None
+    selected_pubkey = nostr_public_key or ""
+    selected_private_key = nostr_private_key or ""
+    if not selected_pubkey and not selected_private_key:
+        generated_private_key, generated_pubkey = generate_nostr_keypair()
+        selected_pubkey = generated_pubkey
+
+    try:
+        config.identities.registry[name] = IdentityConfig(
+            label=label,
+            nostr_public_key=selected_pubkey,
+            nostr_private_key=selected_private_key,
+        )
+        identity = config.identities.registry[name]
+        _bind_nostr_pubkey_to_identity(config, name, identity.nostr_public_key)
+    except Exception as exc:
+        console.print(f"[red]Error: {exc}[/red]")
+        raise typer.Exit(1) from exc
+
     try:
         validated = Config.model_validate(config.model_dump(by_alias=True))
     except ValueError as exc:
@@ -2726,7 +2816,33 @@ def user_add(
     _save_runtime_config(validated)
     identity = validated.identities.registry[name]
     console.print(f"[green]✓[/green] Added user '{name}'")
-    console.print(f"Nostr pubkey: {identity.nostr_public_key}")
+    if nostr_public_key:
+        console.print(f"Nostr pubkey: {identity.nostr_public_key}")
+        console.print("User added with provided public key.")
+    elif selected_private_key:
+        console.print(f"Nostr pubkey: {identity.nostr_public_key}")
+        console.print("Private key accepted for backward compatibility.")
+    else:
+        generated_private_nsec = ""
+        try:
+            from pynostr.key import PrivateKey
+
+            if generated_private_key:
+                generated_private_nsec = PrivateKey.from_hex(generated_private_key).bech32()
+        except Exception:
+            generated_private_nsec = ""
+        console.print("Generated onboarding Nostr keypair:")
+        console.print(f"  Public key (hex): {identity.nostr_public_key}")
+        if generated_private_nsec:
+            console.print(f"  Private key (nsec): {generated_private_nsec}")
+        console.print(f"  Private key (hex): {generated_private_key}")
+        console.print("[yellow]Warning:[/yellow] private key is NOT stored in config; share it securely if needed.")
+
+    sent_intro = asyncio.run(_send_nostr_onboarding_intro(validated, identity.nostr_public_key, name))
+    if sent_intro:
+        console.print("Best-effort Nostr intro message: attempted.")
+    else:
+        console.print("Best-effort Nostr intro message: skipped/unavailable.")
 
 
 @user_app.command("remove")
@@ -2774,7 +2890,7 @@ def user_archive(
 def user_route(
     channel: str = typer.Argument(..., help="Route channel. Currently only 'nostr'."),
     name: str = typer.Argument(..., help="User alias"),
-    pubkey: str = typer.Argument(..., help="Inbound sender Nostr pubkey as npub, nsec, or hex"),
+    pubkey: str = typer.Argument(..., help="Inbound sender Nostr public key as npub or hex"),
 ):
     """Bind an inbound channel sender to a user."""
     if channel != "nostr":
@@ -2791,28 +2907,10 @@ def user_route(
         raise typer.Exit(1)
 
     try:
-        normalized = normalize_nostr_pubkey(pubkey)
+        normalized = _bind_nostr_pubkey_to_identity(config, name, pubkey)
     except ValueError as exc:
         console.print(f"[red]Error: {exc}[/red]")
         raise typer.Exit(1) from exc
-
-    for existing_name, pubkeys in config.channels.nostr.identity_bindings.items():
-        if existing_name != name and normalized in {normalize_nostr_pubkey(value) for value in pubkeys}:
-            console.print(f"[red]Error: pubkey already routed to user '{existing_name}'[/red]")
-            raise typer.Exit(1)
-
-    routes = config.channels.nostr.identity_bindings.setdefault(name, [])
-    if normalized not in {normalize_nostr_pubkey(value) for value in routes}:
-        routes.append(normalized)
-    allowed = config.channels.nostr.allowed_pubkeys
-    allowed_modes = {value.strip().lower() for value in allowed}
-    allowed_pubkeys = {
-        normalize_nostr_pubkey(value)
-        for value in allowed
-        if value.strip().lower() not in {"*", "all"}
-    }
-    if not allowed_modes.intersection({"*", "all"}) and normalized not in allowed_pubkeys:
-        allowed.append(normalized)
     _save_runtime_config(config)
     console.print(f"[green]✓[/green] Routed Nostr sender to user '{name}'")
     console.print(f"Pubkey: {normalized}")

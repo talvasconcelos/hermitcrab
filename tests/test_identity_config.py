@@ -17,9 +17,8 @@ def test_default_identity_paths_use_standard_layout() -> None:
     assert config.owner_identity_root_path.as_posix().endswith("/.hermitcrab/identities/owner")
     assert config.workspace_path == config.owner_identity_root_path
     owner = config.identities.registry["owner"]
-    assert len(owner.nostr_private_key) == 64
     assert len(owner.nostr_public_key) == 64
-    assert nostr_pubkey_from_private_key(owner.nostr_private_key) == owner.nostr_public_key
+    assert owner.nostr_private_key == ""
 
 
 def test_identity_paths_resolve_under_configured_root(tmp_path) -> None:
@@ -211,17 +210,32 @@ def test_identity_registry_rejects_pubkey_without_private_key() -> None:
     from pynostr.key import PrivateKey
 
     pubkey = PrivateKey().public_key.hex()
-
-    with pytest.raises(ValueError, match="nostrPrivateKey is required"):
-        Config.model_validate(
-            {
-                "identities": {
-                    "registry": {
-                        "alice": {"nostrPublicKey": pubkey},
-                    }
+    config = Config.model_validate(
+        {
+            "identities": {
+                "registry": {
+                    "alice": {"nostrPublicKey": pubkey},
                 }
             }
-        )
+        }
+    )
+    assert config.identities.registry["alice"].nostr_public_key == pubkey
+    assert config.identities.registry["alice"].nostr_private_key == ""
+
+
+def test_identity_registry_generates_pubkey_without_storing_private_key_by_default() -> None:
+    config = Config.model_validate({"identities": {"registry": {"alice": {}}}})
+    identity = config.identities.registry["alice"]
+    assert len(identity.nostr_public_key) == 64
+    assert identity.nostr_private_key == ""
+
+
+def test_identity_registry_rejects_invalid_public_or_private_keys() -> None:
+    with pytest.raises(ValueError, match="pubkey must be npub or 64-char hex"):
+        Config.model_validate({"identities": {"registry": {"alice": {"nostrPublicKey": "bad"}}}})
+
+    with pytest.raises(ValueError, match="private key must be nsec or 64-char hex"):
+        Config.model_validate({"identities": {"registry": {"alice": {"nostrPrivateKey": "bad"}}}})
 
 
 def test_identity_registry_rejects_duplicate_pubkeys() -> None:
