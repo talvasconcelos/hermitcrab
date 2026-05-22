@@ -115,6 +115,20 @@ These modules carry the most behavioral complexity:
 - `config/schema.py` — validation, provider matching, model resolution, identity routing
 - `agent/memory.py` — duplicate detection, category management, thread safety
 
+## Dependency boundaries
+
+HermitCrab is intentionally small, but the package layers should stay predictable as agent-assisted development accelerates. The current guardrails are deliberately simple and are enforced by `tests/test_architecture_boundaries.py`.
+
+Initial rules:
+
+- `config/` stays low-level and must not import runtime packages such as `agent/`, `channels/`, `cli/`, `cron/`, `heartbeat/`, `reminders/`, or `session/`.
+- `providers/` owns model/provider integration and must not import concrete channels or CLI code.
+- `agent/tools/` owns tool implementations and policy; tools must not import concrete channel implementations or CLI code.
+- `channels/` should communicate through base classes, bus events, config, and explicit service interfaces rather than reaching deep into memory/session internals.
+- `cli/commands.py` can compose services, but new business logic should move into focused modules when it grows beyond command orchestration.
+
+When a boundary needs to move, update the architecture doc and the boundary test in the same change. Do not silently add cross-layer imports.
+
 ## Extension points
 
 - **New tools** — subclass `Tool` in `agent/tools/base.py`, register in the tool registry
