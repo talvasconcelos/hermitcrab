@@ -19,6 +19,41 @@ def test_rm_still_requires_destructive_approval() -> None:
     assert ExecTool._classify_command_risk("rm draft.md") == "destructive"
 
 
+def test_restricted_shell_allows_workspace_scoped_delete_without_approval(tmp_path: Path) -> None:
+    workspace = tmp_path / "identities" / "alice"
+    tool = ExecTool(working_dir=str(workspace), restrict_to_workspace=True)
+
+    assert tool._guard_command("rm draft.md", str(workspace)) is None
+
+
+def test_restricted_shell_blocks_delete_of_workspace_root(tmp_path: Path) -> None:
+    workspace = tmp_path / "identities" / "alice"
+    tool = ExecTool(working_dir=str(workspace), restrict_to_workspace=True)
+
+    assert tool._guard_command("rm -rf .", str(workspace)) == (
+        "Error: Command blocked by safety guard (destructive command requires explicit approval)"
+    )
+
+
+def test_restricted_shell_blocks_workspace_delete_with_globs(tmp_path: Path) -> None:
+    workspace = tmp_path / "identities" / "alice"
+    tool = ExecTool(working_dir=str(workspace), restrict_to_workspace=True)
+
+    assert tool._guard_command("rm *.tmp", str(workspace)) == (
+        "Error: Command blocked by safety guard (destructive command requires explicit approval)"
+    )
+
+
+def test_restricted_shell_blocks_delete_outside_workspace(tmp_path: Path) -> None:
+    workspace = tmp_path / "identities" / "alice"
+    sibling = tmp_path / "identities" / "bob" / "draft.md"
+    tool = ExecTool(working_dir=str(workspace), restrict_to_workspace=True)
+
+    assert tool._guard_command(f"rm {sibling}", str(workspace)) == (
+        "Error: Command blocked by safety guard (destructive command requires explicit approval)"
+    )
+
+
 def test_destructive_git_still_requires_approval() -> None:
     assert ExecTool._classify_command_risk("git reset --hard HEAD") == "destructive"
 

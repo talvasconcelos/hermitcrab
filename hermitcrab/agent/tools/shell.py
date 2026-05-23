@@ -185,6 +185,13 @@ class ExecTool(Tool):
                 return "Error: Command blocked by safety guard (dangerous pattern detected)"
 
         risk = self._classify_command_risk(cmd)
+        workspace_root = Path(self.working_dir or cwd).resolve()
+        if (
+            risk == "destructive"
+            and self.restrict_to_workspace
+            and self._is_workspace_scoped_delete(cmd, workspace_root)
+        ):
+            risk = "workspace_write"
         if risk == "destructive" and not destructive_approved:
             return "Error: Command blocked by safety guard (destructive command requires explicit approval)"
 
@@ -198,7 +205,6 @@ class ExecTool(Tool):
             if re.search(r"(?:^|[\s=:])(?:~|\$\{?HOME\}?)(?:/|$)", cmd):
                 return "Error: Command blocked by safety guard (home path outside working dir)"
             cwd_path = Path(cwd).resolve()
-            workspace_root = Path(self.working_dir or cwd).resolve()
             if cwd_path != workspace_root and workspace_root not in cwd_path.parents:
                 return "Error: Command blocked by safety guard (working dir outside workspace)"
 
@@ -230,6 +236,35 @@ class ExecTool(Tool):
         paths.extend(Path(match) for match in re.findall(r"(?:^|[\s|>&;])(/[^\s\"'<>|;&]+)", command))
         paths.extend(Path(match) for match in re.findall(r"[A-Za-z]:\\[^\\\"'\s<>|;&]+", command))
         return paths
+
+    @classmethod
+    def _is_workspace_scoped_delete(cls, command: str, workspace_root: Path) -> bool:
+        """Allow file deletion as an ordinary workspace write when it stays inside the workspace."""
+        try:
+            tokens = shlex.split(command, posix=True)
+        except ValueError:
+            return False
+
+        if not tokens or Path(tokens[0]).name.lower() not in {"rm", "rmdir", "del", "erase"}:
+            return False
+        if any(token in {"&&", "||", ";", "|"} for token in tokens):
+            return False
+
+        targets = [token for token in tokens[1:] if not token.startswith("-")]
+        if not targets:
+            return False
+
+        workspace_root = workspace_root.resolve()
+        for target in targets:
+            target_path = Path(target).expanduser()
+            if str(target).startswith(("~", "$HOME", "${HOME}")):
+                return False
+            if any(ch in target for ch in "*?[]"):
+                return False
+            resolved = target_path.resolve() if target_path.is_absolute() else (workspace_root / target_path).resolve()
+            if resolved == workspace_root or workspace_root not in resolved.parents:
+                return False
+        return True
 
     @classmethod
     def _classify_command_risk(cls, command: str) -> CommandRisk:
