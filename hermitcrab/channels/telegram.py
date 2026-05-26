@@ -336,6 +336,16 @@ class TelegramChannel(BaseChannel):
         user = update.effective_user
         chat_id = message.chat_id
         sender_id = self._sender_id(user)
+        str_chat_id = str(chat_id)
+
+        if not self.is_allowed(sender_id):
+            logger.warning(
+                "Access denied for sender {} on channel {}. Add them to allowFrom list in config to grant access.",
+                sender_id,
+                self.name,
+            )
+            self._stop_typing(str_chat_id)
+            return
 
         # Store chat_id for replies
         self._chat_ids[sender_id] = chat_id
@@ -406,8 +416,6 @@ class TelegramChannel(BaseChannel):
         content = "\n".join(content_parts) if content_parts else "[empty message]"
 
         logger.debug("Telegram message from {}: {}...", sender_id, content[:50])
-
-        str_chat_id = str(chat_id)
 
         # Start typing indicator before processing
         self._start_typing(str_chat_id)
