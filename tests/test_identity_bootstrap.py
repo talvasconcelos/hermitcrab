@@ -154,3 +154,57 @@ def test_context_builder_keeps_volatile_session_context_out_of_system_prefix(tmp
     assert "Current time:" in runtime_context
     assert "Chat ID: abc123" in runtime_context
     assert "Session scratchpad: /tmp/session.md" in runtime_context
+
+
+def test_context_builder_trims_history_to_prompt_budget_and_keeps_tool_pairs(tmp_path) -> None:
+    config = Config.model_validate({"root": str(tmp_path)})
+    bootstrap_standard_layout(config)
+    builder = ContextBuilder(
+        config.owner_identity_root_path,
+        system_root=config.system_root_path,
+        prompt_token_budget=5600,
+    )
+
+    history = [
+        {"role": "user", "content": "old " * 800},
+        {"role": "assistant", "content": "call tool"},
+        {"role": "tool", "content": "tool output " * 800},
+        {"role": "assistant", "content": "recent answer"},
+        {"role": "user", "content": "recent question"},
+    ]
+
+    messages = builder.build_messages(history=history, current_message="now")
+
+    assert {"role": "assistant", "content": "call tool"} not in messages
+    assert {"role": "tool", "content": "tool output " * 120} not in messages
+    assert {"role": "assistant", "content": "recent answer"} in messages
+    assert {"role": "user", "content": "recent question"} in messages
+
+
+def test_context_builder_uses_relevant_memory_without_auto_general_memory(tmp_path, monkeypatch) -> None:
+    config = Config.model_validate({"root": str(tmp_path)})
+    bootstrap_standard_layout(config)
+    builder = ContextBuilder(
+        config.owner_identity_root_path,
+        system_root=config.system_root_path,
+        prompt_token_budget=7000,
+    )
+
+    called_general = {"value": False}
+
+    def _fake_relevant(*args, **kwargs):
+        return "relevant hit"
+
+    def _fake_general(*args, **kwargs):
+        called_general["value"] = True
+        return "general memory"
+
+    monkeypatch.setattr(builder.memory, "get_relevant_context_for_queries", _fake_relevant)
+    monkeypatch.setattr(builder.memory, "get_memory_context", _fake_general)
+
+    prompt = builder.build_system_prompt(current_message="what about my prior plan", history=[])
+
+    assert "# Relevant Memory" in prompt
+    assert "relevant hit" in prompt
+    assert "general memory" not in prompt
+    assert called_general["value"] is False

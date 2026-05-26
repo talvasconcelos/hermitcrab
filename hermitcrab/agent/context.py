@@ -172,20 +172,18 @@ class ContextBuilder:
             if relevant_memory:
                 parts.append(f"# Relevant Memory\n\n{relevant_memory}")
 
-            remaining_memory_tokens = max(0, available_memory_tokens - relevant_memory_tokens)
-            remaining_memory_chars = min(self.memory_max_chars, remaining_memory_tokens * 4)
-            if remaining_memory_chars > 0:
-                general_memory = self.memory.get_memory_context(
-                    max_chars=remaining_memory_chars,
-                    max_items_per_category=(
-                        max(1, self.memory_max_items_per_category // 2)
-                        if relevant_memory
-                        else self.memory_max_items_per_category
-                    ),
-                    max_item_chars=self.memory_max_item_chars,
-                )
-                if general_memory:
-                    parts.append(f"# Memory\n\n{general_memory}")
+            include_general_memory = (not relevant_memory) and (not current_message or not memory_queries)
+            if include_general_memory:
+                remaining_memory_tokens = max(0, available_memory_tokens - relevant_memory_tokens)
+                remaining_memory_chars = min(self.memory_max_chars, remaining_memory_tokens * 4)
+                if remaining_memory_chars > 0:
+                    general_memory = self.memory.get_memory_context(
+                        max_chars=remaining_memory_chars,
+                        max_items_per_category=self.memory_max_items_per_category,
+                        max_item_chars=self.memory_max_item_chars,
+                    )
+                    if general_memory:
+                        parts.append(f"# Memory\n\n{general_memory}")
 
         logger.debug(
             "Prompt budget estimate: fixed_tokens={}, history_tokens={}, reserved_history_tokens={}, current_tokens={}, available_memory_tokens={}, relevant_memory_tokens={}",
@@ -429,11 +427,20 @@ Use subagents for complex, time-consuming, or specialized tasks. For substantial
             system_prompt += "\n\n## Session Context\nRuntime session details are provided near the active user turn."
         messages.append({"role": "system", "content": system_prompt})
 
-        # History (last N messages, for conversation context and to limit token usage)
+        # History (last N messages, then token-aware trim to fit remaining prompt budget)
         if max_history is not None:
-            messages.extend(history[-max_history:])
+            candidate_history = history[-max_history:]
         else:
-            messages.extend(history)
+            candidate_history = history
+
+        history_budget = self._calculate_history_token_budget(
+            messages,
+            current_message,
+            channel,
+            chat_id,
+            scratchpad_path,
+        )
+        messages.extend(self._trim_history_to_token_budget(candidate_history, history_budget))
 
         runtime_context = self._build_runtime_context(channel, chat_id, scratchpad_path)
         if runtime_context:
@@ -444,6 +451,48 @@ Use subagents for complex, time-consuming, or specialized tasks. For substantial
         messages.append({"role": "user", "content": user_content})
 
         return messages
+
+    def _calculate_history_token_budget(
+        self,
+        messages_without_history: list[dict[str, Any]],
+        current_message: str,
+        channel: str | None,
+        chat_id: str | None,
+        scratchpad_path: str | None,
+    ) -> int:
+        runtime_context = self._build_runtime_context(channel, chat_id, scratchpad_path)
+        runtime_tokens = estimate_text_tokens(runtime_context) if runtime_context else 0
+        current_tokens = estimate_text_tokens(current_message)
+        reserved_tokens = estimate_message_tokens(messages_without_history) + runtime_tokens + current_tokens
+        return max(0, self.prompt_token_budget - reserved_tokens)
+
+    def _trim_history_to_token_budget(
+        self,
+        history: list[dict[str, Any]],
+        token_budget: int,
+    ) -> list[dict[str, Any]]:
+        if not history or token_budget <= 0:
+            return []
+
+        selected_reversed: list[dict[str, Any]] = []
+        selected_tokens = 0
+        i = len(history) - 1
+        while i >= 0:
+            msg = history[i]
+            chunk = [msg]
+            if msg.get("role") == "tool" and i - 1 >= 0 and history[i - 1].get("role") == "assistant":
+                chunk = [history[i - 1], msg]
+                i -= 1
+
+            chunk_tokens = estimate_message_tokens(chunk)
+            if selected_tokens + chunk_tokens > token_budget:
+                break
+
+            selected_reversed.extend(reversed(chunk))
+            selected_tokens += chunk_tokens
+            i -= 1
+
+        return list(reversed(selected_reversed))
 
     def _build_runtime_context(
         self, channel: str | None, chat_id: str | None, scratchpad_path: str | None
