@@ -1721,6 +1721,7 @@ class AgentLoop:
                 msg,
                 "🦀 hermitcrab chat commands:\n"
                 "/new — Start a new conversation\n"
+                "/capabilities (/tools) — Show concise runtime capability diagnostics\n"
                 "/models — List interactive model choices\n"
                 "/model — Show the current conversation model\n"
                 "/model <name> — Switch the current conversation model\n"
@@ -1736,6 +1737,13 @@ class AgentLoop:
             return self._reply(
                 msg,
                 self._build_models_response(session),
+                metadata=self._active_model_reply_metadata(session),
+            )
+
+        if cmd in {"/capabilities", "/tools"}:
+            return self._reply(
+                msg,
+                self._build_capabilities_response(),
                 metadata=self._active_model_reply_metadata(session),
             )
 
@@ -1796,6 +1804,48 @@ class AgentLoop:
             return await self._handle_reflect_command(msg, session_key, session)
 
         return None
+
+    def _build_capabilities_response(self) -> str:
+        """Build a concise, user-safe runtime capability summary."""
+        names = self.tools.tool_names()
+        grouped = {
+            "files": [n for n in names if n in {"read_file", "write_file", "edit_file", "list_dir"}],
+            "web": [n for n in names if n in {"web_search", "web_fetch"}],
+            "memory": [
+                n
+                for n in names
+                if n in {"read_memory", "search_memory", "session_search", "write_fact", "write_decision", "write_goal", "write_task", "write_reflection"}
+            ],
+            "knowledge": [
+                n
+                for n in names
+                if n in {"knowledge_search", "knowledge_ingest", "knowledge_ingest_url", "knowledge_list", "knowledge_stats"}
+            ],
+            "automation": [n for n in names if n in {"exec", "spawn", "message", "cron", "reminder", "person_profile"}],
+        }
+        used = {tool for tools in grouped.values() for tool in tools}
+        other_tools = [n for n in names if n not in used]
+
+        exec_tool = self.tools.get("exec")
+        exec_status = "enabled" if exec_tool else "disabled"
+        exec_desc = exec_tool.description if isinstance(exec_tool, ExecTool) else "not available"
+
+        lines = [
+            "capabilities:",
+            f"- workspace_restriction: {'on' if self.restrict_to_workspace else 'off'}",
+            f"- exec: {exec_status} ({exec_desc})",
+            f"- spawn: {'enabled' if self.tools.has('spawn') else 'disabled'}",
+            "- memory: enabled",
+            "- progress: available",
+            "- tool_hints: available if channel config enables them",
+        ]
+
+        for label, tools in grouped.items():
+            if tools:
+                lines.append(f"- {label}: {', '.join(tools)}")
+        if other_tools:
+            lines.append(f"- other: {', '.join(other_tools)}")
+        return "\n".join(lines)
 
     def _build_interactive_messages(
         self,

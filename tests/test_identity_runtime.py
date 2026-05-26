@@ -193,6 +193,51 @@ async def test_identity_exec_uses_unrestricted_mode_when_workspace_restriction_i
     assert "dangerous" in exec_tool.description
 
 
+@pytest.mark.asyncio
+async def test_capabilities_command_reports_restricted_exec_and_core_status(tmp_path) -> None:
+    alice_root = tmp_path / "identities" / "alice"
+    alice_root.mkdir(parents=True)
+    loop = AgentLoop(
+        bus=MessageBus(),
+        provider=_provider(),
+        workspace=alice_root,
+        identity_name="alice",
+        identity_root=alice_root,
+    )
+    session = loop.sessions.get_or_create("cli:direct")
+    msg = InboundMessage(channel="cli", sender_id="user", chat_id="direct", content="/capabilities")
+
+    response = await loop._maybe_handle_slash_command(msg, "cli:direct", session)
+
+    assert response is not None
+    assert "workspace_restriction: on" in response.content
+    assert "exec: enabled" in response.content
+    assert "best-effort workspace path checks" in response.content
+    assert "spawn: enabled" in response.content
+    assert "memory: enabled" in response.content
+    assert "tool_hints: available if channel config enables them" in response.content
+
+
+@pytest.mark.asyncio
+async def test_tools_alias_maps_to_capabilities_output(tmp_path) -> None:
+    alice_root = tmp_path / "identities" / "alice"
+    alice_root.mkdir(parents=True)
+    loop = AgentLoop(
+        bus=MessageBus(),
+        provider=_provider(),
+        workspace=alice_root,
+        identity_name="alice",
+        identity_root=alice_root,
+    )
+    session = loop.sessions.get_or_create("cli:direct")
+    msg = InboundMessage(channel="cli", sender_id="user", chat_id="direct", content="/tools")
+
+    response = await loop._maybe_handle_slash_command(msg, "cli:direct", session)
+
+    assert response is not None
+    assert response.content.startswith("capabilities:\n")
+
+
 def test_agent_loop_kwargs_apply_identity_model_overrides(tmp_path) -> None:
     config = Config.model_validate(
         {
