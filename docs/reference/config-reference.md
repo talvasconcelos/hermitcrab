@@ -215,7 +215,7 @@ Channel configuration and behavior.
 
 | Field | Default | Description |
 |-------|---------|-------------|
-| `sendProgress` | `true` | Stream text progress to channel |
+| `sendProgress` | `true` | Send brief status progress updates to channel (not token streaming) |
 | `sendToolHints` | `false` | Stream tool-call hints |
 
 ### channels.telegram

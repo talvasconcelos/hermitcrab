@@ -89,6 +89,14 @@ class TurnRunner:
     def _remaining_seconds(self, started_at: float) -> float:
         return self.config.max_loop_seconds - (time.monotonic() - started_at)
 
+    @staticmethod
+    def _progress_heartbeat_message(waiting_message: str, *, started_at: float) -> str:
+        base = waiting_message.strip()
+        if not base:
+            return ""
+        elapsed_s = max(1, int(time.monotonic() - started_at))
+        return f"{base} ({elapsed_s}s elapsed)"
+
     async def _await_with_progress(
         self,
         awaitable: Awaitable[Any],
@@ -123,7 +131,12 @@ class TurnRunner:
                     return await task
                 if on_progress and heartbeats_sent < self.MAX_IDENTICAL_HEARTBEATS_PER_WAIT:
                     if waiting_message:
-                        await on_progress(waiting_message)
+                        await on_progress(
+                            self._progress_heartbeat_message(
+                                waiting_message,
+                                started_at=started_at,
+                            )
+                        )
                     heartbeats_sent += 1
 
     @staticmethod

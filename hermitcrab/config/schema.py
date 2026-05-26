@@ -210,7 +210,7 @@ class NostrConfig(Base):
 class ChannelsConfig(Base):
     """Configuration for chat channels."""
 
-    send_progress: bool = True  # stream agent's text progress to the channel
+    send_progress: bool = True  # send brief status progress updates to the channel (not token streaming)
     send_tool_hints: bool = False  # stream tool-call hints (e.g. read_file("…"))
     telegram: TelegramConfig = Field(default_factory=TelegramConfig)
     email: EmailConfig = Field(default_factory=EmailConfig)

@@ -518,23 +518,37 @@ class AgentLoop:
 
     @staticmethod
     def _tool_hint(tool_calls: list) -> str:
-        """Format tool calls as concise hint, e.g. 'web_search("query")'."""
+        """Format tool calls as concise hint with sensitive args redacted by default."""
+
+        safe_path_hint_tools = {"read_file", "list_dir", "edit_file", "write_file"}
+
+        def _safe_hint_from_arguments(tc: Any) -> str | None:
+            if tc.name not in safe_path_hint_tools:
+                return None
+            if not isinstance(tc.arguments, dict):
+                return None
+            path = tc.arguments.get("path")
+            if not isinstance(path, str) or not path.strip():
+                return None
+            value = path.strip()
+            return f'{tc.name}("{value[:80]}…")' if len(value) > 80 else f'{tc.name}("{value}")'
 
         def _fmt(tc):
+            safe_hint = _safe_hint_from_arguments(tc)
+            if safe_hint is not None:
+                return safe_hint
             if isinstance(tc.arguments, dict):
                 val = next(iter(tc.arguments.values()), None) if tc.arguments else None
             elif isinstance(tc.arguments, str):
                 val = tc.arguments
             else:
                 val = None
-            if isinstance(val, str):
-                return f'{tc.name}("{val[:40]}…")' if len(val) > 40 else f'{tc.name}("{val}")'
             if val is None:
-                return tc.name
+                return f"{tc.name}(…redacted…)"
+            if isinstance(val, str) and val.strip():
+                return f"{tc.name}(…redacted…{len(val)}c)"
             rendered = json.dumps(val, ensure_ascii=False)
-            return (
-                f"{tc.name}({rendered[:40]}…)" if len(rendered) > 40 else f"{tc.name}({rendered})"
-            )
+            return f"{tc.name}(…redacted…{min(len(rendered), 999)}c)"
 
         return ", ".join(_fmt(tc) for tc in tool_calls)
 
