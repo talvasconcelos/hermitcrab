@@ -41,7 +41,12 @@ class ExecTool(Tool):
 
     @property
     def description(self) -> str:
-        return "Execute a shell command and return its output. Use with caution."
+        if self.restrict_to_workspace:
+            return (
+                "Execute a shell command with best-effort workspace path checks. "
+                "This is not a sandbox and should not be treated as confinement."
+            )
+        return "Execute a shell command with full system access; dangerous and not sandboxed."
 
     @property
     def parameters(self) -> dict[str, Any]:

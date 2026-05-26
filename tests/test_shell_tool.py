@@ -104,3 +104,19 @@ def test_restricted_shell_allows_requested_working_dir_inside_workspace(tmp_path
     tool = ExecTool(working_dir=str(workspace), restrict_to_workspace=True)
 
     assert tool._guard_command("cat notes.md", str(child)) is None
+
+
+def test_exec_description_is_dynamic_for_restricted_mode(tmp_path: Path) -> None:
+    workspace = tmp_path / "identities" / "alice"
+    tool = ExecTool(working_dir=str(workspace), restrict_to_workspace=True)
+
+    assert "best-effort workspace path checks" in tool.description
+    assert "not a sandbox" in tool.description
+
+
+def test_exec_description_is_dynamic_for_unrestricted_mode(tmp_path: Path) -> None:
+    workspace = tmp_path / "identities" / "alice"
+    tool = ExecTool(working_dir=str(workspace), restrict_to_workspace=False)
+
+    assert "full system access" in tool.description
+    assert "dangerous" in tool.description

@@ -146,7 +146,7 @@ async def test_identity_file_tools_deny_listing_outside_identity_root_by_default
 
 
 @pytest.mark.asyncio
-async def test_identity_exec_is_not_available_when_restricted_by_default(
+async def test_identity_exec_is_available_when_restricted_by_default(
     tmp_path,
 ) -> None:
     alice_root = tmp_path / "identities" / "alice"
@@ -160,11 +160,18 @@ async def test_identity_exec_is_not_available_when_restricted_by_default(
         identity_root=alice_root,
     )
 
-    assert not loop.tools.has("exec")
+    assert loop.tools.has("exec")
+    exec_tool = loop.tools.get("exec")
+    assert exec_tool is not None
+    assert "best-effort workspace path checks" in exec_tool.description
+    assert "not a sandbox" in exec_tool.description
+
+    result = await loop.tools.execute("exec", {"command": "pwd"})
+    assert str(alice_root) in result
 
 
 @pytest.mark.asyncio
-async def test_identity_exec_can_be_enabled_only_when_workspace_restriction_is_disabled(
+async def test_identity_exec_uses_unrestricted_mode_when_workspace_restriction_is_disabled(
     tmp_path,
 ) -> None:
     alice_root = tmp_path / "identities" / "alice"
@@ -180,6 +187,10 @@ async def test_identity_exec_can_be_enabled_only_when_workspace_restriction_is_d
     )
 
     assert loop.tools.has("exec")
+    exec_tool = loop.tools.get("exec")
+    assert exec_tool is not None
+    assert "full system access" in exec_tool.description
+    assert "dangerous" in exec_tool.description
 
 
 def test_agent_loop_kwargs_apply_identity_model_overrides(tmp_path) -> None:

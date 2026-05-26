@@ -290,6 +290,7 @@ Reply directly for normal conversation. Only use `message` to send to a specific
 - Do not assume a file or directory exists — use list_dir or read_file to verify.
 - After writing or editing a file, re-read it if accuracy matters.
 - If a tool call fails, analyze the error before retrying with a different approach.
+- Use `exec` for workspace-scoped filesystem operations not covered by file tools, such as deleting or renaming files. In workspace-restricted mode, `exec` applies best-effort path checks (for traversal/home/outside paths), but it is not a sandbox or true confinement.
 
 ## Memory
 - Search memory before answering when durable past context may matter.
