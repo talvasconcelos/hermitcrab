@@ -181,6 +181,41 @@ def test_context_builder_trims_history_to_prompt_budget_and_keeps_tool_pairs(tmp
     assert {"role": "user", "content": "recent question"} in messages
 
 
+def test_context_builder_keeps_recent_history_when_fixed_prompt_exceeds_budget(tmp_path) -> None:
+    config = Config.model_validate({"root": str(tmp_path)})
+    bootstrap_standard_layout(config)
+    (config.system_root_path / "AGENTS.md").write_text("system rules " * 5000, encoding="utf-8")
+    builder = ContextBuilder(
+        config.owner_identity_root_path,
+        system_root=config.system_root_path,
+        prompt_token_budget=1000,
+    )
+
+    history = [
+        {"role": "user", "content": "can you search what i asked you about dinner tonight?"},
+        {"role": "assistant", "content": "I found no matching dinner plans."},
+        {"role": "user", "content": "dude WTF, that was two messages ago"},
+    ]
+
+    messages = builder.build_messages(history=history, current_message="how did you forget?")
+
+    assert {"role": "user", "content": "dude WTF, that was two messages ago"} in messages
+    assert messages[-1] == {"role": "user", "content": "how did you forget?"}
+
+
+def test_context_builder_warns_against_unverified_platform_truncation_blame(tmp_path) -> None:
+    config = Config.model_validate({"root": str(tmp_path)})
+    bootstrap_standard_layout(config)
+
+    prompt = ContextBuilder(
+        config.owner_identity_root_path,
+        system_root=config.system_root_path,
+    ).build_system_prompt()
+
+    assert "Do not blame platform truncation" in prompt
+    assert "recent=true" in prompt
+
+
 def test_context_builder_uses_relevant_memory_without_auto_general_memory(tmp_path, monkeypatch) -> None:
     config = Config.model_validate({"root": str(tmp_path)})
     bootstrap_standard_layout(config)

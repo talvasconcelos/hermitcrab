@@ -83,6 +83,71 @@ async def test_short_reply_turn_receives_recent_conversation_context(tmp_path, m
 
 
 @pytest.mark.asyncio
+async def test_turn_persistence_saves_current_message_when_history_was_shaped(tmp_path, monkeypatch) -> None:
+    loop = scenario_loop(tmp_path, identity="owner")
+    session_key = "telegram:tal"
+    session = loop.sessions.get_or_create(session_key)
+    session.add_message("user", "can you prep the beta4 release harness?")
+    session.add_message("assistant", "yeah — i'll prep the harness changes and leave review to you.")
+    loop.sessions.save(session)
+
+    async def fake_run_agent_loop(messages, **kwargs):
+        return TurnResult(
+            final_content="on it",
+            tools_used=[],
+            messages=[*messages, {"role": "assistant", "content": "on it"}],
+            outcome=TurnOutcome.COMPLETED,
+        )
+
+    monkeypatch.setattr(loop, "_run_agent_loop", fake_run_agent_loop)
+
+    msg = InboundMessage(channel="telegram", sender_id="tal", chat_id="tal", content="sounds good")
+    response = await loop._process_message(msg, session_key=session_key)
+
+    saved = loop.sessions.get_or_create(session_key).get_history(max_messages=10)
+    assert response is not None
+    assert any(item.get("role") == "user" and item.get("content") == "sounds good" for item in saved)
+    assert any(item.get("role") == "assistant" and item.get("content") == "on it" for item in saved)
+
+
+@pytest.mark.asyncio
+async def test_fresh_session_receives_recent_archived_same_chat_tail(tmp_path, monkeypatch) -> None:
+    loop = scenario_loop(tmp_path, identity="owner")
+    session = loop.sessions.get_or_create("telegram:tal")
+    session.add_message("user", "i need some ideas for dinner. quick, easy, kid friendly")
+    session.add_message("assistant", "quesadillas are a good quick option with tortillas, cheese, and beans.")
+    loop.sessions.save(session)
+    loop.sessions.archive(session, "timeout")
+
+    captured: dict[str, list[dict[str, object]]] = {}
+
+    async def fake_run_agent_loop(messages, **kwargs):
+        captured["messages"] = messages
+        return TurnResult(
+            final_content="added the basics",
+            tools_used=[],
+            messages=[*messages, {"role": "assistant", "content": "added the basics"}],
+            outcome=TurnOutcome.COMPLETED,
+        )
+
+    monkeypatch.setattr(loop, "_run_agent_loop", fake_run_agent_loop)
+
+    msg = InboundMessage(
+        channel="telegram",
+        sender_id="tal",
+        chat_id="tal",
+        content="ok, add what we need to the grocery list",
+    )
+    response = await loop._process_message(msg, session_key="telegram:tal")
+
+    prompt = "\n".join(str(item.get("content", "")) for item in captured["messages"])
+    assert response is not None
+    assert response.content == "added the basics"
+    assert "quesadillas are a good quick option" in prompt
+    assert "ok, add what we need to the grocery list" in prompt
+
+
+@pytest.mark.asyncio
 async def test_email_prompt_injection_content_remains_user_data_not_instruction(tmp_path, monkeypatch) -> None:
     loop = scenario_loop(tmp_path, identity="owner")
     captured: dict[str, list[dict[str, object]]] = {}

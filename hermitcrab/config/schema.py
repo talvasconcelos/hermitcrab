@@ -302,7 +302,7 @@ class AgentDefaults(Base):
     temperature: float = 0.1
     max_tool_iterations: int = 40
     memory_window: int = 100
-    inactivity_timeout_s: int = 30 * 60
+    inactivity_timeout_s: int = 2 * 60 * 60
     llm_max_retries: int = 3
     llm_retry_base_delay_s: float = 0.6
     max_loop_seconds: int = 5 * 60

@@ -1561,11 +1561,22 @@ class AgentLoop:
             history = session.get_history(max_messages=self.memory_window)
             history_for_prompt = build_prompt_history(history)
             if not history_for_prompt:
-                archived_history = self.sessions.get_resume_history(
+                archived_history = self.sessions.get_recent_archived_history(
                     key,
-                    query=msg.content,
                     max_messages=min(24, self.memory_window),
                 )
+                if archived_history:
+                    logger.info(
+                        "Injecting recent archived continuity for fresh session: key={} messages={}",
+                        key,
+                        len(archived_history),
+                    )
+                else:
+                    archived_history = self.sessions.get_resume_history(
+                        key,
+                        query=msg.content,
+                        max_messages=min(24, self.memory_window),
+                    )
                 history_for_prompt = build_prompt_history(archived_history)
             spawn_brief = self._build_subagent_brief(msg.content, history_for_prompt, session)
             self._set_tool_context(
@@ -1882,7 +1893,10 @@ class AgentLoop:
             chat_id=msg.chat_id,
             scratchpad_path=str(scratchpad_path),
         )
-        internal_skip = 1 + len(history)
+        # Persist from the active user turn onward. The context builder may trim
+        # shaped history and may add volatile runtime context, so `len(history)`
+        # is not a reliable index into `messages`.
+        internal_skip = max(0, len(messages) - 1)
         pending = PendingWork.from_metadata(session.metadata)
         resumed_pending_work: PendingWork | None = None
         user_index = next(

@@ -38,7 +38,7 @@ class ContextBuilder:
         memory_max_item_chars: int = 600,
         model_aliases: dict[str, str | ModelAliasConfig] | None = None,
         named_models: dict[str, NamedModelConfig] | None = None,
-        prompt_token_budget: int = 4000,
+        prompt_token_budget: int = 6000,
         system_root: Path | None = None,
     ):
         self.workspace = workspace
@@ -50,7 +50,7 @@ class ContextBuilder:
         self.memory_max_item_chars = memory_max_item_chars
         self.model_aliases = model_aliases or {}
         self.named_models = named_models or {}
-        self.prompt_token_budget = max(800, prompt_token_budget)
+        self.prompt_token_budget = max(1200, prompt_token_budget)
 
     def build_system_prompt(
         self,
@@ -96,6 +96,15 @@ class ContextBuilder:
                 "A session scratchpad may be provided near the active user turn. "
                 "Use it as transient working memory only. It is archived and not long-term memory."
             )
+        fixed_parts.append(
+            "# Context Honesty\n\n"
+            "The chat platform normally delivers only the newest inbound message; HermitCrab is responsible "
+            "for restoring prior turns from its local session history. Do not blame platform truncation, UI "
+            "truncation, or the user for missing context unless a tool or log proves it. If the user says you "
+            "forgot, contradicted recent messages, or asks what happened, inspect recent session history with "
+            "`session_search` using `recent=true` before explaining. If evidence is unavailable, say that the "
+            "cause is unverified instead of inventing one."
+        )
 
         always_skills = self.skills.get_always_skills()
         fixed_prompt = "\n\n---\n\n".join(fixed_parts)
@@ -439,8 +448,16 @@ Use subagents for complex, time-consuming, or specialized tasks. For substantial
             channel,
             chat_id,
             scratchpad_path,
+            candidate_history,
         )
-        messages.extend(self._trim_history_to_token_budget(candidate_history, history_budget))
+        selected_history = self._trim_history_to_token_budget(candidate_history, history_budget)
+        logger.debug(
+            "Prompt history selection: candidate_messages={}, selected_messages={}, history_budget_tokens={}",
+            len(candidate_history),
+            len(selected_history),
+            history_budget,
+        )
+        messages.extend(selected_history)
 
         runtime_context = self._build_runtime_context(channel, chat_id, scratchpad_path)
         if runtime_context:
@@ -459,12 +476,20 @@ Use subagents for complex, time-consuming, or specialized tasks. For substantial
         channel: str | None,
         chat_id: str | None,
         scratchpad_path: str | None,
+        history: list[dict[str, Any]] | None = None,
     ) -> int:
         runtime_context = self._build_runtime_context(channel, chat_id, scratchpad_path)
         runtime_tokens = estimate_text_tokens(runtime_context) if runtime_context else 0
         current_tokens = estimate_text_tokens(current_message)
         reserved_tokens = estimate_message_tokens(messages_without_history) + runtime_tokens + current_tokens
-        return max(0, self.prompt_token_budget - reserved_tokens)
+        budget = max(0, self.prompt_token_budget - reserved_tokens)
+        if history:
+            # Recent turns are core conversational state, not optional garnish. In beta4 the
+            # fixed/system prompt can exceed this conservative planning budget. The planning
+            # budget is only a soft budget for optional sections; it must never zero out the
+            # recent chat tail. Providers still enforce the true model context window later.
+            budget = max(budget, min(1200, max(384, self.prompt_token_budget // 4)))
+        return budget
 
     def _trim_history_to_token_budget(
         self,
