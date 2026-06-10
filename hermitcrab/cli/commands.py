@@ -1176,6 +1176,7 @@ def _build_interactive_intro() -> str:
 
 def _make_provider(config: Config):
     """Create the appropriate LLM provider from config."""
+    from hermitcrab.providers.attribution_headers import merge_provider_headers
     from hermitcrab.providers.custom_provider import CustomProvider
     from hermitcrab.providers.litellm_provider import LiteLLMProvider
     from hermitcrab.providers.ollama_provider import OllamaProvider
@@ -1234,10 +1235,16 @@ def _make_provider(config: Config):
 
     # Custom: direct OpenAI-compatible endpoint, bypasses LiteLLM
     if provider_name == "custom":
+        api_base = config.get_api_base(model) or "http://localhost:8000/v1"
         return CustomProvider(
             api_key=p.api_key if p else "no-key",
-            api_base=config.get_api_base(model) or "http://localhost:8000/v1",
+            api_base=api_base,
             default_model=resolved_model.model or model,
+            extra_headers=merge_provider_headers(
+                provider_name=provider_name,
+                api_base=api_base,
+                configured_headers=p.extra_headers if p else None,
+            ),
         )
 
     from hermitcrab.providers.registry import find_by_name
@@ -1246,11 +1253,16 @@ def _make_provider(config: Config):
         resolved_request = config.resolve_model_config(request_model)
         request_provider = config.get_provider(request_model)
         request_provider_name = config.get_provider_name(request_model)
+        request_api_base = config.get_api_base(request_model)
         return {
             "model": resolved_request.model or request_model,
             "api_key": request_provider.api_key if request_provider else None,
-            "api_base": config.get_api_base(request_model),
-            "extra_headers": request_provider.extra_headers if request_provider else None,
+            "api_base": request_api_base,
+            "extra_headers": merge_provider_headers(
+                provider_name=request_provider_name,
+                api_base=request_api_base,
+                configured_headers=request_provider.extra_headers if request_provider else None,
+            ),
             "provider_name": request_provider_name,
             "provider_options": resolved_request.provider_options or {},
             "reasoning_effort": resolved_request.reasoning_effort,
