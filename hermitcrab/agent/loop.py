@@ -118,6 +118,7 @@ from hermitcrab.bus.events import InboundMessage, OutboundMessage
 from hermitcrab.bus.queue import MessageBus
 from hermitcrab.config.schema import ExecToolConfig, ModelAliasConfig, NamedModelConfig
 from hermitcrab.providers.base import LLMProvider
+from hermitcrab.providers.registry import normalize_provider_name
 from hermitcrab.session.manager import Session, SessionManager
 from hermitcrab.utils.helpers import resolve_model_alias_config
 
@@ -191,7 +192,7 @@ class AgentLoop:
         brave_api_key: str | None = None,
         exec_config: ExecToolConfig | None = None,
         cron_service: CronService | None = None,
-        restrict_to_workspace: bool = False,
+        restrict_to_workspace: bool = True,
         session_manager: SessionManager | None = None,
         mcp_servers: dict | None = None,
         channels_config: ChannelsConfig | None = None,
@@ -213,12 +214,18 @@ class AgentLoop:
         memory_context_max_chars: int = 12000,
         memory_context_max_items_per_category: int = 25,
         memory_context_max_item_chars: int = 600,
+        system_root: Path | None = None,
+        identity_name: str = "owner",
+        identity_root: Path | None = None,
     ):
         self.bus = bus
         self.channels_config = channels_config
         self.provider = provider
-        self.workspace = workspace
-        self.audit = AuditTrail(workspace)
+        self.identity_name = identity_name
+        self.identity_root = identity_root or workspace
+        self.system_root = system_root
+        self.workspace = self.identity_root
+        self.audit = AuditTrail(system_root or self.identity_root)
         self.model = model or provider.get_default_model()
         self.max_iterations = max_iterations
         self.temperature = temperature
@@ -260,24 +267,22 @@ class AgentLoop:
         )
 
         self.context = ContextBuilder(
-            workspace,
+            self.identity_root,
             memory_max_chars=memory_context_max_chars,
             memory_max_items_per_category=memory_context_max_items_per_category,
             memory_max_item_chars=memory_context_max_item_chars,
             model_aliases=self.model_aliases,
             named_models=self.named_models,
+            system_root=system_root,
         )
-        self.skill_runtime = SkillRuntimeManager(workspace, self.context.skills)
-        self.sessions = session_manager or SessionManager(workspace)
-        self.journal = JournalStore(workspace)
-        self.memory = MemoryStore(workspace)
-        self.knowledge = KnowledgeStore(workspace)
-        self.lists = ListStore(workspace)
-        self.people = PeopleStore(workspace)
-        self.reminders = ReminderStore(
-            workspace,
-            legacy_cron_store_path=(cron_service.store_path if cron_service else None),
-        )
+        self.skill_runtime = SkillRuntimeManager(self.identity_root, self.context.skills)
+        self.sessions = session_manager or SessionManager(self.identity_root)
+        self.journal = JournalStore(self.identity_root)
+        self.memory = MemoryStore(self.identity_root)
+        self.knowledge = KnowledgeStore(self.identity_root)
+        self.lists = ListStore(self.identity_root)
+        self.people = PeopleStore(self.identity_root)
+        self.reminders = ReminderStore(self.identity_root)
         self.tools = ToolRegistry(
             default_policy=build_main_agent_policy(),
             audit_event=self._audit_event,
@@ -285,7 +290,7 @@ class AgentLoop:
         self.execution_state = ExecutionStateTracker()
         self.subagents = SubagentManager(
             provider=provider,
-            workspace=workspace,
+            workspace=self.identity_root,
             bus=bus,
             model=self._job_models.get(JobClass.SUBAGENT) or self.model,
             temperature=self.temperature,
@@ -311,7 +316,7 @@ class AgentLoop:
         )
         onboarding_model = self._get_model_for_job(JobClass.INTERACTIVE_RESPONSE) or self.model
         self._onboarding_service = OnboardingProfileService(
-            workspace=workspace,
+            workspace=self.identity_root,
             chat_callable=self._chat_with_retry,
             model=onboarding_model,
         )
@@ -322,7 +327,7 @@ class AgentLoop:
         self._mcp_connected = False
         self._mcp_connecting = False
         self._background_jobs = BackgroundJobManager(
-            workspace=workspace,
+            workspace=self.identity_root,
             journal=self.journal,
             memory=self.memory,
             reflection_service=self._reflection_service,
@@ -333,7 +338,7 @@ class AgentLoop:
         )
         self._background_tasks = self._background_jobs._background_tasks
         self._session_lifecycle = SessionLifecycleManager(
-            workspace=workspace,
+            workspace=self.identity_root,
             sessions=self.sessions,
             inactivity_timeout_s=self.inactivity_timeout_s,
         )
@@ -513,23 +518,37 @@ class AgentLoop:
 
     @staticmethod
     def _tool_hint(tool_calls: list) -> str:
-        """Format tool calls as concise hint, e.g. 'web_search("query")'."""
+        """Format tool calls as concise hint with sensitive args redacted by default."""
+
+        safe_path_hint_tools = {"read_file", "list_dir", "edit_file", "write_file"}
+
+        def _safe_hint_from_arguments(tc: Any) -> str | None:
+            if tc.name not in safe_path_hint_tools:
+                return None
+            if not isinstance(tc.arguments, dict):
+                return None
+            path = tc.arguments.get("path")
+            if not isinstance(path, str) or not path.strip():
+                return None
+            value = path.strip()
+            return f'{tc.name}("{value[:80]}…")' if len(value) > 80 else f'{tc.name}("{value}")'
 
         def _fmt(tc):
+            safe_hint = _safe_hint_from_arguments(tc)
+            if safe_hint is not None:
+                return safe_hint
             if isinstance(tc.arguments, dict):
                 val = next(iter(tc.arguments.values()), None) if tc.arguments else None
             elif isinstance(tc.arguments, str):
                 val = tc.arguments
             else:
                 val = None
-            if isinstance(val, str):
-                return f'{tc.name}("{val[:40]}…")' if len(val) > 40 else f'{tc.name}("{val}")'
             if val is None:
-                return tc.name
+                return f"{tc.name}(…redacted…)"
+            if isinstance(val, str) and val.strip():
+                return f"{tc.name}(…redacted…{len(val)}c)"
             rendered = json.dumps(val, ensure_ascii=False)
-            return (
-                f"{tc.name}({rendered[:40]}…)" if len(rendered) > 40 else f"{tc.name}({rendered})"
-            )
+            return f"{tc.name}(…redacted…{min(len(rendered), 999)}c)"
 
         return ", ".join(_fmt(tc) for tc in tool_calls)
 
@@ -653,10 +672,10 @@ class AgentLoop:
             if request_config.get("provider_name"):
                 return True, resolved_model
 
-        if resolved_model.startswith(
-            ("openai-codex/", "openai-oauth/", "qwen-oauth/", "qwen-portal/")
-        ):
-            return True, resolved_model
+        if "/" in resolved_model:
+            provider_prefix = normalize_provider_name(resolved_model.split("/", 1)[0])
+            if provider_prefix == "openai_codex":
+                return True, resolved_model
 
         return (
             False,
@@ -741,7 +760,7 @@ class AgentLoop:
             [
                 "",
                 "Use `/model <name>` to switch this conversation only.",
-                "You can use a named model, a configured alias, or a full model id like `openai-oauth/gpt-5.4`.",
+                "You can use a named model, a configured alias, or a full model id like `openai-codex/gpt-5.4-mini`.",
                 "Use `/model` with no argument to see the active model.",
                 "Use `/model default` to clear the conversation override.",
             ]
@@ -784,6 +803,15 @@ class AgentLoop:
             except Exception:
                 pass
 
+        for model in (
+            "gpt-5.5",
+            "gpt-5.4",
+            "gpt-5.4-mini",
+            "gpt-5.3-codex",
+            "gpt-5.2-codex",
+        ):
+            if model not in ordered:
+                ordered.append(model)
         return ordered
 
     def _build_provider_discovery_lines(self, session: Session, seen: set[str]) -> list[str]:
@@ -800,12 +828,9 @@ class AgentLoop:
             seen.add(key)
             lines.append(f"- `{value}`")
 
-        if provider_prefix in {"openai-codex", "openai-oauth"}:
+        if normalize_provider_name(provider_prefix) == "openai_codex":
             for model in self._read_local_codex_models():
-                _add(f"{provider_prefix}/{model}")
-        elif provider_prefix in {"qwen-oauth", "qwen-portal"}:
-            _add("qwen-oauth/coder-model")
-            _add("qwen-oauth/vision-model")
+                _add(f"openai-codex/{model}")
 
         return lines
 
@@ -836,6 +861,7 @@ class AgentLoop:
     ) -> None:
         """Append one small structured audit entry without breaking user flows."""
         payload: dict[str, Any] = dict(data)
+        payload["identity_name"] = self.identity_name
         if session_key:
             payload["session_key"] = session_key
         if msg is not None:
@@ -846,13 +872,14 @@ class AgentLoop:
             if msg.metadata:
                 for field in (
                     "sender_pubkey",
-                    "workspace_target",
-                    "workspace_name",
-                    "workspace_path",
-                    "workspace_reason",
+                    "identity_target",
+                    "identity_path",
+                    "identity_reason",
                 ):
                     if msg.metadata.get(field) is not None:
                         payload[field] = msg.metadata.get(field)
+                if msg.metadata.get("identity_name") is not None:
+                    payload["routed_identity_name"] = msg.metadata.get("identity_name")
         try:
             self.audit.record(event, **payload)
         except OSError as exc:
@@ -1534,11 +1561,22 @@ class AgentLoop:
             history = session.get_history(max_messages=self.memory_window)
             history_for_prompt = build_prompt_history(history)
             if not history_for_prompt:
-                archived_history = self.sessions.get_resume_history(
+                archived_history = self.sessions.get_recent_archived_history(
                     key,
-                    query=msg.content,
                     max_messages=min(24, self.memory_window),
                 )
+                if archived_history:
+                    logger.info(
+                        "Injecting recent archived continuity for fresh session: key={} messages={}",
+                        key,
+                        len(archived_history),
+                    )
+                else:
+                    archived_history = self.sessions.get_resume_history(
+                        key,
+                        query=msg.content,
+                        max_messages=min(24, self.memory_window),
+                    )
                 history_for_prompt = build_prompt_history(archived_history)
             spawn_brief = self._build_subagent_brief(msg.content, history_for_prompt, session)
             self._set_tool_context(
@@ -1567,7 +1605,7 @@ class AgentLoop:
                 build_result.messages,
                 on_progress=progress_callback,
                 job_class=JobClass.INTERACTIVE_RESPONSE,
-                model_override=self._resolve_interactive_model(session)[1],
+                model_override=self._resolve_interactive_model(session)[0],
             )
             final_content = turn_result.final_content
             if is_empty_response(final_content) or is_placeholder_assistant_reply(final_content):
@@ -1708,6 +1746,7 @@ class AgentLoop:
                 msg,
                 "🦀 hermitcrab chat commands:\n"
                 "/new — Start a new conversation\n"
+                "/capabilities (/tools) — Show concise runtime capability diagnostics\n"
                 "/models — List interactive model choices\n"
                 "/model — Show the current conversation model\n"
                 "/model <name> — Switch the current conversation model\n"
@@ -1723,6 +1762,13 @@ class AgentLoop:
             return self._reply(
                 msg,
                 self._build_models_response(session),
+                metadata=self._active_model_reply_metadata(session),
+            )
+
+        if cmd in {"/capabilities", "/tools"}:
+            return self._reply(
+                msg,
+                self._build_capabilities_response(),
                 metadata=self._active_model_reply_metadata(session),
             )
 
@@ -1784,6 +1830,48 @@ class AgentLoop:
 
         return None
 
+    def _build_capabilities_response(self) -> str:
+        """Build a concise, user-safe runtime capability summary."""
+        names = self.tools.tool_names()
+        grouped = {
+            "files": [n for n in names if n in {"read_file", "write_file", "edit_file", "list_dir"}],
+            "web": [n for n in names if n in {"web_search", "web_fetch"}],
+            "memory": [
+                n
+                for n in names
+                if n in {"read_memory", "search_memory", "session_search", "write_fact", "write_decision", "write_goal", "write_task", "write_reflection"}
+            ],
+            "knowledge": [
+                n
+                for n in names
+                if n in {"knowledge_search", "knowledge_ingest", "knowledge_ingest_url", "knowledge_list", "knowledge_stats"}
+            ],
+            "automation": [n for n in names if n in {"exec", "spawn", "message", "cron", "reminder", "person_profile"}],
+        }
+        used = {tool for tools in grouped.values() for tool in tools}
+        other_tools = [n for n in names if n not in used]
+
+        exec_tool = self.tools.get("exec")
+        exec_status = "enabled" if exec_tool else "disabled"
+        exec_desc = exec_tool.description if isinstance(exec_tool, ExecTool) else "not available"
+
+        lines = [
+            "capabilities:",
+            f"- workspace_restriction: {'on' if self.restrict_to_workspace else 'off'}",
+            f"- exec: {exec_status} ({exec_desc})",
+            f"- spawn: {'enabled' if self.tools.has('spawn') else 'disabled'}",
+            "- memory: enabled",
+            "- progress: available",
+            "- tool_hints: available if channel config enables them",
+        ]
+
+        for label, tools in grouped.items():
+            if tools:
+                lines.append(f"- {label}: {', '.join(tools)}")
+        if other_tools:
+            lines.append(f"- other: {', '.join(other_tools)}")
+        return "\n".join(lines)
+
     def _build_interactive_messages(
         self,
         msg: InboundMessage,
@@ -1805,7 +1893,10 @@ class AgentLoop:
             chat_id=msg.chat_id,
             scratchpad_path=str(scratchpad_path),
         )
-        internal_skip = 1 + len(history)
+        # Persist from the active user turn onward. The context builder may trim
+        # shaped history and may add volatile runtime context, so `len(history)`
+        # is not a reliable index into `messages`.
+        internal_skip = max(0, len(messages) - 1)
         pending = PendingWork.from_metadata(session.metadata)
         resumed_pending_work: PendingWork | None = None
         user_index = next(

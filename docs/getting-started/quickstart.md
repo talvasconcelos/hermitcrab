@@ -2,91 +2,58 @@
 
 Get HermitCrab running and have your first conversation in under 2 minutes.
 
-## 1. Install and onboard
+## 1. Install and set up
 
 If you haven't installed HermitCrab yet, see [Installation](installation.md).
 
 ```bash
-hermitcrab onboard
+hermitcrab setup
 ```
 
-This creates your config at `~/.hermitcrab/config.json` and bootstraps the workspace directory.
+This creates `~/.hermitcrab/config.json`, bootstraps the system state, and prepares the owner identity. The identity-based layout is the normal HermitCrab layout: solo owner use works out of the box, and additional identities can be added later by the admin.
 
-## 2. Configure a provider
+For non-interactive installs, pass safe defaults:
 
-HermitCrab needs an LLM provider to work. Choose one:
+```bash
+hermitcrab setup --yes --provider ollama --model ollama/llama3.2:3b
+```
+
+`hermitcrab onboard` remains available as the lower-level/scriptable bootstrap command.
+
+## 2. Configure or change models
+
+HermitCrab uses named models so admins do not need to hand-edit JSON for common setup.
 
 ### Local model (free, private)
 
 Install [Ollama](https://ollama.com), then pull a model:
 
 ```bash
-ollama pull gemma4:e4b
-```
-
-Edit `~/.hermitcrab/config.json`:
-
-```json
-{
-  "providers": {
-    "ollama": {
-      "apiKey": "",
-      "apiBase": "http://localhost:11434"
-    }
-  },
-  "agents": {
-    "defaults": {
-      "model": "ollama/gemma4:e4b"
-    }
-  }
-}
+ollama pull llama3.2:3b
+hermitcrab model add main ollama/llama3.2:3b --provider ollama
+hermitcrab model set-default main
 ```
 
 ### Cloud model (OpenRouter)
 
-Get an API key from [openrouter.ai](https://openrouter.ai/keys), then edit `~/.hermitcrab/config.json`:
-
-```json
-{
-  "providers": {
-    "openrouter": {
-      "apiKey": "sk-or-..."
-    }
-  },
-  "agents": {
-    "defaults": {
-      "model": "anthropic/claude-sonnet-4"
-    }
-  }
-}
-```
-
-### Cloud model (Anthropic direct)
-
-```json
-{
-  "providers": {
-    "anthropic": {
-      "apiKey": "sk-ant-..."
-    }
-  },
-  "agents": {
-    "defaults": {
-      "model": "anthropic/claude-opus-4-5"
-    }
-  }
-}
-```
-
-### Verify provider setup
+Set `HERMITCRAB_OPENROUTER_API_KEY` in your shell or secret manager, then run:
 
 ```bash
-hermitcrab status
+hermitcrab model add main anthropic/claude-sonnet-4 --provider openrouter --api-key-env HERMITCRAB_OPENROUTER_API_KEY
+hermitcrab model set-default main
 ```
 
-You should see your selected provider marked as configured and ready.
+### Inspect and verify model setup
 
-## 3. Start chatting
+```bash
+hermitcrab model list
+hermitcrab model test main
+hermitcrab doctor
+```
+
+You should see your selected provider/model marked as configured and ready.
+
+## 3. Start chatting as the owner/admin
 
 ```bash
 hermitcrab agent
@@ -98,7 +65,20 @@ You'll see a welcome banner with your model, available tools, and skills. Type a
 What can you help me with?
 ```
 
-## 4. Try key interactions
+The CLI is the admin surface. Normal users should interact through configured channels, preferably Nostr DMs from any client.
+
+## 4. Add another identity when needed
+
+Solo use does not require any extra identities. If you do want another user, the admin creates and routes it:
+
+```bash
+hermitcrab user add alice --label Alice
+hermitcrab user models alice --interactive main
+hermitcrab user route nostr alice <alice-npub-or-hex-pubkey>
+hermitcrab user status alice
+```
+
+## 5. Try key interactions
 
 ### Ask it to use the terminal
 
@@ -114,7 +94,7 @@ The agent runs shell commands through a safety layer and shows you the results.
 Remember that my daughter's soccer practice is every Tuesday at 4pm.
 ```
 
-HermitCrab writes this to `workspace/memory/facts/` as a structured Markdown note.
+HermitCrab writes this to `identities/<name>/memory/facts/` as a structured Markdown note.
 
 ### Set a reminder
 
@@ -136,7 +116,7 @@ Tasks track status (open, in_progress, done, deferred) and deadlines.
 
 If the agent is taking too long, just type a new message and press Enter. The current task is cancelled and the agent switches to your new instructions. `Ctrl+C` also works.
 
-## 5. One-shot mode
+## 6. One-shot mode
 
 Send a single message without entering interactive mode:
 
@@ -146,7 +126,7 @@ hermitcrab agent -m "What's the weather in Lisbon today?"
 
 Useful for scripting, cron jobs, or piping output.
 
-## 6. Run the gateway (channels + reminders)
+## 7. Run the gateway (channels + reminders)
 
 To enable channels, reminders, and heartbeat:
 

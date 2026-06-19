@@ -89,6 +89,14 @@ class TurnRunner:
     def _remaining_seconds(self, started_at: float) -> float:
         return self.config.max_loop_seconds - (time.monotonic() - started_at)
 
+    @staticmethod
+    def _progress_heartbeat_message(waiting_message: str, *, started_at: float) -> str:
+        base = waiting_message.strip()
+        if not base:
+            return ""
+        elapsed_s = max(1, int(time.monotonic() - started_at))
+        return f"{base} ({elapsed_s}s elapsed)"
+
     async def _await_with_progress(
         self,
         awaitable: Awaitable[Any],
@@ -123,7 +131,12 @@ class TurnRunner:
                     return await task
                 if on_progress and heartbeats_sent < self.MAX_IDENTICAL_HEARTBEATS_PER_WAIT:
                     if waiting_message:
-                        await on_progress(waiting_message)
+                        await on_progress(
+                            self._progress_heartbeat_message(
+                                waiting_message,
+                                started_at=started_at,
+                            )
+                        )
                     heartbeats_sent += 1
 
     @staticmethod
@@ -371,6 +384,24 @@ class TurnRunner:
             return True
         return False
 
+    @classmethod
+    def _is_repeated_tool_transition_response(
+        cls, assistant_content: str | None, messages: list[dict[str, Any]]
+    ) -> bool:
+        """Detect a final answer that repeats the earlier tool-call transition text."""
+        candidate = cls._normalize_grounding_text(assistant_content)
+        if not candidate or len(candidate) > 220:
+            return False
+        for message in reversed(messages):
+            if message.get("role") != "assistant" or not message.get("tool_calls"):
+                continue
+            transition = cls._normalize_grounding_text(message.get("content"))
+            if not transition:
+                continue
+            if candidate == transition or candidate in transition or transition in candidate:
+                return True
+        return False
+
     @staticmethod
     def _looks_like_short_action_claim(content: str | None) -> bool:
         """Detect terse completion claims that usually require a tool-backed action."""
@@ -565,6 +596,7 @@ class TurnRunner:
     ) -> list[dict[str, Any]]:
         if final_content is None:
             return messages
+        final_content = self._collapse_exact_tandem_duplicate(final_content)
         if messages:
             last = messages[-1]
             if (
@@ -574,6 +606,31 @@ class TurnRunner:
             ):
                 return messages
         return self.context.add_assistant_message(messages, final_content)
+
+    @staticmethod
+    def _collapse_exact_tandem_duplicate(content: str) -> str:
+        """Collapse model stutter where an entire reply is emitted twice."""
+        stripped = content.strip()
+        if not stripped:
+            return content
+
+        midpoint = len(stripped) // 2
+        if len(stripped) % 2 == 0 and stripped[:midpoint].strip() == stripped[midpoint:].strip():
+            return stripped[:midpoint].strip()
+
+        for separator in ("\n\n", "\n", " "):
+            marker = midpoint
+            while True:
+                index = stripped.find(separator, marker)
+                if index == -1:
+                    break
+                left = stripped[:index].strip()
+                right = stripped[index + len(separator) :].strip()
+                if left and left == right:
+                    return left
+                marker = index + 1
+
+        return content
 
     async def _consume_streaming_response(
         self,
@@ -798,6 +855,15 @@ class TurnRunner:
                 len(response.content or ""),
                 len(response.tool_calls),
             )
+            if response.usage:
+                logger.info(
+                    "LLM usage (job={}, prompt_tokens={}, completion_tokens={}, total_tokens={}, cached_tokens={})",
+                    job_name,
+                    response.usage.get("prompt_tokens"),
+                    response.usage.get("completion_tokens"),
+                    response.usage.get("total_tokens"),
+                    response.usage.get("cached_tokens"),
+                )
             if not response.has_tool_calls:
                 content, inline_tool_calls = coerce_inline_tool_calls(
                     response.content, self.tools.has
@@ -1061,8 +1127,18 @@ class TurnRunner:
                     outcome = TurnOutcome.INCOMPLETE_ACTION
                     break
 
-            needs_reprompt = tools_used and self._is_missing_final_response(final_content)
-            failure_type = "empty_post_tool_response"
+            repeated_transition_response = (
+                bool(tools_used)
+                and self._is_repeated_tool_transition_response(final_content, messages)
+            )
+            needs_reprompt = tools_used and (
+                self._is_missing_final_response(final_content) or repeated_transition_response
+            )
+            failure_type = (
+                "repeated_tool_transition_response"
+                if repeated_transition_response
+                else "empty_post_tool_response"
+            )
             if not needs_reprompt and self._should_reprompt_incomplete_post_tool_response(
                 current_request=action_request_text,
                 assistant_content=final_content,
@@ -1132,6 +1208,9 @@ class TurnRunner:
                 "without completing the task. You can try breaking the task into smaller steps."
             )
             outcome = TurnOutcome.MAX_ITERATIONS
+
+        if final_content is not None:
+            final_content = self._collapse_exact_tandem_duplicate(final_content)
 
         logger.info(
             "Agent loop finished (job={}, iterations={}, tools_used={}, final_chars={})",

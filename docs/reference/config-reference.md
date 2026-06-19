@@ -8,8 +8,10 @@ Config lives at `~/.hermitcrab/config.json`. It is created by `hermitcrab onboar
 
 ```json
 {
+  "root": "~/.hermitcrab",
+  "system": {},
+  "identities": {},
   "agents": {},
-  "workspaces": {},
   "models": {},
   "channels": {},
   "providers": {},
@@ -29,7 +31,6 @@ Agent behavior defaults and model configuration.
 {
   "agents": {
     "defaults": {
-      "workspace": "~/.hermitcrab/workspace",
       "model": "anthropic/claude-opus-4-5",
       "jobModels": {
         "interactiveResponse": "",
@@ -60,7 +61,6 @@ Agent behavior defaults and model configuration.
 
 | Field | Default | Description |
 |-------|---------|-------------|
-| `workspace` | `~/.hermitcrab/workspace` | Admin workspace path |
 | `model` | `anthropic/claude-opus-4-5` | Primary model for interactive responses |
 | `jobModels` | See below | Per-job-class model routing |
 | `enableDistillation` | `false` | Enable background distillation |
@@ -99,7 +99,7 @@ Shorthand aliases for model names:
     "modelAliases": {
       "coder": "localCoder",
       "fast": {
-        "model": "ollama/gemma4:e2b",
+        "model": "ollama/llama3.2:3b",
         "reasoningEffort": "medium"
       }
     }
@@ -107,19 +107,40 @@ Shorthand aliases for model names:
 }
 ```
 
-## workspaces
-
-Workspace registry for multi-workspace mode.
+## system
 
 ```json
 {
-  "workspaces": {
-    "root": "~/.hermitcrab/workspaces",
+  "system": {
+    "root": "system"
+  }
+}
+```
+
+| Field | Default | Description |
+|-------|---------|-------------|
+| `root` | `system` | System-owned state root, relative to `root` unless absolute |
+
+## identities
+
+Identity registry and owner identity policy.
+
+```json
+{
+  "identities": {
+    "ownerIdentity": "owner",
+    "defaultIdentityModel": "main",
+    "root": "identities",
     "registry": {
-      "family": {
-        "path": "family",
-        "label": "Family workspace",
-        "channelOnly": true
+      "owner": {
+        "label": "Owner",
+        "role": "owner",
+        "root": "owner",
+        "nostrPrivateKey": "nsec1...",
+        "active": true,
+        "models": {
+          "interactiveResponse": "main"
+        }
       }
     }
   }
@@ -128,16 +149,27 @@ Workspace registry for multi-workspace mode.
 
 | Field | Default | Description |
 |-------|---------|-------------|
-| `root` | `~/.hermitcrab/workspaces` | Root for sub-workspaces |
-| `registry` | `{}` | Named workspace entries |
+| `ownerIdentity` | `owner` | Identity used for owner/operator CLI and fallback routing |
+| `defaultIdentityModel` | `""` | Optional named model used by identities without an override |
+| `root` | `identities` | Identity root directory, relative to `root` unless absolute |
+| `registry` | owner entry | Identity entries keyed by identity name |
 
-### Workspace entry
+### Identity entry
 
 | Field | Required | Description |
 |-------|----------|-------------|
-| `path` | Yes | Workspace directory path (relative to root if not absolute) |
+| `root` | No | Identity directory path; defaults to the identity name |
 | `label` | No | Human-readable label |
-| `channelOnly` | Yes | Always `true` — sub-workspaces are channel-only |
+| `role` | No | `owner`, `managed`, `archived`, or another operator label |
+| `active` | No | Whether routing and background work should use this identity |
+| `models` | No | Per-identity named-model overrides |
+| `excludedModels` | No | Named models this identity may not use |
+| `nostrPrivateKey` | No | Identity Nostr private key as `nsec` or hex; generated if omitted |
+| `nostrPublicKey` | No | Derived from `nostrPrivateKey`; omit in hand-written config |
+
+For identity entries, prefer setting only `nostrPrivateKey`. HermitCrab stores keys internally as
+hex and derives the public key from the private key. Nostr sender routing belongs in
+`channels.nostr.identityBindings`, not in the identity registry.
 
 ## models
 
@@ -147,10 +179,10 @@ Named model definitions with optional provider-specific options:
 {
   "models": {
     "main": {
-      "model": "ollama/gemma4:e4b"
+      "model": "ollama/llama3.2:3b"
     },
     "coder": {
-      "model": "ollama/qwen3.5:7b",
+      "model": "ollama/qwen2.5-coder:7b",
       "providerOptions": {
         "num_ctx": 32768
       }
@@ -183,7 +215,7 @@ Channel configuration and behavior.
 
 | Field | Default | Description |
 |-------|---------|-------------|
-| `sendProgress` | `true` | Stream text progress to channel |
+| `sendProgress` | `true` | Send brief status progress updates to channel (not token streaming) |
 | `sendToolHints` | `false` | Stream tool-call hints |
 
 ### channels.telegram
@@ -231,26 +263,37 @@ Channel configuration and behavior.
 | `nip17RelayDiscoveryTimeoutS` | `4.0` | Relay discovery timeout |
 | `nip17RelayCacheTtlS` | `600` | Relay cache TTL |
 | `allowedPubkeys` | `[]` | Sender allowlist |
-| `workspaceBindings` | `{}` | Pubkey-to-workspace mapping |
+| `identityBindings` | `{}` | Pubkey-to-identity mapping |
 
 ## providers
 
-LLM provider credentials.
+LLM provider credentials. Prefer CLI/environment-based setup for secrets instead of pasting keys into docs or shell history:
+
+```bash
+hermitcrab model add main anthropic/claude-sonnet-4 --provider openrouter --api-key-env HERMITCRAB_OPENROUTER_API_KEY
+```
+
+Config shape:
 
 ```json
 {
   "providers": {
-    "anthropic": { "apiKey": "sk-ant-..." },
-    "openrouter": { "apiKey": "sk-or-..." },
+    "anthropic": { "apiKey": "<anthropic-api-key>" },
+    "openrouter": { "apiKey": "<openrouter-api-key>" },
     "ollama": { "apiBase": "http://localhost:11434" },
-    "openai": { "apiKey": "sk-..." }
+    "openai": { "apiKey": "<openai-api-key>" }
   }
 }
 ```
 
 Each provider supports: `apiKey`, `apiBase`, `extraHeaders`.
 
-Supported providers: `anthropic`, `openai`, `openrouter`, `ollama`, `deepseek`, `groq`, `gemini`, `zhipu`, `dashscope`, `moonshot`, `minimax`, `vllm`, `nvidia_nim`, `aihubmix`, `siliconflow`, `volcengine`, `openai_oauth`, `openai_codex`, `qwen_oauth`, `github_copilot`, `custom`.
+Supported providers: `anthropic`, `openai`, `openrouter`, `ollama`, `deepseek`, `groq`, `gemini`, `zhipu`, `dashscope`, `moonshot`, `minimax`, `vllm`, `nvidia_nim`, `aihubmix`, `siliconflow`, `volcengine`, `openai_codex`, `github_copilot`, `custom`.
+
+Use `openai_codex` for ChatGPT/Codex subscription-backed OAuth access. Model ids use the
+`openai-codex/<model>` prefix, for example `openai-codex/gpt-5.4-mini`. Older
+`openai-oauth/...` config values are accepted as aliases, but new config should use
+`openai-codex/...`.
 
 ## gateway
 
@@ -359,6 +402,6 @@ Reflection system configuration.
 Config can be set via environment variables with the `HERMITCRAB_` prefix and `__` delimiter for nesting:
 
 ```bash
-export HERMITCRAB__PROVIDERS__ANTHROPIC__API_KEY="sk-ant-..."
+export HERMITCRAB__PROVIDERS__ANTHROPIC__API_KEY="<anthropic-api-key>"
 export HERMITCRAB__AGENTS__DEFAULTS__MODEL="anthropic/claude-opus-4-5"
 ```

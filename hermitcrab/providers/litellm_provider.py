@@ -30,7 +30,13 @@ from hermitcrab.providers.base import (
     ToolCallEvent,
     ToolCallRequest,
 )
-from hermitcrab.providers.registry import find_by_model, find_gateway
+from hermitcrab.providers.registry import (
+    ProviderSpec,
+    find_by_model,
+    find_by_name,
+    find_gateway,
+    normalize_provider_name,
+)
 from hermitcrab.providers.utils import function_parts
 
 # Standard OpenAI chat-completion message keys; extras (e.g. reasoning_content) are stripped for strict providers.
@@ -381,7 +387,7 @@ class LiteLLMProvider(LLMProvider):
         if "/" not in model:
             return model
         prefix, remainder = model.split("/", 1)
-        if prefix.lower().replace("-", "_") != spec_name:
+        if normalize_provider_name(prefix) != spec_name:
             return model
         return f"{canonical_prefix}/{remainder}"
 
@@ -429,6 +435,35 @@ class LiteLLMProvider(LLMProvider):
                 if pattern in model_lower:
                     kwargs.update(overrides)
                     return
+
+    @staticmethod
+    def _instruction_spec_for_request(
+        *,
+        resolved_model: str,
+        provider_name: str | None,
+        gateway: ProviderSpec | None,
+    ) -> ProviderSpec | None:
+        """Resolve provider instruction capabilities without model-family sniffing."""
+        if gateway is not None:
+            return gateway
+        if provider_name:
+            by_name = find_by_name(provider_name)
+            if by_name is not None:
+                return by_name
+        return find_by_model(resolved_model)
+
+    @staticmethod
+    def _apply_instruction_role(
+        messages: list[dict[str, Any]],
+        spec: ProviderSpec | None,
+    ) -> list[dict[str, Any]]:
+        """Move the first harness instruction message to the strongest supported role."""
+        if not messages or spec is None or spec.instruction_role == "system":
+            return messages
+        first = messages[0]
+        if first.get("role") != "system":
+            return messages
+        return [{**first, "role": spec.instruction_role}, *messages[1:]]
 
     @staticmethod
     def _sanitize_messages(
@@ -531,6 +566,13 @@ class LiteLLMProvider(LLMProvider):
 
         if self._supports_cache_control(resolved_model):
             messages, tools = self._apply_cache_control(messages, tools)
+
+        instruction_spec = self._instruction_spec_for_request(
+            resolved_model=resolved_model,
+            provider_name=request_provider_name,
+            gateway=request_gateway,
+        )
+        messages = self._apply_instruction_role(messages, instruction_spec)
 
         is_ollama = self._is_ollama_model(api_model)
         if is_ollama:

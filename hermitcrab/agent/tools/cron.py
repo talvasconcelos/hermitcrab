@@ -26,7 +26,12 @@ class CronTool(Tool):
 
     @property
     def description(self) -> str:
-        return "Schedule reminders and recurring tasks. Actions: add, list, remove."
+        return (
+            "Schedule agent-run tasks that require reasoning or generated output, such as daily "
+            "briefs, periodic reports, background checks, and alerts that need the assistant to "
+            "inspect state before responding. Use the reminder tool for simple user-facing "
+            "notifications that only deliver stored text."
+        )
 
     @property
     def parameters(self) -> dict[str, Any]:
@@ -121,15 +126,18 @@ class CronTool(Tool):
         else:
             return "Error: either every_seconds, cron_expr, or at is required"
 
-        job = self._cron.add_job(
-            name=message[:30],
-            schedule=schedule,
-            message=message,
-            deliver=True,
-            channel=self._channel,
-            to=self._chat_id,
-            delete_after_run=delete_after,
-        )
+        try:
+            job = self._cron.add_job(
+                name=message[:30],
+                schedule=schedule,
+                message=message,
+                deliver=True,
+                channel=self._channel,
+                to=self._chat_id,
+                delete_after_run=delete_after,
+            )
+        except ValueError as exc:
+            return f"Error: {exc}"
         return f"Created job '{job.name}' (id: {job.id})"
 
     def _list_jobs(self) -> str:

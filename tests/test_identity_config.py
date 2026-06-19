@@ -1,0 +1,300 @@
+"""Focused regressions for identity config paths."""
+
+from __future__ import annotations
+
+import pytest
+
+from hermitcrab.config.schema import Config, nostr_pubkey_from_private_key
+
+
+def test_default_identity_paths_use_standard_layout() -> None:
+    config = Config()
+
+    assert config.hermitcrab_root_path.as_posix().endswith("/.hermitcrab")
+    assert config.system_root_path.as_posix().endswith("/.hermitcrab/system")
+    assert config.identities_root_path.as_posix().endswith("/.hermitcrab/identities")
+    assert config.owner_identity_name == "owner"
+    assert config.owner_identity_root_path.as_posix().endswith("/.hermitcrab/identities/owner")
+    assert config.workspace_path == config.owner_identity_root_path
+    owner = config.identities.registry["owner"]
+    assert len(owner.nostr_public_key) == 64
+    assert owner.nostr_private_key == ""
+
+
+def test_identity_paths_resolve_under_configured_root(tmp_path) -> None:
+    config = Config.model_validate({"root": str(tmp_path)})
+
+    assert config.hermitcrab_root_path == tmp_path
+    assert config.system_root_path == tmp_path / "system"
+    assert config.identities_root_path == tmp_path / "identities"
+    assert config.get_identity_path("alice") == tmp_path / "identities" / "alice"
+    assert config.workspace_path == tmp_path / "identities" / "owner"
+
+
+def test_explicit_workspace_default_does_not_override_identity_root(tmp_path) -> None:
+    old_workspace = tmp_path / "workspace"
+    config = Config.model_validate(
+        {
+            "root": str(tmp_path),
+            "agents": {
+                "defaults": {
+                    "workspace": str(old_workspace),
+                }
+            },
+        }
+    )
+
+    assert config.workspace_path == tmp_path / "identities" / "owner"
+
+
+def test_identity_paths_accept_configured_relative_and_absolute_roots(tmp_path) -> None:
+    external = tmp_path / "external" / "client_acme"
+    config = Config.model_validate(
+        {
+            "root": str(tmp_path / "hc"),
+            "identities": {
+                "root": "people",
+                "ownerIdentity": "tal",
+                "registry": {
+                    "tal": {"root": "owner"},
+                    "client_acme": {"root": str(external)},
+                },
+            },
+            "system": {"root": "runtime"},
+        }
+    )
+
+    assert config.system_root_path == tmp_path / "hc" / "runtime"
+    assert config.identities_root_path == tmp_path / "hc" / "people"
+    assert config.owner_identity_root_path == tmp_path / "hc" / "people" / "owner"
+    assert config.get_identity_path("client_acme") == external
+    assert config.configured_identities() == {
+        "tal": tmp_path / "hc" / "people" / "owner",
+        "client_acme": external,
+    }
+
+
+def test_identity_roots_must_be_unique(tmp_path) -> None:
+    with pytest.raises(ValueError, match="identity roots must be unique"):
+        Config.model_validate(
+            {
+                "root": str(tmp_path),
+                "identities": {
+                    "ownerIdentity": "alice",
+                    "registry": {
+                        "alice": {"root": "same"},
+                        "bob": {"root": "same"},
+                    },
+                },
+            }
+        )
+
+
+def test_identity_roots_must_not_overlap(tmp_path) -> None:
+    with pytest.raises(ValueError, match="identity roots must be isolated"):
+        Config.model_validate(
+            {
+                "root": str(tmp_path),
+                "identities": {
+                    "ownerIdentity": "alice",
+                    "registry": {
+                        "alice": {"root": "alice"},
+                        "bob": {"root": "alice/bob"},
+                    },
+                },
+            }
+        )
+
+
+def test_identity_roots_must_not_alias_with_traversal(tmp_path) -> None:
+    with pytest.raises(ValueError, match="identity roots must be unique"):
+        Config.model_validate(
+            {
+                "root": str(tmp_path),
+                "identities": {
+                    "ownerIdentity": "alice",
+                    "registry": {
+                        "alice": {"root": "alice"},
+                        "bob": {"root": "bob/../alice"},
+                    },
+                },
+            }
+        )
+
+
+@pytest.mark.parametrize("name", ["", " shared ", "system", "../alice", "bad/name", "-bad"])
+def test_identity_config_rejects_reserved_or_unsafe_names(name: str) -> None:
+    with pytest.raises(ValueError):
+        Config.model_validate({"identities": {"ownerIdentity": name}})
+
+
+def test_identity_registry_rejects_reserved_or_unsafe_names() -> None:
+    with pytest.raises(ValueError):
+        Config.model_validate(
+            {
+                "identities": {
+                    "registry": {
+                        "shared": {"root": "shared"},
+                    }
+                }
+            }
+        )
+
+
+def test_identity_registry_accepts_private_key_and_derives_pubkey() -> None:
+    from pynostr.key import PrivateKey
+
+    private_key = PrivateKey().hex()
+    config = Config.model_validate(
+        {
+            "identities": {
+                "ownerIdentity": "alice",
+                "registry": {
+                    "alice": {"nostrPrivateKey": private_key},
+                },
+            }
+        }
+    )
+
+    identity = config.identities.registry["alice"]
+    assert identity.nostr_private_key == private_key
+    assert identity.nostr_public_key == nostr_pubkey_from_private_key(private_key)
+
+
+def test_identity_registry_accepts_nsec_private_key_and_derives_pubkey() -> None:
+    from pynostr.key import PrivateKey
+
+    private_key = PrivateKey()
+    nsec = private_key.bech32()
+    config = Config.model_validate(
+        {
+            "identities": {
+                "ownerIdentity": "alice",
+                "registry": {
+                    "alice": {"nostrPrivateKey": nsec},
+                },
+            }
+        }
+    )
+
+    identity = config.identities.registry["alice"]
+    assert identity.nostr_private_key == private_key.hex()
+    assert identity.nostr_public_key == private_key.public_key.hex()
+
+
+def test_identity_registry_private_key_overrides_stale_pubkey() -> None:
+    from pynostr.key import PrivateKey
+
+    private_key = PrivateKey()
+    stale_pubkey = PrivateKey().public_key.bech32()
+    config = Config.model_validate(
+        {
+            "identities": {
+                "ownerIdentity": "alice",
+                "registry": {
+                    "alice": {
+                        "nostrPrivateKey": private_key.hex(),
+                        "nostrPublicKey": stale_pubkey,
+                    },
+                },
+            }
+        }
+    )
+
+    identity = config.identities.registry["alice"]
+    assert identity.nostr_private_key == private_key.hex()
+    assert identity.nostr_public_key == private_key.public_key.hex()
+
+
+def test_identity_registry_rejects_pubkey_without_private_key() -> None:
+    from pynostr.key import PrivateKey
+
+    pubkey = PrivateKey().public_key.hex()
+    config = Config.model_validate(
+        {
+            "identities": {
+                "registry": {
+                    "alice": {"nostrPublicKey": pubkey},
+                }
+            }
+        }
+    )
+    assert config.identities.registry["alice"].nostr_public_key == pubkey
+    assert config.identities.registry["alice"].nostr_private_key == ""
+
+
+def test_identity_registry_generates_pubkey_without_storing_private_key_by_default() -> None:
+    config = Config.model_validate({"identities": {"registry": {"alice": {}}}})
+    identity = config.identities.registry["alice"]
+    assert len(identity.nostr_public_key) == 64
+    assert identity.nostr_private_key == ""
+
+
+def test_identity_registry_rejects_invalid_public_or_private_keys() -> None:
+    with pytest.raises(ValueError, match="pubkey must be npub or 64-char hex"):
+        Config.model_validate({"identities": {"registry": {"alice": {"nostrPublicKey": "bad"}}}})
+
+    with pytest.raises(ValueError, match="private key must be nsec or 64-char hex"):
+        Config.model_validate({"identities": {"registry": {"alice": {"nostrPrivateKey": "bad"}}}})
+
+
+def test_identity_registry_rejects_duplicate_pubkeys() -> None:
+    from pynostr.key import PrivateKey
+
+    private_key = PrivateKey().hex()
+
+    with pytest.raises(ValueError, match="pubkeys must be unique"):
+        Config.model_validate(
+            {
+                "identities": {
+                    "ownerIdentity": "alice",
+                    "registry": {
+                        "alice": {"nostrPrivateKey": private_key},
+                        "bob": {"nostrPrivateKey": private_key},
+                    },
+                }
+            }
+        )
+
+
+def test_nostr_identity_bindings_accept_known_identity_without_allowlist() -> None:
+    from pynostr.key import PrivateKey
+
+    sender = PrivateKey().public_key.hex()
+    config = Config.model_validate(
+        {
+            "identities": {"registry": {"alice": {}}},
+            "channels": {"nostr": {"identityBindings": {"alice": [sender]}}},
+        }
+    )
+
+    assert config.normalized_nostr_identity_bindings() == {"alice": {sender}}
+
+
+def test_nostr_identity_bindings_reject_unknown_identity() -> None:
+    from pynostr.key import PrivateKey
+
+    sender = PrivateKey().public_key.hex()
+
+    with pytest.raises(ValueError, match="unknown identity"):
+        Config.model_validate({"channels": {"nostr": {"identityBindings": {"alice": [sender]}}}})
+
+
+def test_nostr_workspace_bindings_are_rejected(tmp_path) -> None:
+    from pynostr.key import PrivateKey
+
+    sender = PrivateKey().public_key.hex()
+
+    with pytest.raises(ValueError, match="workspace bindings were removed"):
+        Config.model_validate(
+            {
+                "root": str(tmp_path),
+                "identities": {"registry": {"alice": {}}},
+                "channels": {
+                    "nostr": {
+                        "identityBindings": {"alice": [sender]},
+                        "workspaceBindings": {"side": [sender]},
+                    }
+                },
+            }
+        )

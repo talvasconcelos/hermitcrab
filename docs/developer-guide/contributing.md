@@ -127,10 +127,10 @@ Reject work that mostly add prompt churn, cleverness, or surface area without im
 - Nostr NIP-17 direct-message support and reliability
 - Explicit conversation-level model switching
 - Permission/policy UX and auditability
-- Owner-managed multi-workspace foundations
+- Owner-managed identity foundations
 - Workspace hygiene, onboarding, help, and diagnostics
 
-See `project/BETA3_ROADMAP.md` for current planning direction.
+See `project/` for current planning direction.
 
 ## Getting help
 

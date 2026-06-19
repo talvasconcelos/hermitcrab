@@ -74,7 +74,7 @@ Say "remember that..." or just state a fact:
 My doctor's name is Dr. Silva and her office is in Cascais.
 ```
 
-The agent stores this as a structured fact in `workspace/memory/facts/`.
+The agent stores this as a structured fact in `identities/<name>/memory/facts/`.
 
 ### Track tasks and goals
 

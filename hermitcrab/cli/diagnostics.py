@@ -54,10 +54,8 @@ class StatusReport:
     selected_model: str
     resolved_model: str
     selected_provider: str | None
-    multi_workspace_routing_active: bool = False
-    named_workspaces: int = 0
-    bootstrapped_named_workspaces: int = 0
-    nostr_workspace_bindings: int = 0
+    identity_routing_active: bool = False
+    nostr_identity_bindings: int = 0
     provider_statuses: list[ProviderStatus] = field(default_factory=list)
     skill_statuses: list[SkillStatus] = field(default_factory=list)
     audit: AuditSummary | None = None
@@ -88,27 +86,34 @@ class DoctorReport:
         }
 
 
+def _bootstrap_ready(config: Config, workspace: Path) -> bool:
+    """Return whether the standard bootstrap files are present."""
+    return (
+        (config.system_root_path / "AGENTS.md").exists()
+        and (config.system_root_path / "TOOLS.md").exists()
+        and (workspace / "IDENTITY.md").exists()
+    )
+
+
 def build_status_report(config_path: Path | None = None) -> StatusReport:
     """Build a structured runtime status snapshot."""
     path = config_path or get_config_path()
     config, config_error = _load_config_with_error(path)
     workspace = config.workspace_path
+    bootstrap_ready = _bootstrap_ready(config, workspace)
     selected_model = config.agents.defaults.model
     resolved_model = config.resolve_model_config(selected_model).model or ""
     selected_provider = config.get_provider_name(selected_model)
     provider_statuses = _build_provider_statuses(config, selected_provider)
     skill_statuses = _build_skill_statuses(workspace)
-    configured_workspaces = config.configured_workspaces()
-    nostr_workspace_bindings = sum(
-        len(pubkeys) for pubkeys in config.channels.nostr.workspace_bindings.values()
+    nostr_identity_bindings = sum(
+        len(pubkeys) for pubkeys in config.channels.nostr.identity_bindings.values()
     )
-    multi_workspace_routing_active = bool(config.workspaces.registry) and bool(
-        config.channels.nostr.workspace_bindings
-    )
+    identity_routing_active = bool(config.channels.nostr.identity_bindings)
     mcp_servers_valid = sum(
         1 for server in config.tools.mcp_servers.values() if _is_valid_mcp(server)
     )
-    audit_trail = AuditTrail(workspace)
+    audit_trail = AuditTrail(config.system_root_path)
     audit = audit_trail.summarize()
     audit_highlights = _build_audit_highlights(audit_trail.read_recent(limit=40))
 
@@ -116,7 +121,7 @@ def build_status_report(config_path: Path | None = None) -> StatusReport:
         config_exists=path.exists(),
         config_valid=config_error is None,
         workspace_exists=workspace.exists(),
-        bootstrap_ready=(workspace / "AGENTS.md").exists(),
+        bootstrap_ready=bootstrap_ready,
         selected_provider=selected_provider,
         provider_statuses=provider_statuses,
     )
@@ -124,7 +129,7 @@ def build_status_report(config_path: Path | None = None) -> StatusReport:
         config_exists=path.exists(),
         config_valid=config_error is None,
         workspace_exists=workspace.exists(),
-        bootstrap_ready=(workspace / "AGENTS.md").exists(),
+        bootstrap_ready=bootstrap_ready,
         selected_provider=selected_provider,
         provider_statuses=provider_statuses,
     )
@@ -136,16 +141,12 @@ def build_status_report(config_path: Path | None = None) -> StatusReport:
         config_error=config_error,
         workspace=str(workspace),
         workspace_exists=workspace.exists(),
-        bootstrap_ready=(workspace / "AGENTS.md").exists(),
+        bootstrap_ready=bootstrap_ready,
         selected_model=selected_model,
         resolved_model=resolved_model,
         selected_provider=selected_provider,
-        multi_workspace_routing_active=multi_workspace_routing_active,
-        named_workspaces=len(configured_workspaces),
-        bootstrapped_named_workspaces=sum(
-            1 for path in configured_workspaces.values() if (path / "AGENTS.md").exists()
-        ),
-        nostr_workspace_bindings=nostr_workspace_bindings,
+        identity_routing_active=identity_routing_active,
+        nostr_identity_bindings=nostr_identity_bindings,
         provider_statuses=provider_statuses,
         skill_statuses=skill_statuses,
         audit=audit,
@@ -199,8 +200,8 @@ def build_doctor_report(config_path: Path | None = None) -> DoctorReport:
             DiagnosticFinding(
                 check_id="workspace.bootstrap_missing",
                 severity="warning",
-                title="Workspace bootstrap files look incomplete",
-                detail="The workspace exists, but `AGENTS.md` is missing.",
+                title="Bootstrap files look incomplete",
+                detail="The configured identity exists, but required bootstrap files are missing.",
                 remediation="Run `hermitcrab onboard` to restore the default workspace templates.",
             )
         )
@@ -313,10 +314,10 @@ def _build_audit_highlights(entries: list[dict[str, Any]]) -> list[str]:
             detail = str(payload.get("message") or "").strip()
             if detail:
                 message = f"Nostr relay notice from {relay_url}: {detail}"
-        elif event == "gateway.workspace_route_denied":
+        elif event == "gateway.identity_route_denied":
             sender = str(payload.get("sender_pubkey") or payload.get("chat_id") or "")[:8]
             reason = str(payload.get("reason") or "route denied")
-            message = f"Workspace routing denied for {sender}: {reason}"
+            message = f"Identity routing denied for {sender}: {reason}"
         elif event == "tool.policy_denied":
             tool_name = str(payload.get("tool_name") or "tool")
             permission = str(payload.get("permission_level") or "unknown")
@@ -387,27 +388,17 @@ def _provider_ready(spec_name: str, spec: Any, provider_config: Any) -> tuple[bo
 
 
 def _oauth_provider_ready(spec_name: str) -> tuple[bool, str]:
-    if spec_name in {"openai_oauth", "openai_codex"}:
+    if spec_name == "openai_codex":
         try:
-            from oauth_cli_kit.providers import OPENAI_CODEX_PROVIDER
-            from oauth_cli_kit.storage import FileTokenStorage
+            from hermitcrab.providers.openai_codex_auth import (
+                resolve_codex_runtime_credentials,
+            )
 
-            storage = FileTokenStorage(token_filename=OPENAI_CODEX_PROVIDER.token_filename)
-            if storage.load():
-                return True, "OAuth login detected"
-        except Exception:
-            pass
-        command = "openai-oauth" if spec_name == "openai_oauth" else "openai-codex"
-        return False, f"Run `hermitcrab provider login {command}`"
-
-    if spec_name == "qwen_oauth":
-        try:
-            from hermitcrab.providers.qwen_oauth_provider import resolve_qwen_runtime_credentials
-
-            resolve_qwen_runtime_credentials(refresh_if_expiring=False)
+            resolve_codex_runtime_credentials(refresh_if_expiring=False)
             return True, "OAuth login detected"
         except Exception:
-            return False, "Run `hermitcrab provider login qwen-oauth`"
+            pass
+        return False, "Run `hermitcrab provider login openai-codex`"
 
     return False, "OAuth login required"
 
@@ -452,14 +443,10 @@ def _build_next_steps(
             steps.append(
                 "Install or start Ollama, pull the selected model, then run `hermitcrab doctor`."
             )
-        elif selected_provider in {"openai_oauth", "openai_codex"}:
-            command = "openai-oauth" if selected_provider == "openai_oauth" else "openai-codex"
+        elif selected_provider == "openai_codex":
             steps.append(
-                f"Run `hermitcrab provider login {command}`, then try `hermitcrab agent -m \"Hello!\"`."
-            )
-        elif selected_provider == "qwen_oauth":
-            steps.append(
-                "Run `hermitcrab provider login qwen-oauth`, then try `hermitcrab agent -m \"Hello!\"`."
+                "Run `hermitcrab provider login openai-codex`, then try "
+                '`hermitcrab agent -m "Hello!"`.'
             )
         elif selected_provider:
             steps.append(

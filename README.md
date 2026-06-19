@@ -5,9 +5,9 @@
 [![Python ≥3.11](https://img.shields.io/badge/python-≥3.11-blue)](https://python.org)
 [![MIT License](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 
-> Current release line: `0.1.0b3` beta
+> Current release line: beta
 
-This is the current beta line: usable, local-first, and already good for real daily workflows, with beta3 focused on modern Nostr DMs, owner-managed workspace routing, clearer operator diagnostics, and stronger permission/audit surfaces.
+HermitCrab is usable, local-first, and already good for real daily workflows, with identity-scoped memory, modern Nostr routing, clearer operator diagnostics, and stronger permission/audit surfaces.
 
 ### What is HermitCrab, really?
 
@@ -18,7 +18,7 @@ It’s lean, readable, auditable, and built around one simple idea:
 **Your AI should remember what matters to you — forever — without turning into a black box.**
 
 Think of it as a **second brain** you can carry in your pocket (or copy to a new laptop/VPS in seconds).  
-Just move the `workspace/` folder and you’re back in business — same memories, same personality, same progress.
+Back up `~/.hermitcrab/` and you have the config, system guidance, identities, memory, sessions, and routines.
 
 ### Why people may be drawn to it
 
@@ -31,7 +31,7 @@ Just move the `workspace/` folder and you’re back in business — same memorie
 - Aims to stay powerful for operators while still being approachable for normal household use
 
 **Same crab, new shell.**  
-Move your workspace anywhere. The agent picks up exactly where it left off.
+Move your HermitCrab root anywhere. The agent picks up exactly where it left off.
 
 ### Quick Start
 
@@ -63,7 +63,7 @@ The installer itself is meant to be generic for Unix-like systems; the `systemd 
    ```bash
    hermitcrab onboard
    ```
-   (creates `~/.hermitcrab/` with config and empty workspace)
+   (creates `~/.hermitcrab/` with config, system state, and the owner identity)
 
 3. **Pick a model & run**
 
@@ -83,9 +83,9 @@ The installer itself is meant to be generic for Unix-like systems; the `systemd 
    
    b. Pull a model:
    ```bash
-   ollama pull gemma4:e4b  # Fast thinking model
+   ollama pull llama3.2:3b  # Fast general-purpose local model
    # Or: ollama pull llama3.1:8b      # General purpose
-   # Or: ollama pull qwen3.5:7b # Coding specialist
+   # Or: ollama pull qwen2.5-coder:7b # Coding specialist
    ```
    
    c. Edit `~/.hermitcrab/config.json`:
@@ -99,10 +99,10 @@ The installer itself is meant to be generic for Unix-like systems; the `systemd 
      },
      "models": {
        "main": {
-         "model": "ollama/gemma4:e4b"
+         "model": "ollama/llama3.2:3b"
        },
        "localCoder": {
-         "model": "ollama/qwen3.5:7b"
+         "model": "ollama/qwen2.5-coder:7b"
        }
      },
      "agents": {
@@ -133,10 +133,10 @@ The installer itself is meant to be generic for Unix-like systems; the `systemd 
          "model": "ollama/glm-5:cloud"
        },
        "coder": {
-         "model": "ollama/qwen3.5:4b"
+         "model": "ollama/qwen2.5-coder:7b"
        },
        "fast": {
-         "model": "ollama/gemma4:e2b",
+         "model": "ollama/llama3.2:3b",
          "reasoningEffort": "medium"
        }
      },
@@ -165,23 +165,11 @@ The installer itself is meant to be generic for Unix-like systems; the `systemd 
    - Subagents can use named models directly, or aliases when you want shorter operator-facing names.
    
    **Option B: Cloud model (OpenRouter)**
+
+   Set your OpenRouter key in an environment variable or secret manager, then configure a named model:
    ```bash
-   # Get API key at https://openrouter.ai/keys
-   ```
-   Edit `~/.hermitcrab/config.json`:
-   ```json
-   {
-     "providers": {
-       "openrouter": {
-         "apiKey": "sk-or-..."
-       }
-     },
-     "agents": {
-       "defaults": {
-         "model": "anthropic/claude-sonnet-4"
-       }
-     }
-   }
+   hermitcrab model add main anthropic/claude-sonnet-4 --provider openrouter --api-key-env HERMITCRAB_OPENROUTER_API_KEY
+   hermitcrab model set-default main
    ```
 
    Then run:
@@ -197,13 +185,13 @@ The installer itself is meant to be generic for Unix-like systems; the `systemd 
 
 You're now talking to your own persistent, memory-aware agent.
 
-### What's new in beta3
+### What's current
 
 - Nostr can use modern NIP-17 direct-message handling alongside legacy NIP-04 DMs
-- Gateway routing can map allowed Nostr senders into isolated named workspaces
-- `hermitcrab workspaces`, `status`, `doctor`, and `audit` expose more operator-visible runtime state
+- Gateway routing can map allowed Nostr senders into isolated identities
+- `hermitcrab user`, `status`, `doctor`, and `audit` expose more operator-visible runtime state
 - Tool permission denials produce structured hints and durable audit events
-- Multi-workspace behavior stays additive: the admin workspace remains the default path and CLI owner surface
+- The owner identity remains the default CLI/operator surface
 
 ### Useful first commands
 
@@ -226,10 +214,10 @@ Every session follows a clean lifecycle:
 5. **Reflection** — looks for mistakes, contradictions, patterns (smarter model)
 6. **Scratchpad archival** — per-session transient notes are archived on session end
 
-All extracted knowledge lands as tiny, atomic Markdown notes in `workspace/memory/`:
+All extracted knowledge lands as tiny, atomic Markdown notes in the active identity's `memory/`:
 
 ```
-workspace/
+~/.hermitcrab/identities/owner/
 ├── memory/
 │   ├── facts/          # preferences, hard truths
 │   ├── decisions/      # choices & reasoning (immutable)
@@ -254,12 +242,12 @@ Distillation is conservative and optional by design. Explicit memory writes rema
 
 ### Scratchpad and channel prompts
 
-- Every session has a dedicated scratchpad file at `workspace/scratchpads/<session>.md`.
-- Scratchpad is transient by design: it is archived to `workspace/scratchpads/archive/` on session end.
+- Every session has a dedicated scratchpad file at `identities/<name>/scratchpads/<session>.md`.
+- Scratchpad is transient by design: it is archived to `identities/<name>/scratchpads/archive/` on session end.
 - Scratchpad traces are excluded from distillation so transient reasoning doesn't pollute long-term memory.
 - Optional per-channel prompt overlays:
-  - `workspace/prompts/<channel>.md`
-  - `workspace/prompts/<channel>/<chat_id>.md`
+  - `identities/<name>/prompts/<channel>.md`
+  - `identities/<name>/prompts/<channel>/<chat_id>.md`
 
 ### Channels — where you talk to your crab
 
@@ -268,8 +256,8 @@ Distillation is conservative and optional by design. Explicit memory writes rema
 - **Email** — IMAP/SMTP  
 - **CLI** — quick local chats
 
-The gateway can route channel traffic to isolated workspaces. By design, sub-workspaces are
-channel-only; CLI and `config.json` remain admin-owned surfaces.
+The gateway can route channel traffic to isolated identities. CLI and `config.json` remain
+owner/operator surfaces.
 
 ### Tools — what the agent can actually do
 
@@ -279,7 +267,7 @@ channel-only; CLI and `config.json` remain admin-owned surfaces.
 | write_file        | Create / overwrite files                  |
 | edit_file         | Precise replacements                      |
 | list_dir          | Browse directories                        |
-| exec              | Run safe shell commands                   |
+| exec              | Run permission-gated shell commands       |
 | web_search        | DuckDuckGo search (no API key needed)     |
 | web_fetch         | Fetch & extract URL content (sanitized)   |
 | knowledge_search  | Search your knowledge library             |
@@ -355,20 +343,18 @@ Production-minded defaults are in `hermitcrab/config/schema.py` and are written 
 |---------------------|-------------------------------------|-------------------------------------|
 | Core code size      | Lean Python codebase                | 50k–300k+ lines                     |
 | Memory              | Atomic Markdown                     | Vector DB or forgotten             |
-| Portability         | Copy workspace → works              | Cloud account locked                |
+| Portability         | Copy HermitCrab root → works        | Cloud account locked                |
 | Transparency        | Fully auditable                     | Opaque internals                    |
 | Cost                | Local models cheap                  | API calls add up fast               |
 | Self-improvement    | Built-in distillation & reflection  | Rare or manual                      |
 
-### Beta focus
-
-For `0.1.0b3`, the priorities are:
+### Current focus
 
 - modern Nostr direct-message reliability
-- owner-managed, channel-only multi-workspace routing
+- owner-managed identity routing
 - clearer diagnostics, audit trails, and operator recovery paths
 - safer permission UX without arbitrary dead ends
-- keeping the default single-workspace experience simple and intact
+- keeping the default owner identity experience simple and intact
 
 ### Why I built this
 

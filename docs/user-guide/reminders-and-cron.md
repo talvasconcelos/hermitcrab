@@ -17,11 +17,11 @@ Remind me to call the dentist tomorrow at 10am.
 Remind me to pick up the dry cleaning this Friday at 6pm.
 ```
 
-The agent creates a reminder artifact in `workspace/reminders/`.
+The agent creates a reminder artifact in `identities/<name>/reminders/`.
 
 ### How reminders work
 
-- Reminder files are stored in `workspace/reminders/`
+- Reminder files are stored in `identities/<name>/reminders/`
 - The gateway service polls for due reminders every 60 seconds by default
 - When a reminder is due, the agent delivers it on the channel you used to create it
 - Delivered reminders are moved to an archived state
@@ -107,13 +107,13 @@ The heartbeat service periodically wakes the agent to review active work.
 ### How it works
 
 - Runs every 30 minutes by default
-- Reads `workspace/HEARTBEAT.md` for active tasks and context
+- Reads `identities/<name>/HEARTBEAT.md` for active tasks and context
 - A lightweight model decides whether to skip or run a check
 - If "run", the agent processes active tasks through the normal loop
 
 ### Disable heartbeat
 
-Add this marker to `workspace/HEARTBEAT.md`:
+Add this marker to `identities/<name>/HEARTBEAT.md`:
 
 ```markdown
 <!-- HEARTBEAT_DISABLED -->
@@ -159,7 +159,7 @@ For direct execution without the LLM skip/run decision:
 ### Reminders not firing
 
 - Ensure the gateway is running: `hermitcrab gateway`
-- Check reminder files exist in `workspace/reminders/`
+- Check reminder files exist in `identities/<name>/reminders/`
 - Run `hermitcrab status` to verify reminder service status
 - Check logs for delivery errors
 

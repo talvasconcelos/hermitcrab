@@ -21,8 +21,10 @@ class SessionSearchTool(Tool):
     @property
     def description(self) -> str:
         return (
-            "Search past conversation transcripts across active and archived sessions. "
-            "Use when the user references something discussed earlier and recent chat context is not enough."
+            "Search conversation transcripts across active and archived sessions. "
+            "Use when the user references something discussed earlier. "
+            "If the user asks about recent/last messages or says you contradicted recent context, "
+            "set recent=true instead of guessing keywords."
         )
 
     @property
@@ -39,19 +41,35 @@ class SessionSearchTool(Tool):
                     "type": "integer",
                     "minimum": 1,
                     "maximum": 10,
-                    "description": "Maximum number of matching sessions to return",
+                    "description": "Maximum number of sessions to return",
                     "default": 3,
                 },
+                "recent": {
+                    "type": "boolean",
+                    "description": "Return recent session tails directly instead of keyword-searching.",
+                    "default": False,
+                },
             },
-            "required": ["query"],
+            "required": [],
         }
 
-    async def execute(self, query: str, max_results: int = 3, **kwargs: Any) -> str:
-        results = self.sessions.search_history(query, max_results=max_results)
+    async def execute(
+        self,
+        query: str = "",
+        max_results: int = 3,
+        recent: bool = False,
+        **kwargs: Any,
+    ) -> str:
+        results = (
+            self.sessions.recent_history(max_results=max_results)
+            if recent
+            else self.sessions.search_history(query, max_results=max_results)
+        )
         if not results:
             return "No matching past conversations found."
 
-        lines = [f"Found {len(results)} matching session(s):", ""]
+        heading = "recent session" if recent else "matching session"
+        lines = [f"Found {len(results)} {heading}(s):", ""]
         for index, result in enumerate(results, start=1):
             state = "archived" if result["archived"] else "active"
             lines.append(f"--- Session {index} ({state}) ---")

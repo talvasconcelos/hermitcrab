@@ -4,19 +4,22 @@ Every HermitCrab command with flags and examples.
 
 ## hermitcrab onboard
 
-Initialize config and workspace.
+Initialize config, system state, and the owner identity.
 
 ```bash
 hermitcrab onboard
 ```
 
-Creates `~/.hermitcrab/config.json` and bootstraps the workspace directory.
+Creates `~/.hermitcrab/config.json`, `~/.hermitcrab/system/`, and
+`~/.hermitcrab/identities/owner/`.
 
 If config already exists, prompts:
 - `y` — overwrite with defaults (loses existing values)
 - `N` — refresh config (preserves existing values, adds new fields)
 
-Creates template files (`AGENTS.md`, `IDENTITY.md`, `SOUL.md`, `USER.md`, `TOOLS.md`, `HEARTBEAT.md`) and workspace directories (`memory/`, `knowledge/`, `scratchpads/`, `people/`, `lists/`, `reminders/`, `skills/`).
+Creates system templates (`AGENTS.md`, `TOOLS.md`), identity templates (`IDENTITY.md`, `SOUL.md`,
+`USER.md`, `HEARTBEAT.md`), and identity directories (`memory/`, `knowledge/`, `scratchpads/`,
+`people/`, `lists/`, `reminders/`, `skills/`, `sessions/`, `cron/`).
 
 ## hermitcrab agent
 
@@ -126,7 +129,7 @@ Show runtime and configuration status.
 hermitcrab status
 ```
 
-Reports config state, workspace readiness, provider status, skill availability, MCP server health, and audit trail summary.
+Reports config state, identity readiness, provider status, skill availability, MCP server health, and audit trail summary.
 
 ### JSON output
 
@@ -142,7 +145,24 @@ Run first-run diagnostics with remediation steps.
 hermitcrab doctor
 ```
 
-Checks config, workspace, provider readiness, Ollama binary, MCP servers, and skill requirements. Each check has a severity level: `error`, `warning`, `info`, or `ok`.
+Checks config, identity readiness, provider readiness, Ollama binary, MCP servers, and skill requirements. Each check has a severity level: `error`, `warning`, `info`, or `ok`.
+
+## hermitcrab user
+
+Manage identity-scoped users.
+
+```bash
+hermitcrab user list
+hermitcrab user add alice
+hermitcrab user remove alice
+hermitcrab user archive alice
+hermitcrab user route nostr alice <pubkey>
+hermitcrab user models alice --interactive main
+hermitcrab user status alice
+```
+
+The CLI is owner/operator controlled. Non-owner identities primarily interact through routed
+channels.
 
 ### JSON output
 

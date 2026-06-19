@@ -70,31 +70,31 @@ Permission level: `read_only`
 
 ### write_fact
 
-Write a fact to `workspace/memory/facts/`.
+Write a fact to `identities/<name>/memory/facts/`.
 
 Permission level: `workspace_write`
 
 ### write_decision
 
-Write a decision to `workspace/memory/decisions/`.
+Write a decision to `identities/<name>/memory/decisions/`.
 
 Permission level: `workspace_write`
 
 ### write_goal
 
-Write a goal to `workspace/memory/goals/`.
+Write a goal to `identities/<name>/memory/goals/`.
 
 Permission level: `workspace_write`
 
 ### write_task
 
-Write a task to `workspace/memory/tasks/`.
+Write a task to `identities/<name>/memory/tasks/`.
 
 Permission level: `workspace_write`
 
 ### write_reflection
 
-Write a reflection to `workspace/memory/reflections/`.
+Write a reflection to `identities/<name>/memory/reflections/`.
 
 Permission level: `workspace_write`
 

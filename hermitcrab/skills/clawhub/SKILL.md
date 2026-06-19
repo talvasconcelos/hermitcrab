@@ -27,21 +27,21 @@ npx --yes clawhub@latest search "web scraping" --limit 5
 ## Install
 
 ```bash
-npx --yes clawhub@latest install <slug> --workdir ~/.hermitcrab/workspace
+npx --yes clawhub@latest install <slug> --workdir ~/.hermitcrab/identities/owner
 ```
 
-Replace `<slug>` with the skill name from search results. This places the skill into `~/.hermitcrab/workspace/skills/`, where hermitcrab loads workspace skills from. Always include `--workdir`.
+Replace `<slug>` with the skill name from search results. This places the skill into `~/.hermitcrab/identities/owner/skills/`, where HermitCrab loads owner identity skills from. Always include `--workdir`.
 
 ## Update
 
 ```bash
-npx --yes clawhub@latest update --all --workdir ~/.hermitcrab/workspace
+npx --yes clawhub@latest update --all --workdir ~/.hermitcrab/identities/owner
 ```
 
 ## List installed
 
 ```bash
-npx --yes clawhub@latest list --workdir ~/.hermitcrab/workspace
+npx --yes clawhub@latest list --workdir ~/.hermitcrab/identities/owner
 ```
 
 ## Notes
@@ -49,5 +49,5 @@ npx --yes clawhub@latest list --workdir ~/.hermitcrab/workspace
 - Requires Node.js (`npx` comes with it).
 - No API key needed for search and install.
 - Login (`npx --yes clawhub@latest login`) is only required for publishing.
-- `--workdir ~/.hermitcrab/workspace` is critical — without it, skills install to the current directory instead of the hermitcrab workspace.
+- `--workdir ~/.hermitcrab/identities/owner` is critical — without it, skills install to the current directory instead of the owner identity.
 - After install, remind the user to start a new session to load the skill.

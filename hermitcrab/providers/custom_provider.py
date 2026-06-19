@@ -18,13 +18,17 @@ class CustomProvider(LLMProvider):
         api_key: str = "no-key",
         api_base: str = "http://localhost:8000/v1",
         default_model: str = "default",
+        extra_headers: dict[str, str] | None = None,
     ):
         super().__init__(api_key, api_base)
         self.default_model = default_model
+        default_headers = {"x-session-affinity": uuid.uuid4().hex}
+        if extra_headers:
+            default_headers.update(extra_headers)
         self._client = AsyncOpenAI(
             api_key=api_key,
             base_url=api_base,
-            default_headers={"x-session-affinity": uuid.uuid4().hex},
+            default_headers=default_headers,
         )
 
     async def chat(

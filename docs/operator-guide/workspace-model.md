@@ -1,170 +1,102 @@
-# Workspace model
+# Workspace Model
 
-HermitCrab's workspace architecture — single-workspace baseline and additive multi-workspace.
+HermitCrab keeps one readable root at `~/.hermitcrab/`.
 
-## Single workspace (default)
+Runtime state is split into:
 
-Every HermitCrab installation has one admin workspace:
+- `config.json`: one global configuration file
+- `system/`: owner-managed operational guidance, logs, indexes, and history
+- `identities/<name>/`: identity-scoped memory, sessions, skills, routines, and user profile
 
+## Standard Layout
+
+```text
+~/.hermitcrab/
+├── config.json
+├── system/
+│   ├── AGENTS.md
+│   ├── TOOLS.md
+│   ├── history/
+│   ├── indexes/
+│   └── logs/
+└── identities/
+    └── owner/
+        ├── IDENTITY.md
+        ├── SOUL.md
+        ├── USER.md
+        ├── HEARTBEAT.md
+        ├── cron/
+        ├── journal/
+        ├── knowledge/
+        ├── lists/
+        ├── memory/
+        ├── people/
+        ├── projects/
+        ├── reminders/
+        ├── reports/
+        ├── scratchpads/
+        ├── sessions/
+        └── skills/
 ```
-~/.hermitcrab/workspace/
-├── AGENTS.md          # Workspace instructions
-├── IDENTITY.md        # Stable self-description
-├── SOUL.md            # Behavioral guardrails
-├── USER.md            # User preferences
-├── TOOLS.md           # Tool discipline
-├── HEARTBEAT.md       # Heartbeat tasks
-├── memory/            # Deterministic memory
-├── knowledge/         # Reference library
-├── sessions/          # Raw conversation logs
-├── scratchpads/       # Transient working notes
-├── people/            # Named people profiles
-├── lists/             # Checklists and todos
-├── reminders/         # Scheduled reminder files
-├── journal/           # Narrative session summaries
-└── logs/              # Audit trail
+
+`hermitcrab onboard` creates this layout. Single-user installs use the same identity structure as
+multi-identity installs.
+
+## Identities
+
+An identity is an isolated context for a person, role, customer, project, or operating mode.
+
+Each identity owns:
+
+- memory and knowledge
+- sessions and scratchpads
+- people, lists, reminders, reports, and projects
+- `IDENTITY.md`, `SOUL.md`, `USER.md`, and `HEARTBEAT.md`
+- cron jobs and identity-local skills
+
+The CLI uses `user` as the operator-facing command language:
+
+```bash
+hermitcrab user list
+hermitcrab user add alice
+hermitcrab user route nostr alice <pubkey>
+hermitcrab user models alice --interactive main
 ```
 
-This is the default model. All channels, sessions, memory, and tools operate within this single workspace.
+## System State
 
-## Multi-workspace (optional, additive)
+`system/AGENTS.md` and `system/TOOLS.md` are owner/operator guidance shared by all identities.
+Durable audit logs live under `system/logs/`.
 
-Multi-workspace adds isolated sub-workspaces on top of the admin workspace. It is **not** a replacement for the admin path.
+Per-identity journals remain human-readable identity history; system audit is operational evidence.
 
-### Key principles
+## Routing
 
-- The admin workspace (`~/.hermitcrab/workspace`) is always present and unchanged
-- Sub-workspaces are additional isolated roots under `~/.hermitcrab/workspaces/`
-- Each workspace keeps its own bootstrap files, memory, sessions, reminders, people, skills, and personality state
-- There is no implicit fallback from admin workspace into sub-workspaces
-- Sub-workspaces are **channel-only** — CLI and config remain admin-owned
+Channels identify senders. The gateway resolves senders to identity names through `config.json`, then
+creates or reuses an identity-scoped agent.
 
-### When to use multi-workspace
-
-- You want isolated contexts for different people or purposes
-- You want different Nostr senders to reach different workspaces
-- You want isolated memory and knowledge per context
-
-### Configuration
+Nostr routing uses `channels.nostr.identityBindings`:
 
 ```json
 {
-  "workspaces": {
-    "root": "~/.hermitcrab/workspaces",
-    "registry": {
-      "family": {
-        "path": "family",
-        "label": "Family workspace",
-        "channelOnly": true
-      },
-      "work": {
-        "path": "work",
-        "label": "Work workspace",
-        "channelOnly": true
-      }
-    }
-  },
   "channels": {
     "nostr": {
       "enabled": true,
-      "privateKey": "nsec1...",
-      "allowedPubkeys": [
-        "a1b2c3d4e5f6...",
-        "d4e5f6a1b2c3..."
-      ],
-      "workspaceBindings": {
-        "family": ["a1b2c3d4e5f6..."],
-        "work": ["d4e5f6a1b2c3..."]
+      "identityBindings": {
+        "alice": ["<sender-pubkey-hex>"]
       }
     }
   }
 }
 ```
 
-### Validation rules
+If a sender is allowed but not explicitly bound, the gateway falls back to the owner identity. If the
+sender is not allowed or routes to an inactive identity, the message is denied.
 
-The config schema enforces:
+## Isolation
 
-1. **Unique pubkey bindings** — a pubkey cannot be assigned to multiple workspaces
-2. **Allowlist membership** — bound pubkeys must also appear in `allowedPubkeys`
-3. **Workspace references** — bindings must reference configured workspaces
-4. **No open mode with bindings** — `"*"` in `allowedPubkeys` is incompatible with workspace bindings
+Identity roots are separate by default. There is no shared memory root and no automatic promotion
+from one identity to another.
 
-### Workspace resolution
-
-When a Nostr message arrives:
-
-1. The sender pubkey is normalized to lowercase hex
-2. The binding map is checked for a workspace assignment
-3. If found, the message routes to that workspace's agent loop
-4. If not found but in the admin allowlist, it routes to the admin workspace
-5. If not in the allowlist, it is **denied** — no silent fallback
-
-### Routing decision flow
-
-```
-Inbound Nostr message
-  -> Normalize sender pubkey
-  -> Check workspace_bindings
-     -> Found -> Route to workspace agent
-     -> Not found -> Check allowed_pubkeys
-        -> In allowlist -> Route to admin workspace
-        -> Not in allowlist -> DENIED (audit event logged)
-```
-
-Non-Nostr channels (Telegram, email, CLI) always route to the admin workspace.
-
-### Sub-workspace behavior
-
-Sub-workspaces are **channel-only**:
-
-- Users interact via their bound Nostr pubkey
-- They get isolated memory, sessions, knowledge, people, lists
-- They do **not** have CLI access
-- They do **not** have config access
-- They do **not** see the admin workspace's data
-
-### Admin workspace behavior in multi-workspace mode
-
-The admin workspace remains fully functional:
-
-- CLI access unchanged
-- Config access unchanged
-- Any pubkey in `allowedPubkeys` but not bound to a sub-workspace lands here
-- Non-Nostr channels (Telegram, email) always land here
-
-## Workspace bootstrap
-
-Running `hermitcrab onboard` bootstraps the admin workspace:
-
-1. Creates the workspace directory
-2. Copies template files (if they don't exist): `AGENTS.md`, `IDENTITY.md`, `SOUL.md`, `USER.md`, `TOOLS.md`, `HEARTBEAT.md`
-3. Creates subdirectories: `memory/`, `knowledge/`, `sessions/`, `scratchpads/`, `people/`, `lists/`, `reminders/`, `journal/`, `logs/`
-
-Sub-workspaces must be bootstrapped manually or via config-driven onboarding (a beta3 direction).
-
-### Bootstrap file requirements
-
-A workspace is considered ready when:
-
-- The directory exists
-- `AGENTS.md` exists in the workspace root
-
-The gateway checks this before routing messages to a workspace. Unbootstrapped workspaces receive a "denied" response.
-
-## Workspace paths
-
-| Workspace | Path |
-|-----------|------|
-| Admin (default) | `~/.hermitcrab/workspace` |
-| Sub-workspace "family" | `~/.hermitcrab/workspaces/family` |
-| Sub-workspace "work" | `~/.hermitcrab/workspaces/work` |
-
-Relative paths in the registry are resolved against `workspaces.root`.
-
-## Known limits
-
-- Sub-workspace onboarding is manual today (copy templates, create dirs)
-- Workspace isolation is enforced at the agent level, not at the filesystem permission level
-- Cross-workspace memory sharing is not supported
-- CLI commands always operate on the admin workspace
+Shared state is intentionally not part of this release. `shared` remains a reserved identity name
+for future design work.

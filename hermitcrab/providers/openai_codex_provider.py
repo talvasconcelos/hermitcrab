@@ -9,12 +9,16 @@ from typing import Any, AsyncGenerator
 
 import httpx
 from loguru import logger
-from oauth_cli_kit import get_token as get_codex_token
 
 from hermitcrab.providers.base import LLMProvider, LLMResponse, ToolCallRequest
+from hermitcrab.providers.openai_codex_auth import (
+    DEFAULT_CODEX_BASE_URL,
+    codex_cloudflare_headers,
+    resolve_codex_runtime_credentials,
+)
 
-DEFAULT_CODEX_URL = "https://chatgpt.com/backend-api/codex/responses"
-DEFAULT_ORIGINATOR = "hermitcrab"
+DEFAULT_CODEX_URL = f"{DEFAULT_CODEX_BASE_URL}/responses"
+CODEX_PROMPT_CACHE_FAMILY = "hermitcrab-codex-v1"
 
 
 class OpenAICodexProvider(LLMProvider):
@@ -36,8 +40,9 @@ class OpenAICodexProvider(LLMProvider):
         model = model or self.default_model
         system_prompt, input_items = _convert_messages(messages)
 
-        token = await asyncio.to_thread(get_codex_token)
-        headers = _build_headers(token.account_id, token.access)
+        creds = await asyncio.to_thread(resolve_codex_runtime_credentials)
+        access_token = creds["api_key"]
+        headers = _build_headers(access_token)
 
         body: dict[str, Any] = {
             "model": _strip_model_prefix(model),
@@ -45,9 +50,9 @@ class OpenAICodexProvider(LLMProvider):
             "stream": True,
             "instructions": system_prompt,
             "input": input_items,
-            "text": {"verbosity": "medium"},
+            "text": {"verbosity": "low"},
             "include": ["reasoning.encrypted_content"],
-            "prompt_cache_key": _prompt_cache_key(messages),
+            "prompt_cache_key": _prompt_cache_key(model),
             "tool_choice": "auto",
             "parallel_tool_calls": True,
         }
@@ -58,20 +63,31 @@ class OpenAICodexProvider(LLMProvider):
         if tools:
             body["tools"] = _convert_tools(tools)
 
-        url = DEFAULT_CODEX_URL
+        base_url = str(creds.get("base_url") or DEFAULT_CODEX_BASE_URL).rstrip("/")
+        url = f"{base_url}/responses"
 
         try:
             try:
-                content, tool_calls, finish_reason = await _request_codex(url, headers, body, verify=True)
+                content, tool_calls, finish_reason, usage = await _request_codex_with_cert_retry(
+                    url,
+                    headers,
+                    body,
+                )
             except Exception as e:
-                if "CERTIFICATE_VERIFY_FAILED" not in str(e):
+                if "HTTP 401" not in str(e):
                     raise
-                logger.warning("SSL certificate verification failed for Codex API; retrying with verify=False")
-                content, tool_calls, finish_reason = await _request_codex(url, headers, body, verify=False)
+                creds = await asyncio.to_thread(resolve_codex_runtime_credentials, force_refresh=True)
+                headers = _build_headers(creds["api_key"])
+                content, tool_calls, finish_reason, usage = await _request_codex_with_cert_retry(
+                    url,
+                    headers,
+                    body,
+                )
             return LLMResponse(
                 content=content,
                 tool_calls=tool_calls,
                 finish_reason=finish_reason,
+                usage=usage,
             )
         except Exception as e:
             return LLMResponse(
@@ -94,13 +110,11 @@ def _strip_model_prefix(model: str) -> str:
     return model
 
 
-def _build_headers(account_id: str, token: str) -> dict[str, str]:
+def _build_headers(token: str) -> dict[str, str]:
     return {
+        **codex_cloudflare_headers(token),
         "Authorization": f"Bearer {token}",
-        "chatgpt-account-id": account_id,
         "OpenAI-Beta": "responses=experimental",
-        "originator": DEFAULT_ORIGINATOR,
-        "User-Agent": "hermitcrab (python)",
         "accept": "text/event-stream",
         "content-type": "application/json",
     }
@@ -111,13 +125,27 @@ async def _request_codex(
     headers: dict[str, str],
     body: dict[str, Any],
     verify: bool,
-) -> tuple[str, list[ToolCallRequest], str]:
+) -> tuple[str, list[ToolCallRequest], str, dict[str, int]]:
     async with httpx.AsyncClient(timeout=60.0, verify=verify) as client:
         async with client.stream("POST", url, headers=headers, json=body) as response:
             if response.status_code != 200:
                 text = await response.aread()
                 raise RuntimeError(_friendly_error(response.status_code, text.decode("utf-8", "ignore")))
             return await _consume_sse(response)
+
+
+async def _request_codex_with_cert_retry(
+    url: str,
+    headers: dict[str, str],
+    body: dict[str, Any],
+) -> tuple[str, list[ToolCallRequest], str, dict[str, int]]:
+    try:
+        return await _request_codex(url, headers, body, verify=True)
+    except Exception as e:
+        if "CERTIFICATE_VERIFY_FAILED" not in str(e):
+            raise
+        logger.warning("SSL certificate verification failed for Codex API; retrying with verify=False")
+        return await _request_codex(url, headers, body, verify=False)
 
 
 def _convert_tools(tools: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -226,8 +254,15 @@ def _split_tool_call_id(tool_call_id: Any) -> tuple[str, str | None]:
     return "call_0", None
 
 
-def _prompt_cache_key(messages: list[dict[str, Any]]) -> str:
-    raw = json.dumps(messages, ensure_ascii=True, sort_keys=True)
+def _prompt_cache_key(model: str) -> str:
+    raw = json.dumps(
+        {
+            "family": CODEX_PROMPT_CACHE_FAMILY,
+            "model": _strip_model_prefix(model),
+        },
+        ensure_ascii=True,
+        sort_keys=True,
+    )
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
 
@@ -251,11 +286,12 @@ async def _iter_sse(response: httpx.Response) -> AsyncGenerator[dict[str, Any], 
         buffer.append(line)
 
 
-async def _consume_sse(response: httpx.Response) -> tuple[str, list[ToolCallRequest], str]:
+async def _consume_sse(response: httpx.Response) -> tuple[str, list[ToolCallRequest], str, dict[str, int]]:
     content = ""
     tool_calls: list[ToolCallRequest] = []
     tool_call_buffers: dict[str, dict[str, Any]] = {}
     finish_reason = "stop"
+    usage: dict[str, int] = {}
 
     async for event in _iter_sse(response):
         event_type = event.get("type")
@@ -300,12 +336,39 @@ async def _consume_sse(response: httpx.Response) -> tuple[str, list[ToolCallRequ
                     )
                 )
         elif event_type == "response.completed":
-            status = (event.get("response") or {}).get("status")
+            response_payload = event.get("response") or {}
+            status = response_payload.get("status")
             finish_reason = _map_finish_reason(status)
+            usage = _parse_usage(response_payload.get("usage"))
         elif event_type in {"error", "response.failed"}:
             raise RuntimeError("Codex response failed")
 
-    return content, tool_calls, finish_reason
+    return content, tool_calls, finish_reason, usage
+
+
+def _parse_usage(raw_usage: Any) -> dict[str, int]:
+    if not isinstance(raw_usage, dict):
+        return {}
+
+    usage: dict[str, int] = {}
+    for source_key, target_key in (
+        ("prompt_tokens", "prompt_tokens"),
+        ("input_tokens", "prompt_tokens"),
+        ("completion_tokens", "completion_tokens"),
+        ("output_tokens", "completion_tokens"),
+        ("total_tokens", "total_tokens"),
+    ):
+        value = raw_usage.get(source_key)
+        if isinstance(value, int):
+            usage[target_key] = value
+
+    details = raw_usage.get("prompt_tokens_details") or raw_usage.get("input_tokens_details")
+    if isinstance(details, dict):
+        cached_tokens = details.get("cached_tokens")
+        if isinstance(cached_tokens, int):
+            usage["cached_tokens"] = cached_tokens
+
+    return usage
 
 
 _FINISH_REASON_MAP = {"completed": "stop", "incomplete": "length", "failed": "error", "cancelled": "error"}

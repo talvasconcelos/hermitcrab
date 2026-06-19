@@ -70,7 +70,7 @@ LLM provider abstraction layer. Supports 20+ providers via LiteLLM plus dedicate
 
 ### config/
 
-Pydantic-based typed configuration. Loads from `~/.hermitcrab/config.json` with environment variable overrides (`HERMITCRAB__` prefix). Includes multi-workspace validation and provider matching.
+Pydantic-based typed configuration. Loads from `~/.hermitcrab/config.json` with environment variable overrides (`HERMITCRAB__` prefix). Includes identity routing validation and provider matching.
 
 ### cli/
 
@@ -90,7 +90,7 @@ In-process message bus for decoupled communication between channels, agent loops
 User message
   -> Channel receives message
   -> Publishes to MessageBus
-  -> Gateway routes to workspace (single or multi-workspace)
+  -> Gateway routes to an identity
   -> AgentLoop processes the turn
      -> ContextBuilder assembles prompt (memory, session history, bootstrap files)
      -> LLM is called via Provider
@@ -110,10 +110,24 @@ These modules carry the most behavioral complexity:
 
 - `agent/loop.py` — main orchestration, job routing, background cognition scheduling
 - `agent/tools/registry.py` and `policy.py` — dynamic tool registration and permission enforcement
-- `channels/nostr.py` — NIP-04/NIP-17 handling, relay discovery, multi-workspace routing
+- `channels/nostr.py` — NIP-04/NIP-17 handling, relay discovery, identity routing
 - `cli/commands.py` — all CLI commands, gateway logic, inbound routing
-- `config/schema.py` — validation, provider matching, model resolution, workspace routing
+- `config/schema.py` — validation, provider matching, model resolution, identity routing
 - `agent/memory.py` — duplicate detection, category management, thread safety
+
+## Dependency boundaries
+
+HermitCrab is intentionally small, but the package layers should stay predictable as agent-assisted development accelerates. The current guardrails are deliberately simple and are enforced by `tests/test_architecture_boundaries.py`.
+
+Initial rules:
+
+- `config/` stays low-level and must not import runtime packages such as `agent/`, `channels/`, `cli/`, `cron/`, `heartbeat/`, `reminders/`, or `session/`.
+- `providers/` owns model/provider integration and must not import concrete channels or CLI code.
+- `agent/tools/` owns tool implementations and policy; tools must not import concrete channel implementations or CLI code.
+- `channels/` should communicate through base classes, bus events, config, and explicit service interfaces rather than reaching deep into memory/session internals.
+- `cli/commands.py` can compose services, but new business logic should move into focused modules when it grows beyond command orchestration.
+
+When a boundary needs to move, update the architecture doc and the boundary test in the same change. Do not silently add cross-layer imports.
 
 ## Extension points
 

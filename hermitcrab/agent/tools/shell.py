@@ -41,7 +41,12 @@ class ExecTool(Tool):
 
     @property
     def description(self) -> str:
-        return "Execute a shell command and return its output. Use with caution."
+        if self.restrict_to_workspace:
+            return (
+                "Execute a shell command with best-effort workspace path checks. "
+                "This is not a sandbox and should not be treated as confinement."
+            )
+        return "Execute a shell command with full system access; dangerous and not sandboxed."
 
     @property
     def parameters(self) -> dict[str, Any]:
@@ -185,6 +190,13 @@ class ExecTool(Tool):
                 return "Error: Command blocked by safety guard (dangerous pattern detected)"
 
         risk = self._classify_command_risk(cmd)
+        workspace_root = Path(self.working_dir or cwd).resolve()
+        if (
+            risk == "destructive"
+            and self.restrict_to_workspace
+            and self._is_workspace_scoped_delete(cmd, workspace_root)
+        ):
+            risk = "workspace_write"
         if risk == "destructive" and not destructive_approved:
             return "Error: Command blocked by safety guard (destructive command requires explicit approval)"
 
@@ -195,24 +207,69 @@ class ExecTool(Tool):
         if self.restrict_to_workspace:
             if "..\\" in cmd or "../" in cmd:
                 return "Error: Command blocked by safety guard (path traversal detected)"
-
+            if re.search(r"(?:^|[\s=:])(?:~|\$\{?HOME\}?)(?:/|$)", cmd):
+                return "Error: Command blocked by safety guard (home path outside working dir)"
             cwd_path = Path(cwd).resolve()
+            if cwd_path != workspace_root and workspace_root not in cwd_path.parents:
+                return "Error: Command blocked by safety guard (working dir outside workspace)"
 
-            win_paths = re.findall(r"[A-Za-z]:\\[^\\\"']+", cmd)
-            # Only match absolute paths — avoid false positives on relative
-            # paths like ".venv/bin/python" where "/bin/python" would be
-            # incorrectly extracted by the old pattern.
-            posix_paths = re.findall(r"(?:^|[\s|>])(/[^\s\"'>]+)", cmd)
-
-            for raw in win_paths + posix_paths:
-                try:
-                    p = Path(raw.strip()).resolve()
-                except Exception:
-                    continue
-                if p.is_absolute() and cwd_path not in p.parents and p != cwd_path:
+            for p in self._extract_command_paths(cmd):
+                if p.is_absolute() and workspace_root not in p.parents and p != workspace_root:
                     return "Error: Command blocked by safety guard (path outside working dir)"
 
         return None
+
+    @staticmethod
+    def _extract_command_paths(command: str) -> list[Path]:
+        """Extract obvious absolute paths from shell commands for workspace checks."""
+        paths: list[Path] = []
+        try:
+            tokens = shlex.split(command, posix=True)
+        except ValueError:
+            tokens = command.split()
+
+        for token in tokens:
+            # Handle env assignments like FOO=/abs/path and args like --out=/abs/path.
+            candidates = [token]
+            if "=" in token:
+                candidates.append(token.split("=", 1)[1])
+            for candidate in candidates:
+                if candidate.startswith("/") or re.match(r"^[A-Za-z]:\\", candidate):
+                    paths.append(Path(candidate))
+
+        # Catch paths adjacent to shell operators/redirections that shlex may leave embedded.
+        paths.extend(Path(match) for match in re.findall(r"(?:^|[\s|>&;])(/[^\s\"'<>|;&]+)", command))
+        paths.extend(Path(match) for match in re.findall(r"[A-Za-z]:\\[^\\\"'\s<>|;&]+", command))
+        return paths
+
+    @classmethod
+    def _is_workspace_scoped_delete(cls, command: str, workspace_root: Path) -> bool:
+        """Allow file deletion as an ordinary workspace write when it stays inside the workspace."""
+        try:
+            tokens = shlex.split(command, posix=True)
+        except ValueError:
+            return False
+
+        if not tokens or Path(tokens[0]).name.lower() not in {"rm", "rmdir", "del", "erase"}:
+            return False
+        if any(token in {"&&", "||", ";", "|"} for token in tokens):
+            return False
+
+        targets = [token for token in tokens[1:] if not token.startswith("-")]
+        if not targets:
+            return False
+
+        workspace_root = workspace_root.resolve()
+        for target in targets:
+            target_path = Path(target).expanduser()
+            if str(target).startswith(("~", "$HOME", "${HOME}")):
+                return False
+            if any(ch in target for ch in "*?[]"):
+                return False
+            resolved = target_path.resolve() if target_path.is_absolute() else (workspace_root / target_path).resolve()
+            if resolved == workspace_root or workspace_root not in resolved.parents:
+                return False
+        return True
 
     @classmethod
     def _classify_command_risk(cls, command: str) -> CommandRisk:
@@ -230,6 +287,8 @@ class ExecTool(Tool):
 
         if cls._looks_destructive(first, tokens, lowered):
             return "destructive"
+        if cls._has_shell_redirection(lowered):
+            return "workspace_write"
         if cls._looks_read_only(first, lowered):
             return "read_only"
         return "workspace_write"
@@ -252,9 +311,6 @@ class ExecTool(Tool):
         }:
             return True
 
-        if first == "mv":
-            return True
-
         if first == "git":
             destructive_git_patterns = (
                 "git reset",
@@ -266,13 +322,14 @@ class ExecTool(Tool):
             if any(pattern in lowered for pattern in destructive_git_patterns):
                 return True
 
-        if any(operator in lowered for operator in (" > ", " >> ")):
-            return True
-
         if len(tokens) >= 2 and first in {"python", "python3"} and tokens[1] == "-c":
             return True
 
         return False
+
+    @staticmethod
+    def _has_shell_redirection(lowered: str) -> bool:
+        return any(operator in lowered for operator in (" > ", " >> "))
 
     @staticmethod
     def _looks_read_only(first: str, lowered: str) -> bool:

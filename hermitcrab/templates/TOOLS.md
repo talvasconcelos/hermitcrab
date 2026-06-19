@@ -70,7 +70,7 @@ Use `write_task` only for actionable commitments that somebody should do or trac
 
 - **exec**: Timeout 60s, dangerous commands blocked, output truncated at 10k chars
 - **cron**: See cron skill for scheduled tasks
-- **spawn**: Background tasks with isolated sessions, shared memory
+- **spawn**: Background tasks with isolated sessions inside the active identity
 
 ## Reminder Discipline
 

@@ -4,7 +4,7 @@
 
 HermitCrab is a personal AI agent you run on your own machine. It remembers what matters to you in plain Markdown files, distills conversations into actionable knowledge, and reflects on its own behavior to improve over time. No vector databases. No hidden state. No subscription traps.
 
-Move your `workspace/` folder anywhere — your agent picks up exactly where it left off.
+Move your HermitCrab root anywhere — your agent picks up exactly where it left off.
 
 ## Who this is for
 
@@ -38,8 +38,9 @@ Move your `workspace/` folder anywhere — your agent picks up exactly where it 
 | Guide | Solves |
 |-------|--------|
 | [Gateway operations](operator-guide/gateway-operations.md) | Run and manage the long-running gateway service |
-| [Workspace model](operator-guide/workspace-model.md) | Single and multi-workspace architecture |
+| [Workspace model](operator-guide/workspace-model.md) | System and identity filesystem architecture |
 | [Backups and recovery](operator-guide/backups-and-recovery.md) | Protect and restore workspace data |
+| [Manual migration](operator-guide/migration.md) | Move data from older beta layouts |
 | [Observability and audit](operator-guide/observability-audit.md) | Monitor health and inspect decisions |
 | [Incident playbook](operator-guide/incident-playbook.md) | Step-by-step recovery when things go wrong |
 
@@ -60,7 +61,7 @@ Move your `workspace/` folder anywhere — your agent picks up exactly where it 
 |-------|--------|
 | [Architecture](developer-guide/architecture.md) | How the pieces fit together |
 | [Agent loop](developer-guide/agent-loop.md) | The core message-processing loop |
-| [Gateway routing](developer-guide/gateway-routing.md) | How inbound messages reach workspaces |
+| [Gateway routing](developer-guide/gateway-routing.md) | How inbound messages reach identities |
 | [Memory and session model](developer-guide/memory-and-session.md) | Deterministic memory and session lifecycle |
 | [Extending tools](developer-guide/extending-tools.md) | Add new tools and skills |
 | [Contributing](developer-guide/contributing.md) | How to contribute code and docs |
@@ -73,7 +74,7 @@ Move your `workspace/` folder anywhere — your agent picks up exactly where it 
 - **Multi-channel** — Nostr (primary), Telegram, email, and CLI from one gateway.
 - **Multi-model routing** — interactive replies use your strongest model; background jobs route to cheaper models.
 - **Transparent** — Python enforces all tool access. The LLM proposes; Python decides.
-- **Portable** — copy your workspace folder to a new machine; everything comes with it.
+- **Portable** — copy your HermitCrab root to a new machine; everything comes with it.
 
 ## Current status
 

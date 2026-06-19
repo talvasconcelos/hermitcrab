@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import re
-import shutil
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -51,21 +50,7 @@ class ListStore:
 
     def __init__(self, workspace: Path):
         self.workspace = workspace
-        self.legacy_lists_dir = workspace / "knowledge" / "notes" / "checklists"
         self.lists_dir = ensure_dir(workspace / "lists")
-        self._migrate_legacy_lists()
-
-    def _migrate_legacy_lists(self) -> None:
-        if not self.legacy_lists_dir.exists():
-            return
-
-        for old_path in sorted(self.legacy_lists_dir.rglob("*.md")):
-            relative = old_path.relative_to(self.legacy_lists_dir)
-            new_path = self.lists_dir / relative
-            ensure_dir(new_path.parent)
-            if new_path.exists():
-                continue
-            shutil.move(str(old_path), str(new_path))
 
     @staticmethod
     def _slugify(value: str) -> str:

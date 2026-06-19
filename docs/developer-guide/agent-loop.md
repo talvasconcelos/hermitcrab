@@ -62,8 +62,8 @@ The final text response is published to the message bus. The `ChannelManager` di
 
 Sessions end when the user exits or after `inactivityTimeoutS` (default 30 minutes) of silence. On session end:
 
-1. Session is archived to `workspace/sessions/archive/`
-2. Scratchpad is archived to `workspace/scratchpads/archive/`
+1. Session is archived to `identities/<name>/sessions/archive/`
+2. Scratchpad is archived to `identities/<name>/scratchpads/archive/`
 3. Background cognition is scheduled:
    - Journal synthesis always runs
    - Distillation runs if `enableDistillation` is true

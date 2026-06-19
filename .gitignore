@@ -19,13 +19,14 @@ __pycache__/
 poetry.lock
 .pytest_cache/
 botpy.log
-tests/
+old_tests/
 
 # AI agent data
 AGENTS.md
 CLAUDE.md
 GEMINI.md
 QWEN.md
+CONSTITUTION.md
 
 CODEX_AUDIT
 .opencode/
@@ -35,3 +36,5 @@ CODEX_AUDIT
 # Internal smoke harness
 smoke_test/
 tmp/smoke/
+.gitnexus
+.claude/

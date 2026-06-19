@@ -38,7 +38,7 @@ class JournalStore:
     """
     Daily journal store with append-only semantics.
 
-    All journal entries are stored as markdown files in workspace/journal/
+    All journal entries are stored as markdown files in identity-root journal/
     with one file per calendar day.
 
     Journal entries are:

@@ -2,7 +2,6 @@
 
 import json
 import re
-import shutil
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -33,7 +32,7 @@ class Session:
 
     Important: Messages are append-only for LLM cache efficiency.
     Sessions are ephemeral conversation history, not long-term memory.
-    Long-term memory is stored separately in workspace/memory/ categories.
+    Long-term memory is stored separately in identity-root memory categories.
     """
 
     key: str  # channel:chat_id
@@ -156,18 +155,12 @@ class SessionManager:
         self.workspace = workspace
         self.sessions_dir = ensure_dir(self.workspace / "sessions")
         self.archive_dir = ensure_dir(self.sessions_dir / "archive")
-        self.legacy_sessions_dir = Path.home() / ".hermitcrab" / "sessions"
         self._cache: dict[str, Session] = {}
 
     def _get_session_path(self, key: str) -> Path:
         """Get the file path for a session."""
         safe_key = safe_filename(key.replace(":", "_"))
         return self.sessions_dir / f"{safe_key}.jsonl"
-
-    def _get_legacy_session_path(self, key: str) -> Path:
-        """Legacy global session path (~/.hermitcrab/sessions/)."""
-        safe_key = safe_filename(key.replace(":", "_"))
-        return self.legacy_sessions_dir / f"{safe_key}.jsonl"
 
     def _archived_session_paths(self, key: str) -> list[Path]:
         """Return archived session files for a key, newest first."""
@@ -206,15 +199,6 @@ class SessionManager:
     def _load(self, key: str) -> Session | None:
         """Load a session from disk."""
         path = self._get_session_path(key)
-        if not path.exists():
-            legacy_path = self._get_legacy_session_path(key)
-            if legacy_path.exists():
-                try:
-                    shutil.move(str(legacy_path), str(path))
-                    logger.info("Migrated session {} from legacy path", key)
-                except Exception:
-                    logger.exception("Failed to migrate session {}", key)
-
         if not path.exists():
             return None
 
@@ -311,9 +295,14 @@ class SessionManager:
         key: str,
         *,
         max_messages: int = 12,
-        max_age: timedelta = timedelta(hours=6),
+        max_age: timedelta = timedelta(days=1),
     ) -> list[dict[str, Any]]:
-        """Return recent archived history for the same chat when it ended recently."""
+        """Return the latest recent archived history for same-chat continuity.
+
+        This is deliberately query-free: a timeout/archive should finalize the
+        inspectable JSONL file, not force the next user message to restate exact
+        words from the previous conversation before the agent can continue.
+        """
         now = datetime.now(timezone.utc)
         for path in self._archived_session_paths(key):
             try:
@@ -328,6 +317,13 @@ class SessionManager:
 
             history = session.get_history(max_messages=max_messages)
             if history:
+                logger.info(
+                    "Loaded recent archived session tail for {} from {} (age={}, messages={})",
+                    key,
+                    path.name,
+                    age,
+                    len(history),
+                )
                 return history
         return []
 
@@ -422,6 +418,37 @@ class SessionManager:
 
         return results
 
+    def recent_history(
+        self,
+        *,
+        max_results: int = 3,
+        max_messages: int = 8,
+    ) -> list[dict[str, Any]]:
+        """Return recent active/archived session excerpts without keyword matching."""
+        results: list[dict[str, Any]] = []
+        for path in self._all_session_paths():
+            try:
+                session = self._load_from_path(path, key=path.stem.replace("_", ":", 1))
+            except Exception:
+                logger.exception("Failed to read recent session path {}", path)
+                continue
+
+            excerpt = self._tail_excerpt(session.messages, max_messages=max_messages)
+            if not excerpt:
+                continue
+            results.append(
+                {
+                    "session_key": session.key,
+                    "updated_at": session.updated_at.isoformat(),
+                    "archived": path.parent == self.archive_dir,
+                    "path": str(path),
+                    "excerpts": [excerpt],
+                }
+            )
+            if len(results) >= max_results:
+                break
+        return results
+
     @staticmethod
     def _matching_excerpts(
         messages: list[dict[str, Any]],
@@ -456,6 +483,25 @@ class SessionManager:
             if len(excerpts) >= 2:
                 break
         return excerpts
+
+    @staticmethod
+    def _tail_excerpt(messages: list[dict[str, Any]], *, max_messages: int) -> str:
+        """Build a compact visible tail excerpt from recent conversation messages."""
+        lines: list[str] = []
+        for message in messages[-max_messages:]:
+            role = str(message.get("role") or "unknown")
+            if role not in {"user", "assistant", "tool"}:
+                continue
+            if role == "assistant" and message.get("tool_calls"):
+                continue
+            content = str(message.get("content") or "").strip()
+            if not content:
+                continue
+            clipped = content[:220]
+            if len(content) > 220:
+                clipped += "..."
+            lines.append(f"{role}: {clipped}")
+        return "\n".join(lines)
 
     @staticmethod
     def _normalize_query(query: str | None) -> str:

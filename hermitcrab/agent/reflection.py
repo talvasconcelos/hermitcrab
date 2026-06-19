@@ -203,14 +203,23 @@ Rules:
                 logger.debug("Reflection skipped: {}", reason)
                 return ReflectionOutcome(status="skipped", reason=reason)
 
-            # 5. Validate required fields
+            # 5. Validate required fields.
+            # Evidence is optional in the model contract in practice: if the model
+            # found a useful lesson but forgot the evidence field, ground it in the
+            # deterministic digest before applying validation/grounding gates.
+            if not result.get("evidence"):
+                result["evidence"] = self._build_fallback_evidence(digest)
+
             valid, reason = self._validate_result(result, digest)
+            if not valid:
+                salvaged = self._salvage_result_from_digest(result, digest, reason)
+                if salvaged is not None:
+                    result = salvaged
+                    valid, reason = self._validate_result(result, digest)
+
             if not valid:
                 logger.debug("Reflection rejected by validation (reason={}): {}", reason, result)
                 return ReflectionOutcome(status="skipped", reason=reason)
-
-            if not result.get("evidence"):
-                result["evidence"] = self._build_fallback_evidence(digest)
 
             if self._is_duplicate_or_contradictory(result, recent):
                 logger.info(
@@ -429,6 +438,105 @@ Rules:
         if not self._is_grounded_in_digest(result, digest):
             return False, "not_grounded_in_digest"
         return True, "ok"
+
+    def _salvage_result_from_digest(
+        self,
+        result: dict[str, Any],
+        digest: SessionDigest,
+        reason: str,
+    ) -> dict[str, Any] | None:
+        """Turn a useful-but-misshapen reflection into the canonical shape.
+
+        Reflection is a learning mechanism, so it should be strict about value
+        and grounding but forgiving about model formatting. Small/local models
+        often omit one field, use schema-ish labels, or generalize the lesson so
+        aggressively that token-overlap grounding rejects it. Salvage only when
+        the session digest contains a concrete learning signal.
+        """
+        if reason not in {
+            "missing_required_fields",
+            "invalid_scope",
+            "low_or_invalid_confidence",
+            "weak_title",
+            "not_grounded_in_digest",
+            "invalid_promotion_target",
+        }:
+            return None
+
+        evidence = self._build_fallback_evidence(digest)
+        if not self._digest_has_learning_signal(digest):
+            return None
+
+        salvaged = dict(result)
+        lesson = self._first_non_empty(
+            salvaged.get("lesson"),
+            salvaged.get("recommended_behavior"),
+            salvaged.get("content"),
+            salvaged.get("impact"),
+        )
+        if not lesson:
+            return None
+
+        title = self._first_non_empty(salvaged.get("title"), self._title_from_evidence(evidence))
+        salvaged["title"] = title
+        salvaged["observation"] = self._first_non_empty(salvaged.get("observation"), evidence)
+        salvaged["impact"] = self._first_non_empty(
+            salvaged.get("impact"),
+            "This changes how I should handle similar future sessions.",
+        )
+        salvaged["lesson"] = lesson
+        salvaged["recommended_behavior"] = self._first_non_empty(
+            salvaged.get("recommended_behavior"),
+            lesson,
+        )
+        salvaged["evidence"] = self._first_non_empty(salvaged.get("evidence"), evidence)
+        salvaged["scope"] = self._normalize_learning_scope(salvaged, digest)
+        if salvaged.get("scope") not in self.VALID_SCOPES:
+            salvaged["scope"] = self._infer_scope_from_digest(digest)
+        if self._parse_confidence(salvaged.get("confidence")) is None:
+            salvaged["confidence"] = 0.75
+        salvaged["should_promote"] = self._coerce_bool(salvaged.get("should_promote", False))
+        salvaged["promotion_target"] = self._normalize_promotion_target(
+            salvaged.get("promotion_target")
+        )
+        if salvaged["promotion_target"] not in self.VALID_PROMOTION_TARGETS:
+            salvaged["promotion_target"] = "none"
+        return salvaged
+
+    @staticmethod
+    def _first_non_empty(*values: Any) -> str:
+        for value in values:
+            text = str(value or "").strip()
+            if text:
+                return text
+        return ""
+
+    def _digest_has_learning_signal(self, digest: SessionDigest) -> bool:
+        return bool(
+            digest.user_corrections
+            or digest.failures
+            or digest.open_loops
+            or digest.decisions_made
+            or digest.artifacts_changed
+            or len(digest.user_requests) >= 2
+        )
+
+    def _infer_scope_from_digest(self, digest: SessionDigest) -> str:
+        text = self._normalize_text(
+            " ".join([*digest.user_corrections, *digest.failures, *digest.outcomes])
+        )
+        if any(token in text for token in {"tool", "exec", "shell", "file", "delete"}):
+            return "tool_usage"
+        if digest.user_corrections or digest.failures:
+            return "assistant_behavior"
+        return "session_tactic"
+
+    def _title_from_evidence(self, evidence: str) -> str:
+        normalized = self._normalize_text(evidence)
+        tokens = [token for token in normalized.split() if len(token) >= 4][:5]
+        if len(tokens) >= 2:
+            return " ".join(token.capitalize() for token in tokens[:4])
+        return "Session Learning"
 
     def _is_valid_result(self, result: dict[str, Any], digest: SessionDigest) -> bool:
         """Backward-compatible validation hook used by tests and call sites."""
@@ -700,6 +808,10 @@ Rules:
         digest_text = self._normalize_text(" ".join(haystacks))
         if not digest_text:
             return False
+
+        evidence_text = self._normalize_text(str(result.get("evidence", "")))
+        if evidence_text and (evidence_text in digest_text or digest_text in evidence_text):
+            return True
 
         combined_text = self._normalize_text(
             " ".join(

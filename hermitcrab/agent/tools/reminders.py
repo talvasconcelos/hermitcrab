@@ -38,10 +38,12 @@ class ReminderTool(Tool):
     @property
     def description(self) -> str:
         return (
-            "Manage first-class reminders and simple recurring events. Use this instead of raw cron "
-            "for user-facing reminders, recurring schedules, inspection, updates, and cancellation. "
-            "When the user gives an event time and wants advance notice, prefer event_at plus "
-            "remind_offset_minutes instead of firing exactly at the event time."
+            "Manage first-class reminders and simple recurring notifications that only deliver "
+            "stored text. Use cron instead when the user asks for generated output, a morning "
+            "brief, a periodic report, an alert that needs checking state, or any scheduled task "
+            "that should run the assistant. When the user gives an event time and wants advance "
+            "notice, prefer event_at plus remind_offset_minutes instead of firing exactly at the "
+            "event time."
         )
 
     @property

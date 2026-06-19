@@ -7,6 +7,7 @@ import json
 import re
 import time
 from collections.abc import Callable
+from pathlib import Path
 from typing import Any
 
 import websockets
@@ -23,10 +24,10 @@ from hermitcrab.channels.nostr_nip17 import (
     parse_nip17_message,
     randomized_past_window_seconds,
 )
-from hermitcrab.config.schema import NostrConfig, NostrWorkspaceResolution, default_nostr_relays
+from hermitcrab.config.schema import NostrConfig, NostrIdentityResolution, default_nostr_relays
 
 
-def _split_message(content: str, max_len: int = 1800) -> list[str]:
+def _split_message(content: str, max_len: int = 3600) -> list[str]:
     """Split long outbound messages into relay/client-friendlier chunks."""
     if len(content) <= max_len:
         return [content]
@@ -61,13 +62,17 @@ class NostrChannel(BaseChannel):
         self,
         config: NostrConfig,
         bus: MessageBus,
-        workspace_resolver: Callable[[str], NostrWorkspaceResolution] | None = None,
+        identity_resolver: Callable[[str], NostrIdentityResolution] | None = None,
         audit_event: Callable[..., None] | None = None,
+        processed_store_path: Path | None = None,
     ) -> None:
         super().__init__(config, bus)
         self.config: NostrConfig = config
-        self._workspace_resolver = workspace_resolver
+        self._identity_resolver = identity_resolver
         self._audit_event = audit_event
+        self._processed_store_path = processed_store_path
+        self._processed_canonical_ids: set[str] = self._load_processed_canonical_ids()
+        self._startup_catchup_min_created_at = 0
 
         try:
             from pynostr.encrypted_dm import EncryptedDirectMessage
@@ -102,6 +107,56 @@ class NostrChannel(BaseChannel):
 
         logger.info("Nostr channel initialized (pubkey: {}...)", self._hex_pub[:8])
 
+    def _load_processed_canonical_ids(self) -> set[str]:
+        if self._processed_store_path is None or not self._processed_store_path.exists():
+            return set()
+
+        processed: set[str] = set()
+        try:
+            with self._processed_store_path.open("r", encoding="utf-8") as handle:
+                for raw_line in handle:
+                    line = raw_line.strip()
+                    if not line:
+                        continue
+                    try:
+                        payload = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    canonical_id = payload.get("canonical_id") if isinstance(payload, dict) else None
+                    if isinstance(canonical_id, str) and canonical_id:
+                        processed.add(canonical_id)
+        except OSError as exc:
+            logger.warning("Failed to read Nostr processed event store: {}", exc)
+        return processed
+
+    def _mark_processed_canonical_id(
+        self,
+        canonical_id: str,
+        *,
+        event_id: str | None,
+        sender_pubkey: str,
+        created_at: int | None,
+    ) -> None:
+        if not canonical_id or canonical_id in self._processed_canonical_ids:
+            return
+        self._processed_canonical_ids.add(canonical_id)
+        if self._processed_store_path is None:
+            return
+
+        payload = {
+            "canonical_id": canonical_id,
+            "event_id": event_id,
+            "sender_pubkey": sender_pubkey,
+            "created_at": created_at,
+            "processed_at": int(time.time()),
+        }
+        try:
+            self._processed_store_path.parent.mkdir(parents=True, exist_ok=True)
+            with self._processed_store_path.open("a", encoding="utf-8") as handle:
+                handle.write(json.dumps(payload, sort_keys=True) + "\n")
+        except OSError as exc:
+            logger.warning("Failed to write Nostr processed event store: {}", exc)
+
     def _emit_audit_event(self, event: str, **data: Any) -> None:
         """Best-effort audit hook for channel-level operator diagnostics."""
         audit_event = getattr(self, "_audit_event", None)
@@ -112,28 +167,28 @@ class NostrChannel(BaseChannel):
         except Exception as exc:
             logger.warning("Failed to append Nostr audit event {}: {}", event, exc)
 
-    def _workspace_metadata(self, sender_pubkey: str) -> dict[str, Any]:
-        """Return resolved workspace metadata for one inbound sender."""
-        if self._workspace_resolver is None:
+    def _identity_metadata(self, sender_pubkey: str) -> dict[str, Any]:
+        """Return resolved identity metadata for one inbound sender."""
+        if self._identity_resolver is None:
             return {}
-        resolution = self._workspace_resolver(sender_pubkey)
+        resolution = self._identity_resolver(sender_pubkey)
         return {
-            "workspace_target": resolution.target,
-            "workspace_name": resolution.workspace_name,
-            "workspace_path": (str(resolution.workspace_path) if resolution.workspace_path else None),
-            "workspace_reason": resolution.reason,
+            "identity_target": resolution.target,
+            "identity_name": resolution.identity_name,
+            "identity_path": (str(resolution.identity_path) if resolution.identity_path else None),
+            "identity_reason": resolution.reason,
         }
 
     def _session_key_for_sender(self, sender_pubkey: str, metadata: dict[str, Any] | None = None) -> str:
-        """Build session key, namespacing named-workspace senders only."""
-        workspace_name = (metadata or {}).get("workspace_name")
-        workspace_target = (metadata or {}).get("workspace_target")
-        if workspace_target == "workspace" and isinstance(workspace_name, str) and workspace_name:
-            return f"nostr:{workspace_name}:{sender_pubkey}"
-        return f"nostr:{sender_pubkey}"
+        """Build an identity-scoped Nostr session key."""
+        identity_name = (metadata or {}).get("identity_name")
+        identity_target = (metadata or {}).get("identity_target")
+        if identity_target == "identity" and isinstance(identity_name, str) and identity_name:
+            return f"nostr:{identity_name}:{sender_pubkey}"
+        return f"nostr:unresolved:{sender_pubkey}"
 
     def _sender_pubkey_from_session_key(self, session_key: str) -> str | None:
-        """Extract sender pubkey from legacy or namespaced Nostr session key."""
+        """Extract sender pubkey from an identity-scoped Nostr session key."""
         if not session_key.startswith("nostr:"):
             return None
         remainder = session_key.removeprefix("nostr:")
@@ -286,11 +341,13 @@ class NostrChannel(BaseChannel):
         latest_event: dict[str, Any] | None = None
         latest_created_at = -1
         for relay_url in relay_urls:
-            event = await self._fetch_latest_event_from_relay(
+            events = await self._fetch_events_from_relay(
                 relay_url,
                 authors=[self._hex_pub],
                 kinds=[self._NIP17_RELAY_LIST_KIND],
+                limit=1,
             )
+            event = events[-1] if events else None
             if (
                 event is not None
                 and isinstance(event.get("created_at"), int)
@@ -302,15 +359,24 @@ class NostrChannel(BaseChannel):
             return []
         return self._extract_relay_tags(latest_event)
 
-    async def _fetch_latest_event_from_relay(
+    async def _fetch_events_from_relay(
         self,
         relay_url: str,
         *,
-        authors: list[str],
         kinds: list[int],
-    ) -> dict[str, Any] | None:
+        authors: list[str] | None = None,
+        p_tags: list[str] | None = None,
+        since: int | None = None,
+        limit: int = 100,
+    ) -> list[dict[str, Any]]:
         subscription_id = f"{self._subscription_id}-{kinds[0]}-{int(time.time() * 1000)}"
-        filter_dict = {"authors": authors, "kinds": kinds, "limit": 1}
+        filter_dict: dict[str, Any] = {"kinds": kinds, "limit": max(1, limit)}
+        if authors:
+            filter_dict["authors"] = authors
+        if p_tags:
+            filter_dict["#p"] = p_tags
+        if since is not None:
+            filter_dict["since"] = max(0, since)
         try:
             async with websockets.connect(
                 relay_url,
@@ -321,7 +387,7 @@ class NostrChannel(BaseChannel):
             ) as ws:
                 await ws.send(json.dumps(["REQ", subscription_id, filter_dict]))
                 deadline = time.time() + self._relay_discovery_timeout_s()
-                latest_event: dict[str, Any] | None = None
+                events: list[dict[str, Any]] = []
 
                 while time.time() < deadline:
                     timeout = max(0.1, deadline - time.time())
@@ -332,18 +398,24 @@ class NostrChannel(BaseChannel):
                     if data[0] == "EVENT" and len(data) >= 3 and data[1] == subscription_id:
                         event = data[2]
                         if isinstance(event, dict) and event.get("kind") in kinds:
-                            latest_event = event
+                            events.append(event)
                     if data[0] == "EOSE" and data[1] == subscription_id:
                         break
 
                 await ws.send(json.dumps(["CLOSE", subscription_id]))
-                return latest_event
+                return sorted(
+                    events,
+                    key=lambda item: (
+                        int(item.get("created_at") or 0),
+                        str(item.get("id") or ""),
+                    ),
+                )
         except asyncio.TimeoutError:
             logger.debug("Timed out fetching kinds={} on {}", kinds, relay_url)
-            return None
+            return []
         except Exception as e:
             logger.debug("Failed fetching kinds={} on {}: {}", kinds, relay_url, e)
-            return None
+            return []
 
     async def _discover_recipient_relays(self, recipient_pubkey: str) -> list[str]:
         now = time.time()
@@ -367,11 +439,13 @@ class NostrChannel(BaseChannel):
         relay_url: str,
         recipient_pubkey: str,
     ) -> list[str]:
-        event = await self._fetch_latest_event_from_relay(
+        events = await self._fetch_events_from_relay(
             relay_url,
             authors=[recipient_pubkey],
             kinds=[self._NIP17_RELAY_LIST_KIND],
+            limit=1,
         )
+        event = events[-1] if events else None
         if event is None:
             return []
         return self._extract_relay_tags(event)
@@ -488,18 +562,20 @@ class NostrChannel(BaseChannel):
         for relay_url, ws in await self._connection_snapshot():
             await self._subscribe_to_relay(relay_url, ws)
 
+    def _subscription_since(self) -> int:
+        if self._protocol() == "nip04":
+            return self._listen_start
+        # NIP-17 relays filter the outer gift wrap timestamp, which is randomized
+        # into the past. The canonical message timestamp is inside the rumor.
+        return max(0, self._listen_start - randomized_past_window_seconds())
+
     async def _subscribe_to_relay(self, relay_url: str, ws: ClientConnection) -> None:
         self._live_event_relays.discard(relay_url)
         subscribed_kind = 4 if self._protocol() == "nip04" else NIP17_GIFT_WRAP_KIND
-        since = (
-            self._listen_start
-            if self._protocol() == "nip04"
-            else max(0, self._listen_start - randomized_past_window_seconds())
-        )
         filter_dict = {
             "kinds": [subscribed_kind],
             "#p": [self._hex_pub],
-            "since": since,
+            "since": self._subscription_since(),
             "limit": 25,
         }
         subscription_msg = ["REQ", self._subscription_id, filter_dict]
@@ -508,6 +584,41 @@ class NostrChannel(BaseChannel):
             logger.info("Subscribed to DMs on {} (#p=[{}...])", relay_url, self._hex_pub[:8])
         except Exception as e:
             logger.warning("Failed to subscribe on {}: {}", relay_url, e)
+
+    async def _catch_up_nip17_messages(self) -> None:
+        if self._protocol() != "nip17":
+            return
+
+        events_by_id: dict[str, dict[str, Any]] = {}
+        for relay_url in self._configured_relays():
+            events = await self._fetch_events_from_relay(
+                relay_url,
+                kinds=[NIP17_GIFT_WRAP_KIND],
+                p_tags=[self._hex_pub],
+                since=self._subscription_since(),
+                limit=100,
+            )
+            for event in events:
+                event_id = event.get("id")
+                if isinstance(event_id, str) and event_id:
+                    events_by_id[event_id] = event
+
+        catchup_events = sorted(
+            events_by_id.values(),
+            key=lambda item: (
+                int(item.get("created_at") or 0),
+                str(item.get("id") or ""),
+            ),
+        )
+        self._emit_audit_event(
+            "nostr.nip17_catchup_scan",
+            relay_count=len(self._configured_relays()),
+            event_count=len(catchup_events),
+            since=self._subscription_since(),
+            min_rumor_created_at=self._startup_catchup_min_created_at,
+        )
+        for event in catchup_events:
+            await self._handle_event("startup-catchup", event)
 
     async def _receive_loop(self) -> None:
         tasks = [asyncio.create_task(self._receive_from_relay(url)) for url in self._configured_relays()]
@@ -575,7 +686,7 @@ class NostrChannel(BaseChannel):
             subscription_id = data[1]
             if subscription_id != self._subscription_id:
                 return
-            if relay_url not in self._live_event_relays:
+            if self._protocol() != "nip17" and relay_url not in self._live_event_relays:
                 return
             event = data[2] if len(data) > 2 else None
             if event:
@@ -654,12 +765,50 @@ class NostrChannel(BaseChannel):
                     "relay_url": relay_url,
                     "created_at": message_created_at,
                     "kind": event_kind,
-                    **self._workspace_metadata(sender_pubkey),
+                    **self._identity_metadata(sender_pubkey),
                 }
             if sender_pubkey is None:
                 return
             if sender_pubkey == self._hex_pub:
                 logger.debug("Ignoring locally wrapped outbound NIP-17 copy")
+                return
+
+            canonical_id = self._canonical_processed_id(event_id, metadata)
+
+            if (
+                self._protocol() == "nip17"
+                and relay_url == "startup-catchup"
+                and self._startup_catchup_min_created_at
+                and message_created_at < self._startup_catchup_min_created_at
+            ):
+                if event_id:
+                    self._seen_event_ids.add(event_id)
+                if canonical_id:
+                    self._mark_processed_canonical_id(
+                        canonical_id,
+                        event_id=event_id or None,
+                        sender_pubkey=sender_pubkey,
+                        created_at=message_created_at,
+                    )
+                self._emit_audit_event(
+                    "nostr.inbound_catchup_old_skipped",
+                    source=relay_url,
+                    event_id=event_id,
+                    canonical_id=canonical_id,
+                    sender_pubkey=sender_pubkey,
+                    created_at=message_created_at,
+                    min_created_at=self._startup_catchup_min_created_at,
+                )
+                return
+
+            if canonical_id and canonical_id in self._processed_canonical_ids:
+                self._emit_audit_event(
+                    "nostr.inbound_duplicate_skipped",
+                    event_id=event_id,
+                    canonical_id=canonical_id,
+                    sender_pubkey=sender_pubkey,
+                    created_at=message_created_at,
+                )
                 return
 
             if event_id:
@@ -675,8 +824,21 @@ class NostrChannel(BaseChannel):
                 content=content or "",
                 metadata=metadata,
             )
+            if canonical_id:
+                self._mark_processed_canonical_id(
+                    canonical_id,
+                    event_id=event_id or None,
+                    sender_pubkey=sender_pubkey,
+                    created_at=message_created_at,
+                )
         except Exception as e:
             logger.error("Error handling event: {}", e)
+
+    def _canonical_processed_id(self, event_id: str, metadata: dict[str, Any]) -> str:
+        if self._protocol() == "nip17":
+            rumor_id = metadata.get("rumor_id")
+            return f"nip17:{rumor_id}" if isinstance(rumor_id, str) and rumor_id else ""
+        return f"nip04:{event_id}" if event_id else ""
 
     def _handle_nip04_event(
         self,
@@ -737,9 +899,13 @@ class NostrChannel(BaseChannel):
             "sender_pubkey": sender_pubkey,
             "relay_url": relay_url,
             "created_at": parsed.rumor.created_at,
+            "rumor_created_at": parsed.rumor.created_at,
+            "seal_created_at": parsed.seal.created_at,
+            "gift_wrap_created_at": parsed.gift_wrap.created_at,
             "kind": parsed.rumor.kind,
+            "seal_kind": parsed.seal.kind,
             "gift_wrap_kind": parsed.gift_wrap.kind,
-            **self._workspace_metadata(sender_pubkey),
+            **self._identity_metadata(sender_pubkey),
         }
         return sender_pubkey, parsed.content, parsed.rumor.created_at or 0, metadata
 
@@ -758,6 +924,14 @@ class NostrChannel(BaseChannel):
     def _is_sender_allowed(self, sender_pubkey: str) -> bool:
         if self.is_allowed(sender_pubkey):
             return True
+        if self._identity_resolver is not None:
+            try:
+                resolution = self._identity_resolver(sender_pubkey)
+            except Exception as exc:
+                logger.warning("Nostr identity routing lookup failed for {}: {}", sender_pubkey[:8], exc)
+                resolution = None
+            if resolution is not None and resolution.target == "identity":
+                return True
         allowed_short = [p[:8] if p != "*" else "*" for p in sorted(self._allowed_pubkeys)]
         logger.warning(
             "Message from unauthorized pubkey {} (allowed={})",
@@ -769,6 +943,7 @@ class NostrChannel(BaseChannel):
     async def start(self) -> None:
         self._running = True
         self._listen_start = int(time.time())
+        self._startup_catchup_min_created_at = self._listen_start
         self._live_event_relays.clear()
 
         if self._protocol() == "nip17":
@@ -779,6 +954,8 @@ class NostrChannel(BaseChannel):
         if not self._ws_connections:
             logger.error("No relay connections established")
             return
+
+        await self._catch_up_nip17_messages()
 
         logger.info("Subscribing to DM events...")
         await self._subscribe_to_dms()
@@ -827,6 +1004,7 @@ class NostrChannel(BaseChannel):
                         sender_private_key_hex=self._hex_priv,
                         recipient_pubkey_hex=recipient_pubkey,
                         content=chunk,
+                        include_sender_copy=False,
                     )
                 else:
                     dm = self.EncryptedDirectMessage()

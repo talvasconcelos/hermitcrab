@@ -7,13 +7,14 @@ import re
 import select
 import shutil
 import signal
-import subprocess
 import sys
 import tempfile
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Literal
 
+import httpx
 import typer
 from prompt_toolkit import PromptSession
 from prompt_toolkit.formatted_text import HTML
@@ -27,7 +28,14 @@ from rich.table import Table
 from rich.text import Text
 
 from hermitcrab import __logo__, __version__
-from hermitcrab.config.schema import Config, ModelAliasConfig
+from hermitcrab.config.schema import (
+    Config,
+    IdentityConfig,
+    ModelAliasConfig,
+    NamedModelConfig,
+    generate_nostr_keypair,
+    normalize_nostr_pubkey,
+)
 
 app = typer.Typer(
     name="hermitcrab",
@@ -48,33 +56,176 @@ _ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
 
 
 @dataclass(frozen=True)
-class GatewayWorkspaceRouteDecision:
-    """Deterministic inbound gateway workspace routing decision."""
+class GatewayIdentityRouteDecision:
+    """Deterministic inbound gateway identity routing decision."""
 
-    target: Literal["admin", "workspace", "denied"]
+    target: Literal["identity", "denied"]
     reason: str
-    workspace_name: str | None = None
+    identity_name: str | None = None
 
 
 @dataclass
-class GatewayWorkspaceRuntimeState:
-    """Stateful runtime helpers for admin + named workspace agents in gateway mode."""
+class GatewayIdentityRuntimeState:
+    """Stateful runtime helpers for owner + configured identity agents in gateway mode."""
 
     config: Config
     bus: Any
+    channels: Any
     create_provider: Callable[[], Any]
+    cron_service_factory: Callable[..., Any]
+    heartbeat_service_factory: Callable[..., Any]
     on_reminder_notify: Callable[[Any, str], Any]
+    heartbeat_interval_s: int
+    heartbeat_enabled: bool
     reminder_interval_s: int
     reminder_service_factory: Callable[..., Any]
     agents: dict[str, Any]
+    cron_services: dict[str, Any]
+    heartbeat_services: dict[str, Any]
     reminder_services: dict[str, Any]
+    cron_services_running: bool = False
+    heartbeat_services_running: bool = False
     reminder_services_running: bool = False
 
-    def workspace_agent_key(self, workspace_name: str | None) -> str:
-        return workspace_name or "__admin__"
+    def identity_agent_key(self, identity_name: str) -> str:
+        identity = self.config.identities.registry.get(identity_name)
+        stable_id = identity.nostr_public_key if identity else identity_name
+        return f"identity:{stable_id}"
 
-    async def ensure_reminder_service(self, workspace_key: str, loop: Any) -> None:
-        if loop.reminders is None or workspace_key in self.reminder_services:
+    def find_cron_conflicts(
+        self,
+        schedule: Any,
+        *,
+        now_ms: int,
+        exclude_key: str,
+    ) -> list[Any]:
+        conflicts: list[Any] = []
+        for key, service in self.cron_services.items():
+            if key == exclude_key:
+                continue
+            conflicts.extend(service.find_local_schedule_conflicts(schedule, now_ms=now_ms))
+        return conflicts
+
+    def build_cron_service(self, identity_root: Path, identity_name: str, key: str) -> Any:
+        return self.cron_service_factory(
+            identity_root=identity_root,
+            identity_name=identity_name,
+            conflict_finder=lambda schedule, now_ms: self.find_cron_conflicts(
+                schedule,
+                now_ms=now_ms,
+                exclude_key=key,
+            ),
+        )
+
+    def pick_heartbeat_target(self, loop: Any) -> tuple[str, str]:
+        enabled = set(self.channels.enabled_channels)
+        for item in loop.sessions.list_sessions():
+            key = item.get("key") or ""
+            if ":" not in key:
+                continue
+            channel, chat_id = key.split(":", 1)
+            if channel in {"cli", "system"}:
+                continue
+            if channel in enabled and chat_id:
+                return channel, chat_id
+        return "cli", "direct"
+
+    def attach_cron_callback(self, cron: Any, loop: Any) -> None:
+        async def on_cron_job(job: Any) -> str | None:
+            response = await loop.process_direct(
+                job.payload.message,
+                session_key=f"cron:{job.id}",
+                channel=job.payload.channel or "cli",
+                chat_id=job.payload.to or "direct",
+            )
+            if job.payload.deliver and job.payload.to:
+                from hermitcrab.bus.events import OutboundMessage
+
+                await self.bus.publish_outbound(
+                    OutboundMessage(
+                        channel=job.payload.channel or "cli",
+                        chat_id=job.payload.to,
+                        content=response or "",
+                    )
+                )
+            return response
+
+        cron.on_job = on_cron_job
+
+    def build_heartbeat_service(self, loop: Any) -> Any:
+        async def on_heartbeat_execute(tasks: str) -> str:
+            channel, chat_id = self.pick_heartbeat_target(loop)
+
+            async def _silent(*_args, **_kwargs):
+                pass
+
+            return await loop.process_direct(
+                tasks,
+                session_key="heartbeat",
+                channel=channel,
+                chat_id=chat_id,
+                on_progress=_silent,
+            )
+
+        async def on_heartbeat_notify(response: str) -> None:
+            from hermitcrab.bus.events import OutboundMessage
+
+            channel, chat_id = self.pick_heartbeat_target(loop)
+            if channel == "cli":
+                return
+            await self.bus.publish_outbound(
+                OutboundMessage(channel=channel, chat_id=chat_id, content=response)
+            )
+
+        return self.heartbeat_service_factory(
+            workspace=loop.identity_root,
+            provider=loop.provider,
+            model=loop.model,
+            on_execute=on_heartbeat_execute,
+            on_notify=on_heartbeat_notify,
+            interval_s=self.heartbeat_interval_s,
+            enabled=self.heartbeat_enabled,
+        )
+
+    async def attach_agent_services(self, key: str, loop: Any, cron: Any) -> None:
+        self.agents[key] = loop
+        self.cron_services[key] = cron
+        self.attach_cron_callback(cron, loop)
+        self.heartbeat_services[key] = self.build_heartbeat_service(loop)
+        await self.ensure_reminder_service(key, loop)
+        if self.cron_services_running:
+            await cron.start()
+        if self.heartbeat_services_running:
+            await self.heartbeat_services[key].start()
+
+    async def attach_configured_identity_agents(self) -> None:
+        from hermitcrab.agent.loop import AgentLoop
+        from hermitcrab.session.manager import SessionManager
+
+        for identity_name, identity in self.config.identities.registry.items():
+            if identity_name == self.config.owner_identity_name or not identity.active:
+                continue
+            key = self.identity_agent_key(identity_name)
+            if key in self.agents:
+                continue
+            identity_root = self.config.get_identity_path(identity_name)
+            cron = self.build_cron_service(identity_root, identity_name, key)
+            loop = AgentLoop(
+                bus=self.bus,
+                **_build_agent_loop_kwargs(
+                    self.config,
+                    self.create_provider(),
+                    workspace=identity_root,
+                    identity_name=identity_name,
+                    identity_root=identity_root,
+                    cron_service=cron,
+                    session_manager=SessionManager(identity_root),
+                ),
+            )
+            await self.attach_agent_services(key, loop, cron)
+
+    async def ensure_reminder_service(self, identity_key: str, loop: Any) -> None:
+        if loop.reminders is None or identity_key in self.reminder_services:
             return
         service = self.reminder_service_factory(
             loop.reminders,
@@ -82,22 +233,22 @@ class GatewayWorkspaceRuntimeState:
             interval_s=self.reminder_interval_s,
             enabled=True,
         )
-        self.reminder_services[workspace_key] = service
+        self.reminder_services[identity_key] = service
         if self.reminder_services_running:
             await service.start()
 
-    async def get_or_create_agent(self, workspace_name: str | None) -> Any:
-        key = self.workspace_agent_key(workspace_name)
+    async def get_or_create_agent(self, identity_name: str) -> Any:
+        key = self.identity_agent_key(identity_name)
         existing = self.agents.get(key)
         if existing is not None:
             return existing
 
-        assert workspace_name is not None
-        ready, reason = _workspace_ready_for_routing(self.config, workspace_name)
+        ready, reason = _identity_ready_for_routing(self.config, identity_name)
         if not ready:
-            raise ValueError(f"workspace routing blocked: {reason}")
+            raise ValueError(f"identity routing blocked: {reason}")
 
-        workspace_path = self.config.get_workspace_path(workspace_name)
+        identity_root = self.config.get_identity_path(identity_name)
+        cron = self.build_cron_service(identity_root, identity_name, key)
         from hermitcrab.agent.loop import AgentLoop
         from hermitcrab.session.manager import SessionManager
 
@@ -106,16 +257,18 @@ class GatewayWorkspaceRuntimeState:
             **_build_agent_loop_kwargs(
                 self.config,
                 self.create_provider(),
-                workspace=workspace_path,
-                session_manager=SessionManager(workspace_path),
+                workspace=identity_root,
+                identity_name=identity_name,
+                identity_root=identity_root,
+                cron_service=cron,
+                session_manager=SessionManager(identity_root),
             ),
         )
-        self.agents[key] = loop
-        await self.ensure_reminder_service(key, loop)
+        await self.attach_agent_services(key, loop, cron)
         return loop
 
     async def process_expired_sessions_all(self) -> int:
-        """Process session inactivity across every active workspace agent."""
+        """Process session inactivity across every active identity agent."""
         from loguru import logger
 
         expired = 0
@@ -123,7 +276,7 @@ class GatewayWorkspaceRuntimeState:
             try:
                 expired += await loop.process_expired_sessions()
             except Exception as e:
-                logger.error("Failed processing expired sessions for workspace agent: {}", e)
+                logger.error("Failed processing expired sessions for identity agent: {}", e)
         return expired
 
     async def start_reminder_services(self) -> None:
@@ -131,9 +284,29 @@ class GatewayWorkspaceRuntimeState:
         for service in self.reminder_services.values():
             await service.start()
 
+    async def start_cron_services(self) -> None:
+        self.cron_services_running = True
+        for service in self.cron_services.values():
+            await service.start()
+
+    async def start_heartbeat_services(self) -> None:
+        self.heartbeat_services_running = True
+        for service in self.heartbeat_services.values():
+            await service.start()
+
     def stop_reminder_services(self) -> None:
         self.reminder_services_running = False
         for service in self.reminder_services.values():
+            service.stop()
+
+    def stop_cron_services(self) -> None:
+        self.cron_services_running = False
+        for service in self.cron_services.values():
+            service.stop()
+
+    def stop_heartbeat_services(self) -> None:
+        self.heartbeat_services_running = False
+        for service in self.heartbeat_services.values():
             service.stop()
 
     async def close_agents(self) -> None:
@@ -145,52 +318,54 @@ class GatewayWorkspaceRuntimeState:
             loop.stop()
 
 
-def _multi_workspace_routing_active(config: Config) -> bool:
-    """Enable multi-workspace routing only when registry and bindings are both configured."""
-    return bool(config.workspaces.registry) and bool(config.channels.nostr.workspace_bindings)
+def _identity_routing_active(config: Config) -> bool:
+    """Return whether explicit Nostr identity routing bindings are configured."""
+    return bool(config.channels.nostr.identity_bindings)
 
 
-def _resolve_gateway_workspace_route(
+def _resolve_gateway_identity_route(
     msg: Any,
     *,
-    multi_workspace_active: bool,
-) -> GatewayWorkspaceRouteDecision:
+    owner_identity_name: str,
+) -> GatewayIdentityRouteDecision:
     """Resolve gateway routing action for an inbound message."""
     if msg.channel != "nostr":
-        return GatewayWorkspaceRouteDecision("admin", "non_nostr_channel")
+        identity_name = str(getattr(msg, "metadata", {}).get("identity_name") or owner_identity_name)
+        return GatewayIdentityRouteDecision("identity", "non_nostr_owner_default", identity_name)
 
     metadata = msg.metadata or {}
-    target = metadata.get("workspace_target")
+    target = metadata.get("identity_target")
     if target == "denied":
-        return GatewayWorkspaceRouteDecision("denied", "channel_metadata_denied")
-    if target != "workspace":
-        return GatewayWorkspaceRouteDecision("admin", "admin_default")
-    if not multi_workspace_active:
-        return GatewayWorkspaceRouteDecision("denied", "workspace_mode_disabled")
+        return GatewayIdentityRouteDecision("denied", "channel_metadata_denied")
+    if target != "identity":
+        return GatewayIdentityRouteDecision("denied", "missing_identity_target")
 
-    workspace_name = metadata.get("workspace_name")
-    if isinstance(workspace_name, str) and workspace_name:
-        return GatewayWorkspaceRouteDecision("workspace", "workspace_binding", workspace_name)
-    return GatewayWorkspaceRouteDecision("denied", "missing_workspace_name")
+    identity_name = metadata.get("identity_name")
+    if isinstance(identity_name, str) and identity_name:
+        return GatewayIdentityRouteDecision("identity", "identity_binding", identity_name)
+    return GatewayIdentityRouteDecision("denied", "missing_identity_name")
 
 
-def _workspace_ready_for_routing(config: Config, workspace_name: str) -> tuple[bool, str]:
-    """Return whether a configured workspace is safe/ready for gateway routing."""
-    if workspace_name not in config.workspaces.registry:
-        return False, "workspace_not_configured"
-    workspace_path = config.get_workspace_path(workspace_name)
-    if not workspace_path.exists():
-        return False, "workspace_missing"
-    if not (workspace_path / "AGENTS.md").exists():
-        return False, "workspace_not_bootstrapped"
-    return True, "workspace_ready"
+def _identity_ready_for_routing(config: Config, identity_name: str) -> tuple[bool, str]:
+    """Return whether a configured identity is safe/ready for gateway routing."""
+    identity = config.identities.registry.get(identity_name)
+    if identity is None:
+        return False, "identity_not_configured"
+    if not identity.active:
+        return False, "identity_inactive"
+    identity_path = config.get_identity_path(identity_name)
+    if not identity_path.exists():
+        return False, "identity_missing"
+    if not (identity_path / "IDENTITY.md").exists():
+        return False, "identity_not_bootstrapped"
+    return True, "identity_ready"
 
 
 def _print_gateway_runtime_summary(
     *,
     channels: Any,
-    multi_workspace_active: bool,
-    cron_status: dict[str, Any],
+    identity_routing_active: bool,
+    cron_statuses: dict[str, dict[str, Any]],
     heartbeat_interval_s: int,
     reminders_interval_s: int,
 ) -> None:
@@ -199,108 +374,132 @@ def _print_gateway_runtime_summary(
         console.print(f"[green]✓[/green] Channels enabled: {', '.join(channels.enabled_channels)}")
     else:
         console.print("[yellow]Warning: No channels enabled[/yellow]")
-    if multi_workspace_active:
-        console.print("[green]✓[/green] Multi-workspace routing: active (Nostr bindings)")
-        console.print("[dim]Unresolved/invalid workspace routes are denied (no admin fallback)[/dim]")
+    if identity_routing_active:
+        console.print("[green]✓[/green] Identity routing: active (Nostr bindings)")
+        console.print("[dim]Unresolved/invalid identity routes are denied[/dim]")
     else:
-        console.print("[dim]Multi-workspace routing: inactive[/dim]")
+        console.print("[dim]Identity routing: owner fallback only[/dim]")
 
-    if cron_status.get("jobs", 0) > 0:
-        console.print(f"[green]✓[/green] Cron: {cron_status['jobs']} scheduled jobs")
+    cron_jobs = sum(status.get("jobs", 0) for status in cron_statuses.values())
+    if cron_jobs > 0:
+        console.print(f"[green]✓[/green] Cron: {cron_jobs} scheduled job(s)")
 
     console.print(f"[green]✓[/green] Heartbeat: every {heartbeat_interval_s}s")
     console.print(f"[green]✓[/green] Reminders: every {reminders_interval_s}s")
-    console.print("[dim]Cron/heartbeat execution stays in admin workspace[/dim]")
+    console.print("[dim]Scheduler: gateway-owned, identity-scoped cron/heartbeat/reminders[/dim]")
 
 
 async def _run_gateway_inbound_router(
     *,
     bus: Any,
-    multi_workspace_active: bool,
-    admin_agent: Any,
-    get_or_create_agent: Callable[[str | None], Any],
-    workspace_agent_key: Callable[[str | None], str],
+    owner_agent: Any,
+    get_or_create_agent: Callable[[str], Any],
+    identity_agent_key: Callable[[str], str],
 ) -> None:
-    """Route inbound gateway messages to admin or workspace-specific agent loops."""
+    """Route inbound gateway messages to identity-specific agent loops."""
     from loguru import logger
 
-    while True:
-        try:
-            msg = await asyncio.wait_for(bus.consume_inbound(), timeout=1.0)
-            route = _resolve_gateway_workspace_route(
-                msg,
-                multi_workspace_active=multi_workspace_active,
-            )
-            logger.debug(
-                "Gateway inbound route: channel={} chat_id={} route_target={} route_reason={} workspace_agent={}",
-                msg.channel,
-                msg.chat_id,
-                route.target,
-                route.reason,
-                workspace_agent_key(route.workspace_name),
-            )
-            if route.target == "denied":
-                admin_agent.audit_event(
-                    "gateway.workspace_route_denied",
-                    session_key=msg.session_key,
-                    msg=msg,
-                    workspace_agent="__admin__",
-                    route_reason=route.reason,
-                )
-                continue
-            try:
-                agent_for_msg = await get_or_create_agent(route.workspace_name)
-            except Exception as e:
-                logger.warning("Workspace route failed; denying message: {}", e)
-                admin_agent.audit_event(
-                    "gateway.workspace_route_denied",
-                    session_key=msg.session_key,
-                    msg=msg,
-                    workspace_agent="__admin__",
-                    route_reason=f"workspace_unavailable:{route.workspace_name}",
-                )
-                continue
-            agent_for_msg.audit_event(
-                "gateway.workspace_route",
+    pending_tasks: set[asyncio.Task[None]] = set()
+
+    async def handle_routed_message(msg: Any) -> None:
+        route = _resolve_gateway_identity_route(
+            msg,
+            owner_identity_name=owner_agent.identity_name,
+        )
+        logger.debug(
+            "Gateway inbound route: channel={} chat_id={} route_target={} route_reason={} identity_agent={}",
+            msg.channel,
+            msg.chat_id,
+            route.target,
+            route.reason,
+            identity_agent_key(route.identity_name or owner_agent.identity_name),
+        )
+        if route.target == "denied":
+            owner_agent.audit_event(
+                "gateway.identity_route_denied",
                 session_key=msg.session_key,
                 msg=msg,
-                workspace_agent=workspace_agent_key(route.workspace_name),
+                identity_agent=identity_agent_key(owner_agent.identity_name),
                 route_reason=route.reason,
             )
-            response = await agent_for_msg.handle_inbound(msg)
-            if response is not None:
-                await bus.publish_outbound(response)
-        except asyncio.TimeoutError:
-            continue
+            return
+        try:
+            agent_for_msg = await get_or_create_agent(route.identity_name or owner_agent.identity_name)
         except Exception as e:
-            logger.error("Gateway inbound router loop error: {}", e)
-            continue
+            logger.warning("Identity route failed; denying message: {}", e)
+            owner_agent.audit_event(
+                "gateway.identity_route_denied",
+                session_key=msg.session_key,
+                msg=msg,
+                identity_agent=identity_agent_key(owner_agent.identity_name),
+                route_reason=f"identity_unavailable:{route.identity_name}",
+            )
+            return
+        agent_for_msg.audit_event(
+            "gateway.identity_route",
+            session_key=msg.session_key,
+            msg=msg,
+            identity_agent=identity_agent_key(agent_for_msg.identity_name),
+            route_reason=route.reason,
+        )
+        response = await agent_for_msg.handle_inbound(msg)
+        if response is not None:
+            await bus.publish_outbound(response)
+
+    def track_task(task: asyncio.Task[None]) -> None:
+        pending_tasks.add(task)
+
+        def on_done(done_task: asyncio.Task[None]) -> None:
+            pending_tasks.discard(done_task)
+            if done_task.cancelled():
+                return
+            exc = done_task.exception()
+            if exc is not None:
+                logger.error("Gateway inbound routed task error: {}", exc)
+
+        task.add_done_callback(on_done)
+
+    try:
+        while True:
+            try:
+                msg = await asyncio.wait_for(bus.consume_inbound(), timeout=1.0)
+                task = asyncio.create_task(handle_routed_message(msg))
+                track_task(task)
+            except asyncio.TimeoutError:
+                continue
+            except Exception as e:
+                logger.error("Gateway inbound router loop error: {}", e)
+                continue
+    finally:
+        for task in pending_tasks:
+            task.cancel()
+        if pending_tasks:
+            await asyncio.gather(*pending_tasks, return_exceptions=True)
 
 
 async def _shutdown_gateway_runtime(
     *,
     timeout_monitor: Any,
-    heartbeat: Any,
-    workspace_state: GatewayWorkspaceRuntimeState,
-    cron: Any,
+    identity_state: GatewayIdentityRuntimeState,
     channels: Any,
 ) -> None:
     """Shutdown gateway runtime components in a stable order."""
     timeout_monitor.stop()
-    heartbeat.stop()
-    workspace_state.stop_reminder_services()
-    cron.stop()
-    await workspace_state.close_agents()
-    workspace_state.stop_agents()
+    identity_state.stop_heartbeat_services()
+    identity_state.stop_reminder_services()
+    identity_state.stop_cron_services()
+    await identity_state.close_agents()
+    identity_state.stop_agents()
     await channels.stop_all()
 
 
-def _build_job_models_from_config(config: Config) -> dict | None:
+def _build_job_models_from_config(config: Config, identity_name: str | None = None) -> dict | None:
     """
     Build job_models dict from config for AgentLoop initialization.
 
     Args:
         config: Root configuration object.
+        identity_name: Active identity whose model overrides should apply.
 
     Returns:
         Dict mapping JobClass to model string (or None to skip).
@@ -310,6 +509,9 @@ def _build_job_models_from_config(config: Config) -> dict | None:
 
     job_models_config = config.agents.defaults.job_models
 
+    identity = config.identities.registry.get(identity_name or config.owner_identity_name)
+    identity_models = identity.models if identity is not None else {}
+
     # Check if any job models are actually configured
     has_config = (
         job_models_config.interactive_response
@@ -318,14 +520,15 @@ def _build_job_models_from_config(config: Config) -> dict | None:
         or job_models_config.reflection is not None
         or job_models_config.summarisation is not None
         or job_models_config.subagent is not None
+        or bool(identity_models)
+        or bool(config.identities.default_identity_model)
     )
 
     if not has_config:
         return None  # Use AgentLoop defaults
 
     primary_model = config.agents.defaults.model
-
-    return {
+    job_models = {
         JobClass.INTERACTIVE_RESPONSE: job_models_config.get_model(
             "interactive_response", primary_model
         ),
@@ -335,6 +538,24 @@ def _build_job_models_from_config(config: Config) -> dict | None:
         JobClass.SUMMARISATION: job_models_config.get_model("summarisation", primary_model),
         JobClass.SUBAGENT: job_models_config.get_model("subagent", primary_model),
     }
+    if config.identities.default_identity_model and not identity_models.get("interactiveResponse"):
+        job_models[JobClass.INTERACTIVE_RESPONSE] = config.identities.default_identity_model
+
+    identity_job_keys = {
+        "interactiveResponse": JobClass.INTERACTIVE_RESPONSE,
+        "interactive_response": JobClass.INTERACTIVE_RESPONSE,
+        "journalSynthesis": JobClass.JOURNAL_SYNTHESIS,
+        "journal_synthesis": JobClass.JOURNAL_SYNTHESIS,
+        "distillation": JobClass.DISTILLATION,
+        "reflection": JobClass.REFLECTION,
+        "summarisation": JobClass.SUMMARISATION,
+        "subagent": JobClass.SUBAGENT,
+    }
+    for key, value in identity_models.items():
+        job_class = identity_job_keys.get(key)
+        if job_class is not None and isinstance(value, str) and value.strip():
+            job_models[job_class] = value.strip()
+    return job_models
 
 
 def _build_runtime_model_aliases(config: Config) -> dict[str, str | ModelAliasConfig]:
@@ -411,14 +632,20 @@ def _build_agent_loop_kwargs(
     provider: Any,
     *,
     workspace: Path | None = None,
+    identity_name: str | None = None,
+    identity_root: Path | None = None,
     cron_service: Any | None = None,
     session_manager: Any | None = None,
 ) -> dict[str, Any]:
     """Build the shared AgentLoop configuration used by CLI entrypoints."""
-    target_workspace = workspace or config.workspace_path
+    target_identity_name = identity_name or config.owner_identity_name
+    target_identity_root = identity_root or workspace or config.workspace_path
     return {
         "provider": provider,
-        "workspace": target_workspace,
+        "workspace": target_identity_root,
+        "identity_name": target_identity_name,
+        "identity_root": target_identity_root,
+        "system_root": config.system_root_path,
         "model": config.agents.defaults.model,
         "temperature": config.agents.defaults.temperature,
         "max_tokens": config.agents.defaults.max_tokens,
@@ -427,11 +654,11 @@ def _build_agent_loop_kwargs(
         "brave_api_key": config.tools.web.search.api_key or None,
         "exec_config": config.tools.exec,
         "cron_service": cron_service,
-        "restrict_to_workspace": config.tools.restrict_to_workspace,
+        "restrict_to_workspace": True,
         "session_manager": session_manager,
         "mcp_servers": config.tools.mcp_servers,
         "channels_config": config.channels,
-        "job_models": _build_job_models_from_config(config),
+        "job_models": _build_job_models_from_config(config, target_identity_name),
         "distillation_enabled": config.agents.defaults.enable_distillation,
         "model_aliases": _build_runtime_model_aliases(config),
         "named_models": config.models,
@@ -706,7 +933,6 @@ def onboard():
     """Initialize hermitcrab configuration and workspace."""
     from hermitcrab.config.loader import get_config_path, load_config, save_config
     from hermitcrab.config.schema import Config
-    from hermitcrab.utils.helpers import get_workspace_path
 
     config_path = get_config_path()
 
@@ -727,93 +953,180 @@ def onboard():
                 f"[green]✓[/green] Config refreshed at {config_path} (existing values preserved)"
             )
     else:
-        save_config(Config())
+        config = Config()
+        save_config(config)
         console.print(f"[green]✓[/green] Created config at {config_path}")
 
-    bootstrap_workspace(get_workspace_path(), announce=console.print)
+    bootstrap_standard_layout(config, announce=console.print)
 
     console.print(f"\n{__logo__} hermitcrab is ready!")
     for line in _build_onboard_next_steps():
         console.print(line)
 
 
-def bootstrap_workspace(workspace: Path, announce: Callable[[str], None] | None = None) -> None:
-    """Create or refresh one workspace root with default structure."""
-    if not workspace.exists():
-        workspace.mkdir(parents=True, exist_ok=True)
-        if announce is not None:
-            announce(f"[green]✓[/green] Created workspace at {workspace}")
+@app.command()
+def setup(
+    yes: bool = typer.Option(False, "--yes", "-y", help="Run non-interactively with safe defaults"),
+    provider: str | None = typer.Option(None, "--provider", help="Provider to configure, e.g. openrouter or ollama"),
+    model: str | None = typer.Option(None, "--model", help="Default model id or existing named model"),
+    model_name: str = typer.Option("main", "--model-name", help="Name to save the default model under"),
+    api_key_env: str | None = typer.Option(
+        None, "--api-key-env", help="Read provider API key from this environment variable"
+    ),
+    owner_label: str | None = typer.Option(None, "--owner-label", help="Display label for the owner identity"),
+):
+    """Guided admin setup for config, owner identity, and default model."""
+    from hermitcrab.config.loader import get_config_path, load_config, save_config
 
-    _create_workspace_templates(workspace, announce=announce)
+    config_path = get_config_path()
+    config = load_config() if config_path.exists() else Config(root=str(config_path.parent))
+
+    if not yes:
+        console.print(f"{__logo__} hermitcrab setup\n")
+        console.print("This configures the admin CLI and the owner identity.")
+        console.print(
+            "Other users can be added later and should normally talk through channels like Nostr DMs.\n"
+        )
+
+        if provider is None:
+            provider = typer.prompt(
+                "Provider (ollama/openrouter/custom, blank to keep current)", default=""
+            ) or None
+        if model is None:
+            model = typer.prompt("Default model id or named model (blank to keep current)", default="") or None
+        if owner_label is None:
+            owner_label = typer.prompt("Owner display label (blank to keep current)", default="") or None
+
+    if provider:
+        _configure_provider(config, provider, api_key=_api_key_from_env(api_key_env))
+
+    if model:
+        if model in config.models:
+            config.agents.defaults.model = model
+        else:
+            provider_options = _provider_options(provider)
+            config.models[model_name] = NamedModelConfig(model=model, provider_options=provider_options)
+            config.agents.defaults.model = model_name
+
+    owner = config.identities.registry[config.owner_identity_name]
+    if owner_label:
+        owner.label = owner_label
+
+    validated = Config.model_validate(config.model_dump(by_alias=True))
+    save_config(validated)
+    bootstrap_standard_layout(validated, announce=console.print)
+
+    console.print(f"[green]✓[/green] Setup saved at {config_path}")
+    console.print(f"Owner identity: [cyan]{validated.owner_identity_name}[/cyan]")
+    console.print(f"Default model: [cyan]{validated.agents.defaults.model}[/cyan]")
+    console.print("\nNext steps:")
+    console.print("  1. Run [cyan]hermitcrab doctor[/cyan]")
+    console.print('  2. Try [cyan]hermitcrab agent -m "Hello"[/cyan]')
+    console.print("  3. Add users when needed: [cyan]hermitcrab user add alice --label Alice[/cyan]")
 
 
-def _create_workspace_templates(
-    workspace: Path,
+def bootstrap_standard_layout(config: Config, announce: Callable[[str], None] | None = None) -> None:
+    """Create or refresh the system and owner identity roots."""
+    system_root = config.system_root_path
+    owner_root = config.owner_identity_root_path
+
+    _ensure_root(system_root, "system root", announce=announce)
+    _create_template_files(system_root, ["AGENTS.md", "TOOLS.md"], announce=announce)
+    (system_root / "logs").mkdir(exist_ok=True)
+    (system_root / "indexes").mkdir(exist_ok=True)
+    (system_root / "history").mkdir(exist_ok=True)
+
+    _ensure_root(owner_root, "owner identity root", announce=announce)
+    _create_template_files(
+        owner_root,
+        ["IDENTITY.md", "SOUL.md", "USER.md", "HEARTBEAT.md", "ONBOARDING_MODE.md"],
+        announce=announce,
+    )
+    _create_identity_directories(owner_root, announce=announce)
+
+
+def _ensure_root(
+    root: Path,
+    label: str,
     announce: Callable[[str], None] | None = None,
 ) -> None:
-    """Create default workspace template files from bundled templates."""
+    """Create one root directory if missing."""
+    if not root.exists():
+        root.mkdir(parents=True, exist_ok=True)
+        if announce is not None:
+            announce(f"[green]✓[/green] Created {label} at {root}")
+
+
+def _create_template_files(
+    root: Path,
+    names: list[str],
+    announce: Callable[[str], None] | None = None,
+) -> None:
+    """Create selected bundled template files in a root."""
     from importlib.resources import files as pkg_files
 
     templates_dir = pkg_files("hermitcrab") / "templates"
-
-    for item in templates_dir.iterdir():
-        if not item.name.endswith(".md"):
-            continue
-        dest = workspace / item.name
+    for name in names:
+        dest = root / name
         if not dest.exists():
-            _atomic_write_text(dest, item.read_text(encoding="utf-8"))
+            _atomic_write_text(dest, (templates_dir / name).read_text(encoding="utf-8"))
             if announce is not None:
-                announce(f"  [dim]Created {item.name}[/dim]")
+                announce(f"  [dim]Created {dest.name}[/dim]")
+
+
+def _create_identity_directories(
+    identity_root: Path,
+    announce: Callable[[str], None] | None = None,
+) -> None:
+    """Create per-identity runtime directories."""
+    for dirname in ["cron", "journal", "projects", "reports", "sessions", "skills"]:
+        (identity_root / dirname).mkdir(exist_ok=True)
+        if announce is not None:
+            announce(f"  [dim]Created {dirname}/[/dim]")
 
     # Create category-based memory directories
-    memory_dir = workspace / "memory"
+    memory_dir = identity_root / "memory"
     memory_dir.mkdir(exist_ok=True)
-
     for category in ["facts", "decisions", "goals", "tasks", "reflections"]:
-        category_dir = memory_dir / category
-        category_dir.mkdir(exist_ok=True)
+        (memory_dir / category).mkdir(exist_ok=True)
         if announce is not None:
             announce(f"  [dim]Created memory/{category}/[/dim]")
 
     # Create knowledge base directories (reference library, not memory)
-    knowledge_dir = workspace / "knowledge"
+    knowledge_dir = identity_root / "knowledge"
     knowledge_dir.mkdir(exist_ok=True)
-
     for category in ["articles", "books", "docs", "notes"]:
-        category_dir = knowledge_dir / category
-        category_dir.mkdir(exist_ok=True)
+        (knowledge_dir / category).mkdir(exist_ok=True)
         if announce is not None:
             announce(f"  [dim]Created knowledge/{category}/[/dim]")
 
-    (workspace / "lists").mkdir(exist_ok=True)
+    (identity_root / "lists").mkdir(exist_ok=True)
     if announce is not None:
         announce("  [dim]Created lists/[/dim]")
 
-    people_dir = workspace / "people"
+    people_dir = identity_root / "people"
     people_dir.mkdir(exist_ok=True)
     (people_dir / "profiles").mkdir(exist_ok=True)
     (people_dir / "interactions").mkdir(exist_ok=True)
     if announce is not None:
         announce("  [dim]Created people/profiles/ and people/interactions/[/dim]")
 
-    (workspace / "reminders").mkdir(exist_ok=True)
+    (identity_root / "reminders").mkdir(exist_ok=True)
     if announce is not None:
         announce("  [dim]Created reminders/[/dim]")
 
-    scratchpads_dir = workspace / "scratchpads"
+    scratchpads_dir = identity_root / "scratchpads"
     scratchpads_dir.mkdir(exist_ok=True)
     (scratchpads_dir / "archive").mkdir(exist_ok=True)
     if announce is not None:
         announce("  [dim]Created scratchpads/ and scratchpads/archive/[/dim]")
 
-    (workspace / "skills").mkdir(exist_ok=True)
-
-    onboarding_flag = workspace / ".onboarding_mode"
+    onboarding_flag = identity_root / ".onboarding_mode"
     if not onboarding_flag.exists():
         _atomic_write_text(
             onboarding_flag,
             (
-                "Onboarding mode is enabled for this workspace.\n"
+                "Onboarding mode is enabled for this identity.\n"
                 "Delete this file to disable onboarding prompt injection.\n"
             ),
         )
@@ -829,7 +1142,7 @@ def _build_onboard_next_steps() -> list[str]:
         lines.extend(
             [
                 "  1. Recommended local setup detected: [cyan]ollama[/cyan] is installed",
-                "     Start it with [cyan]ollama serve[/cyan] and pull a model like [cyan]ollama pull qwen3.5:4b[/cyan]",
+                "     Start it with [cyan]ollama serve[/cyan] and pull a model like [cyan]ollama pull llama3.2:3b[/cyan]",
                 "  2. Review [cyan]~/.hermitcrab/config.json[/cyan] and point your main model at Ollama or your preferred provider",
                 "  3. Run a quick readiness check: [cyan]hermitcrab doctor[/cyan]",
                 '  4. Start chatting: [cyan]hermitcrab agent[/cyan] or [cyan]hermitcrab agent -m "Hello!"[/cyan]',
@@ -842,7 +1155,7 @@ def _build_onboard_next_steps() -> list[str]:
             "  1. Choose a provider in [cyan]~/.hermitcrab/config.json[/cyan]",
             "     - Local: install [cyan]Ollama[/cyan] from https://ollama.com and use its local OpenAI-compatible endpoint",
             "     - Cloud: add an API key such as OpenRouter from https://openrouter.ai/keys",
-            "     - OAuth: run [cyan]hermitcrab provider login openai-oauth[/cyan] or [cyan]hermitcrab provider login qwen-oauth[/cyan]",
+            "     - OAuth: run [cyan]hermitcrab provider login openai-codex[/cyan]",
             "  2. Run a quick readiness check: [cyan]hermitcrab doctor[/cyan]",
             '  3. Start chatting: [cyan]hermitcrab agent[/cyan] or [cyan]hermitcrab agent -m "Hello!"[/cyan]',
         ]
@@ -863,11 +1176,13 @@ def _build_interactive_intro() -> str:
 
 def _make_provider(config: Config):
     """Create the appropriate LLM provider from config."""
+    from hermitcrab.providers.attribution_headers import merge_provider_headers
     from hermitcrab.providers.custom_provider import CustomProvider
     from hermitcrab.providers.litellm_provider import LiteLLMProvider
     from hermitcrab.providers.ollama_provider import OllamaProvider
     from hermitcrab.providers.openai_codex_provider import OpenAICodexProvider
-    from hermitcrab.providers.qwen_oauth_provider import QwenOAuthProvider
+    from hermitcrab.providers.registry import normalize_provider_name
+    from hermitcrab.providers.routing_provider import RoutingProvider
 
     model = config.agents.defaults.model
     resolved_model = config.resolve_model_config(model)
@@ -913,23 +1228,23 @@ def _make_provider(config: Config):
         return any(config.get_provider_name(candidate) == "ollama" for candidate in candidates)
 
     # OpenAI Codex (OAuth)
-    if provider_name in {"openai_codex", "openai_oauth"} or model.startswith(
-        ("openai-codex/", "openai-oauth/")
+    if provider_name == "openai_codex" or (
+        "/" in model and normalize_provider_name(model.split("/", 1)[0]) == "openai_codex"
     ):
         return OpenAICodexProvider(default_model=resolved_model.model or model)
 
-    if provider_name == "qwen_oauth" or model.startswith(("qwen-oauth/", "qwen-portal/")):
-        return QwenOAuthProvider(
-            default_model=resolved_model.model or model,
-            api_base=config.get_api_base(model),
-        )
-
     # Custom: direct OpenAI-compatible endpoint, bypasses LiteLLM
     if provider_name == "custom":
+        api_base = config.get_api_base(model) or "http://localhost:8000/v1"
         return CustomProvider(
             api_key=p.api_key if p else "no-key",
-            api_base=config.get_api_base(model) or "http://localhost:8000/v1",
+            api_base=api_base,
             default_model=resolved_model.model or model,
+            extra_headers=merge_provider_headers(
+                provider_name=provider_name,
+                api_base=api_base,
+                configured_headers=p.extra_headers if p else None,
+            ),
         )
 
     from hermitcrab.providers.registry import find_by_name
@@ -938,11 +1253,16 @@ def _make_provider(config: Config):
         resolved_request = config.resolve_model_config(request_model)
         request_provider = config.get_provider(request_model)
         request_provider_name = config.get_provider_name(request_model)
+        request_api_base = config.get_api_base(request_model)
         return {
             "model": resolved_request.model or request_model,
             "api_key": request_provider.api_key if request_provider else None,
-            "api_base": config.get_api_base(request_model),
-            "extra_headers": request_provider.extra_headers if request_provider else None,
+            "api_base": request_api_base,
+            "extra_headers": merge_provider_headers(
+                provider_name=request_provider_name,
+                api_base=request_api_base,
+                configured_headers=request_provider.extra_headers if request_provider else None,
+            ),
             "provider_name": request_provider_name,
             "provider_options": resolved_request.provider_options or {},
             "reasoning_effort": resolved_request.reasoning_effort,
@@ -1001,6 +1321,10 @@ def _make_provider(config: Config):
         provider_name=provider_name,
         request_config_resolver=_request_config_resolver,
     )
+    routed_fallback = RoutingProvider(
+        fallback_provider=fallback_provider,
+        request_config_resolver=_request_config_resolver,
+    )
 
     if provider_name == "ollama" or _uses_ollama_anywhere():
         return OllamaProvider(
@@ -1009,10 +1333,10 @@ def _make_provider(config: Config):
             default_model=model,
             extra_headers=p.extra_headers if p else None,
             request_config_resolver=_request_config_resolver,
-            fallback_provider=fallback_provider,
+            fallback_provider=routed_fallback,
         )
 
-    return fallback_provider
+    return routed_fallback
 
 
 # ============================================================================
@@ -1036,7 +1360,6 @@ def gateway(
     from hermitcrab.agent.loop import AgentLoop
     from hermitcrab.bus.queue import MessageBus
     from hermitcrab.channels.manager import ChannelManager
-    from hermitcrab.cron.types import CronJob
     from hermitcrab.heartbeat.service import HeartbeatService
     from hermitcrab.reminders.service import ReminderService
     from hermitcrab.session.manager import SessionManager
@@ -1054,11 +1377,14 @@ def gateway(
         raise RuntimeError("admin workspace invariant failed: workspace_path must equal admin_workspace_path")
     bus = MessageBus()
     provider = _make_provider(config)
-    session_manager = SessionManager(config.workspace_path)
-    multi_workspace_active = _multi_workspace_routing_active(config)
+    session_manager = SessionManager(config.owner_identity_root_path)
+    identity_routing_active = _identity_routing_active(config)
 
-    # Create cron service first (callback set after agent creation)
-    cron = _build_cron_service()
+    owner_key = f"identity:{config.identities.registry[config.owner_identity_name].nostr_public_key}"
+    admin_cron = _build_cron_service(
+        identity_root=config.owner_identity_root_path,
+        identity_name=config.owner_identity_name,
+    )
 
     # Create agent with cron service
     agent = AgentLoop(
@@ -1066,80 +1392,16 @@ def gateway(
         **_build_agent_loop_kwargs(
             config,
             provider,
-            workspace=config.workspace_path,
-            cron_service=cron,
+            workspace=config.owner_identity_root_path,
+            identity_name=config.owner_identity_name,
+            identity_root=config.owner_identity_root_path,
+            cron_service=admin_cron,
             session_manager=session_manager,
         ),
     )
 
-    # Set cron callback (needs agent)
-    async def on_cron_job(job: CronJob) -> str | None:
-        """Execute a cron job through the agent."""
-        response = await agent.process_direct(
-            job.payload.message,
-            session_key=f"cron:{job.id}",
-            channel=job.payload.channel or "cli",
-            chat_id=job.payload.to or "direct",
-        )
-        if job.payload.deliver and job.payload.to:
-            from hermitcrab.bus.events import OutboundMessage
-
-            await bus.publish_outbound(
-                OutboundMessage(
-                    channel=job.payload.channel or "cli",
-                    chat_id=job.payload.to,
-                    content=response or "",
-                )
-            )
-        return response
-
-    cron.on_job = on_cron_job
-
     # Create channel manager
     channels = ChannelManager(config, bus, audit_event=agent.audit_event)
-
-    def _pick_heartbeat_target() -> tuple[str, str]:
-        """Pick a routable channel/chat target for heartbeat-triggered messages."""
-        enabled = set(channels.enabled_channels)
-        # Prefer the most recently updated non-internal session on an enabled channel.
-        for item in session_manager.list_sessions():
-            key = item.get("key") or ""
-            if ":" not in key:
-                continue
-            channel, chat_id = key.split(":", 1)
-            if channel in {"cli", "system"}:
-                continue
-            if channel in enabled and chat_id:
-                return channel, chat_id
-        # Fallback keeps prior behavior but remains explicit.
-        return "cli", "direct"
-
-    # Create heartbeat service
-    async def on_heartbeat_execute(tasks: str) -> str:
-        """Phase 2: execute heartbeat tasks through the full agent loop."""
-        channel, chat_id = _pick_heartbeat_target()
-
-        async def _silent(*_args, **_kwargs):
-            pass
-
-        return await agent.process_direct(
-            tasks,
-            session_key="heartbeat",
-            channel=channel,
-            chat_id=chat_id,
-            on_progress=_silent,
-        )
-
-    async def on_heartbeat_notify(response: str) -> None:
-        """Deliver a heartbeat response to the user's channel."""
-        from hermitcrab.bus.events import OutboundMessage
-
-        channel, chat_id = _pick_heartbeat_target()
-        if channel == "cli":
-            return  # No external channel available to deliver to
-        await bus.publish_outbound(
-            OutboundMessage(channel=channel, chat_id=chat_id, content=response)
-        )
 
     async def on_reminder_notify(item, content: str) -> None:
         """Deliver a due reminder to its persisted channel target."""
@@ -1153,62 +1415,58 @@ def gateway(
         )
 
     hb_cfg = config.gateway.heartbeat
-    heartbeat = HeartbeatService(
-        workspace=config.workspace_path,
-        provider=provider,
-        model=agent.model,
-        on_execute=on_heartbeat_execute,
-        on_notify=on_heartbeat_notify,
-        interval_s=hb_cfg.interval_s,
-        enabled=hb_cfg.enabled,
-    )
-
-    workspace_state = GatewayWorkspaceRuntimeState(
+    identity_state = GatewayIdentityRuntimeState(
         config=config,
         bus=bus,
+        channels=channels,
         create_provider=lambda: _make_provider(config),
+        cron_service_factory=_build_cron_service,
+        heartbeat_service_factory=HeartbeatService,
         on_reminder_notify=on_reminder_notify,
+        heartbeat_interval_s=hb_cfg.interval_s,
+        heartbeat_enabled=hb_cfg.enabled,
         reminder_interval_s=config.gateway.reminders.interval_s,
         reminder_service_factory=ReminderService,
-        agents={"__admin__": agent},
+        agents={},
+        cron_services={},
+        heartbeat_services={},
         reminder_services={},
     )
+    admin_cron.conflict_finder = lambda schedule, now_ms: identity_state.find_cron_conflicts(
+        schedule,
+        now_ms=now_ms,
+        exclude_key=owner_key,
+    )
+    asyncio.run(identity_state.attach_agent_services(owner_key, agent, admin_cron))
+    asyncio.run(identity_state.attach_configured_identity_agents())
 
     timeout_monitor = SessionTimeoutService(
-        workspace_state.process_expired_sessions_all,
+        identity_state.process_expired_sessions_all,
         interval_s=min(60, max(5, config.agents.defaults.inactivity_timeout_s // 6)),
         enabled=True,
     )
-    if agent.reminders is not None:
-        workspace_state.reminder_services["__admin__"] = ReminderService(
-            agent.reminders,
-            on_notify=on_reminder_notify,
-            interval_s=config.gateway.reminders.interval_s,
-            enabled=True,
-        )
 
-    cron_status = cron.status()
+    cron_statuses = {key: service.status() for key, service in identity_state.cron_services.items()}
     _print_gateway_runtime_summary(
         channels=channels,
-        multi_workspace_active=multi_workspace_active,
-        cron_status=cron_status,
+        identity_routing_active=identity_routing_active,
+        cron_statuses=cron_statuses,
         heartbeat_interval_s=hb_cfg.interval_s,
         reminders_interval_s=config.gateway.reminders.interval_s,
     )
 
     async def run():
         try:
-            await cron.start()
-            await heartbeat.start()
+            await identity_state.start_cron_services()
+            await identity_state.start_heartbeat_services()
             await timeout_monitor.start()
-            await workspace_state.start_reminder_services()
+            await identity_state.start_reminder_services()
             await asyncio.gather(
                 _run_gateway_inbound_router(
                     bus=bus,
-                    multi_workspace_active=multi_workspace_active,
-                    admin_agent=agent,
-                    get_or_create_agent=workspace_state.get_or_create_agent,
-                    workspace_agent_key=workspace_state.workspace_agent_key,
+                    owner_agent=agent,
+                    get_or_create_agent=identity_state.get_or_create_agent,
+                    identity_agent_key=identity_state.identity_agent_key,
                 ),
                 channels.start_all(),
             )
@@ -1217,9 +1475,7 @@ def gateway(
         finally:
             await _shutdown_gateway_runtime(
                 timeout_monitor=timeout_monitor,
-                heartbeat=heartbeat,
-                workspace_state=workspace_state,
-                cron=cron,
+                identity_state=identity_state,
                 channels=channels,
             )
 
@@ -1620,38 +1876,193 @@ app.add_typer(reminders_app, name="reminders")
 people_app = typer.Typer(help="Manage people profiles")
 app.add_typer(people_app, name="people")
 
-workspaces_app = typer.Typer(help="Manage named personal workspaces")
-app.add_typer(workspaces_app, name="workspaces")
+user_app = typer.Typer(help="Manage identity-scoped users")
+app.add_typer(user_app, name="user")
+
+model_app = typer.Typer(help="Manage named models and defaults")
+app.add_typer(model_app, name="model")
 
 
-def _configured_workspace_rows(config: Config) -> list[tuple[str, Path, str, bool]]:
-    """Return configured named workspaces for CLI display."""
-    rows: list[tuple[str, Path, str, bool]] = []
-    for name, workspace in config.workspaces.registry.items():
-        path = config.get_workspace_path(name)
-        label = workspace.label or "-"
-        rows.append((name, path, label, workspace.channel_only))
-    return rows
+def _save_runtime_config(config: Config) -> None:
+    """Validate and save the runtime config after CLI mutation."""
+    from hermitcrab.config.loader import save_config
+
+    try:
+        validated = Config.model_validate(config.model_dump(by_alias=True))
+    except ValueError as exc:
+        console.print(f"[red]Error: {exc}[/red]")
+        raise typer.Exit(1) from exc
+    save_config(validated)
 
 
-def _build_cron_service():
-    """Build the CronService in the configured data directory."""
-    from hermitcrab.config.loader import get_data_dir
+def _configure_provider(config: Config, provider: str, *, api_key: str | None = None) -> None:
+    """Apply a provider choice to config without forcing manual JSON edits."""
+    provider_key = provider.strip().lower().replace("-", "_")
+    if provider_key == "openrouter":
+        config.providers.openrouter.api_key = api_key or config.providers.openrouter.api_key
+    elif provider_key == "ollama":
+        config.providers.ollama.api_base = config.providers.ollama.api_base or "http://localhost:11434"
+    elif provider_key == "custom":
+        config.providers.custom.api_key = api_key or config.providers.custom.api_key
+    else:
+        console.print(f"[red]Error: unsupported provider for setup/model UX: {provider}[/red]")
+        raise typer.Exit(1)
+
+
+def _api_key_from_env(env_name: str | None) -> str | None:
+    """Read an API key from an explicit environment variable name."""
+    if not env_name:
+        return None
+    api_key = os.environ.get(env_name)
+    if not api_key:
+        console.print(f"[red]Error: environment variable is empty or missing: {env_name}[/red]")
+        raise typer.Exit(1)
+    return api_key
+
+
+def _provider_options(provider: str | None) -> dict[str, Any]:
+    """Persist the admin-selected provider with a named model."""
+    if not provider:
+        return {}
+    provider_key = provider.strip().lower().replace("-", "_")
+    if provider_key not in {"openrouter", "ollama", "custom"}:
+        console.print(f"[red]Error: unsupported provider for setup/model UX: {provider}[/red]")
+        raise typer.Exit(1)
+    return {"provider": provider_key}
+
+
+def _effective_identity_model(config: Config, identity: IdentityConfig) -> str:
+    """Return the effective interactive model ref for one identity."""
+    return (
+        identity.models.get("interactiveResponse")
+        or identity.models.get("interactive_response")
+        or config.identities.default_identity_model
+        or config.agents.defaults.model
+    )
+
+
+def _identity_rows(config: Config) -> list[tuple[str, IdentityConfig, Path]]:
+    """Return configured identities for CLI display."""
+    return [
+        (name, identity, config.get_identity_path(name))
+        for name, identity in sorted(config.identities.registry.items())
+    ]
+
+
+def _remove_identity_routes(config: Config, identity_name: str) -> None:
+    """Remove inbound Nostr routes for one identity."""
+    removed_pubkeys = {
+        normalize_nostr_pubkey(pubkey)
+        for pubkey in config.channels.nostr.identity_bindings.pop(identity_name, [])
+    }
+    if not removed_pubkeys:
+        return
+
+    remaining_routed = {
+        normalize_nostr_pubkey(pubkey)
+        for bindings in config.channels.nostr.identity_bindings.values()
+        for pubkey in bindings
+    }
+    config.channels.nostr.allowed_pubkeys = [
+        pubkey
+        for pubkey in config.channels.nostr.allowed_pubkeys
+        if pubkey.strip().lower() in {"*", "all"}
+        or normalize_nostr_pubkey(pubkey) not in removed_pubkeys
+        or normalize_nostr_pubkey(pubkey) in remaining_routed
+    ]
+
+
+def _bind_nostr_pubkey_to_identity(config: Config, identity_name: str, pubkey: str) -> str:
+    """Bind one normalized sender pubkey to an identity and maintain allowlist."""
+    normalized = normalize_nostr_pubkey(pubkey)
+    for existing_name, pubkeys in config.channels.nostr.identity_bindings.items():
+        if existing_name == identity_name:
+            continue
+        if normalized in {normalize_nostr_pubkey(value) for value in pubkeys}:
+            raise ValueError(f"pubkey already routed to user '{existing_name}'")
+
+    routes = config.channels.nostr.identity_bindings.setdefault(identity_name, [])
+    if normalized not in {normalize_nostr_pubkey(value) for value in routes}:
+        routes.append(normalized)
+
+    allowed = config.channels.nostr.allowed_pubkeys
+    allowed_modes = {value.strip().lower() for value in allowed}
+    allowed_pubkeys = {
+        normalize_nostr_pubkey(value)
+        for value in allowed
+        if value.strip().lower() not in {"*", "all"}
+    }
+    if not allowed_modes.intersection({"*", "all"}) and normalized not in allowed_pubkeys:
+        allowed.append(normalized)
+    return normalized
+
+
+async def _send_nostr_onboarding_intro(config: Config, recipient_pubkey: str, identity_name: str) -> bool:
+    """Best-effort onboarding intro DM; never raise to caller."""
+    if not config.channels.nostr.enabled or not config.channels.nostr.private_key:
+        return False
+
+    try:
+        from hermitcrab.bus.events import OutboundMessage
+        from hermitcrab.bus.queue import MessageBus
+        from hermitcrab.channels.nostr import NostrChannel
+    except Exception:
+        return False
+
+    bus = MessageBus()
+    channel = NostrChannel(
+        config.channels.nostr,
+        bus,
+        identity_resolver=config.resolve_nostr_sender_identity,
+    )
+    try:
+        await channel.start()
+        await channel.send(
+            OutboundMessage(
+                channel="nostr",
+                chat_id=recipient_pubkey,
+                content=(
+                    f"Hello from HermitCrab. You were added as user '{identity_name}'. "
+                    "If this was unexpected, contact the operator."
+                ),
+            )
+        )
+        return True
+    except Exception:
+        return False
+    finally:
+        try:
+            await channel.stop()
+        except Exception:
+            pass
+
+
+def _build_cron_service(
+    *,
+    identity_root: Path | None = None,
+    identity_name: str | None = None,
+    conflict_finder: Callable[[Any, int], list[Any]] | None = None,
+):
+    """Build the CronService for an identity root."""
     from hermitcrab.cron.service import CronService
 
-    return CronService(get_data_dir() / "cron" / "jobs.json")
+    if identity_root is None or identity_name is None:
+        config = _load_runtime_config()
+        identity_root = identity_root or config.owner_identity_root_path
+        identity_name = identity_name or config.owner_identity_name
+    return CronService(
+        identity_root / "cron" / "jobs.json",
+        identity_name=identity_name,
+        conflict_finder=conflict_finder,
+    )
 
 
 def _build_reminder_store() -> Any:
-    """Build the reminder store in the configured workspace."""
+    """Build the reminder store in the owner identity root."""
     from hermitcrab.agent.reminders import ReminderStore
-    from hermitcrab.config.loader import get_data_dir
 
     config = _load_runtime_config()
-    return ReminderStore(
-        config.workspace_path,
-        legacy_cron_store_path=get_data_dir() / "cron" / "jobs.json",
-    )
+    return ReminderStore(config.owner_identity_root_path)
 
 
 def _build_people_store() -> Any:
@@ -1659,7 +2070,7 @@ def _build_people_store() -> Any:
     from hermitcrab.agent.people import PeopleStore
 
     config = _load_runtime_config()
-    return PeopleStore(config.workspace_path)
+    return PeopleStore(config.owner_identity_root_path)
 
 
 def _require_one_schedule_option(
@@ -2209,13 +2620,107 @@ def people_history(
         console.print(store.render_interaction_summary(interaction))
 
 
-@workspaces_app.command("list")
-def workspaces_list(
-    as_json: bool = typer.Option(False, "--json", help="Print named workspaces as JSON"),
-):
-    """List configured named workspaces."""
+@model_app.command("list")
+def model_list(as_json: bool = typer.Option(False, "--json", help="Print models as JSON")):
+    """List named models and the current default."""
     config = _load_runtime_config()
-    rows = _configured_workspace_rows(config)
+    rows = [
+        {
+            "name": name,
+            "model": model.model,
+            "reasoning_effort": model.reasoning_effort,
+            "default": name == config.agents.defaults.model,
+        }
+        for name, model in sorted(config.models.items())
+    ]
+    if config.agents.defaults.model not in config.models:
+        rows.insert(
+            0,
+            {
+                "name": "(default)",
+                "model": config.agents.defaults.model,
+                "reasoning_effort": None,
+                "default": True,
+            },
+        )
+
+    if as_json:
+        typer.echo(json.dumps(rows, indent=2, ensure_ascii=False) + "\n", nl=False)
+        return
+
+    table = Table(title="Models")
+    table.add_column("Name", style="cyan")
+    table.add_column("Model")
+    table.add_column("Reasoning")
+    table.add_column("Default")
+    for row in rows:
+        table.add_row(
+            row["name"],
+            row["model"],
+            row["reasoning_effort"] or "-",
+            "yes" if row["default"] else "",
+        )
+    console.print(table)
+
+
+@model_app.command("add")
+def model_add(
+    name: str = typer.Argument(..., help="Friendly model name"),
+    model_id: str = typer.Argument(..., help="Provider model id, e.g. openrouter/anthropic/..."),
+    provider: str | None = typer.Option(None, "--provider", help="Provider to configure/ensure"),
+    api_key_env: str | None = typer.Option(
+        None, "--api-key-env", help="Read provider API key from this environment variable"
+    ),
+    reasoning_effort: str | None = typer.Option(
+        None, "--reasoning-effort", help="none, low, medium, or high"
+    ),
+):
+    """Add or update a named model."""
+    config = _load_runtime_config()
+    provider_options = _provider_options(provider)
+    if provider:
+        _configure_provider(config, provider, api_key=_api_key_from_env(api_key_env))
+    if reasoning_effort not in {None, "none", "low", "medium", "high"}:
+        console.print("[red]Error: --reasoning-effort must be none, low, medium, or high[/red]")
+        raise typer.Exit(1)
+    config.models[name] = NamedModelConfig(
+        model=model_id,
+        reasoning_effort=reasoning_effort,
+        provider_options=provider_options,
+    )
+    _save_runtime_config(config)
+    console.print(f"[green]✓[/green] Saved model '{name}' -> {model_id}")
+
+
+@model_app.command("set-default")
+def model_set_default(name_or_model_id: str = typer.Argument(..., help="Named model or raw model id")):
+    """Set the default model used by the owner/solo assistant."""
+    config = _load_runtime_config()
+    config.agents.defaults.model = name_or_model_id
+    _save_runtime_config(config)
+    console.print(f"[green]✓[/green] Default model set to '{name_or_model_id}'")
+
+
+@model_app.command("test")
+def model_test(name_or_model_id: str = typer.Argument(..., help="Named model or raw model id")):
+    """Validate that a model resolves to a configured provider."""
+    config = _load_runtime_config()
+    resolved = config.resolve_model_config(name_or_model_id)
+    provider_name = config.get_provider_name(name_or_model_id)
+    if provider_name is None:
+        console.print(f"[red]Error: no configured provider found for {name_or_model_id}[/red]")
+        raise typer.Exit(1)
+    console.print(f"[green]✓[/green] {name_or_model_id} resolves to {resolved.model}")
+    console.print(f"Provider: [cyan]{provider_name}[/cyan]")
+
+
+@user_app.command("list")
+def user_list(
+    as_json: bool = typer.Option(False, "--json", help="Print users as JSON"),
+):
+    """List configured users."""
+    config = _load_runtime_config()
+    rows = _identity_rows(config)
 
     if as_json:
         typer.echo(
@@ -2223,13 +2728,14 @@ def workspaces_list(
                 [
                     {
                         "name": name,
-                        "path": str(path),
-                        "label": label if label != "-" else None,
-                        "channel_only": channel_only,
-                        "exists": path.exists(),
-                        "bootstrapped": (path / "AGENTS.md").exists(),
+                        "label": identity.label,
+                        "role": identity.role,
+                        "active": identity.active,
+                        "root": str(path),
+                        "nostr_public_key": identity.nostr_public_key,
+                        "route_count": len(config.channels.nostr.identity_bindings.get(name, [])),
                     }
-                    for name, path, label, channel_only in rows
+                    for name, identity, path in rows
                 ],
                 indent=2,
                 ensure_ascii=False,
@@ -2239,75 +2745,330 @@ def workspaces_list(
         )
         return
 
-    if not rows:
-        console.print("No named workspaces configured.")
-        return
-
-    table = Table(title="Named Workspaces")
-    table.add_column("Name", style="cyan")
-    table.add_column("Path")
+    table = Table(title="Users")
+    table.add_column("Alias", style="cyan")
     table.add_column("Label")
-    table.add_column("Mode")
+    table.add_column("Role")
     table.add_column("State")
+    table.add_column("Nostr Pubkey")
+    table.add_column("Root")
 
-    for name, path, label, channel_only in rows:
-        mode = "channel-only" if channel_only else "interactive"
-        if not path.exists():
-            state = "[red]missing[/red]"
-        elif (path / "AGENTS.md").exists():
-            state = "[green]ready[/green]"
-        else:
-            state = "[yellow]needs bootstrap[/yellow]"
-        table.add_row(name, str(path), label, mode, state)
+    for name, identity, path in rows:
+        state = "[green]active[/green]" if identity.active else "[dim]inactive[/dim]"
+        table.add_row(
+            name,
+            identity.label or "-",
+            identity.role,
+            state,
+            f"{identity.nostr_public_key[:12]}...",
+            str(path),
+        )
 
     console.print(table)
 
 
-@workspaces_app.command("init")
-def workspaces_init(
-    name: str | None = typer.Argument(None, help="Configured workspace name"),
-    all: bool = typer.Option(False, "--all", help="Bootstrap all configured named workspaces"),
+@user_app.command("add")
+def user_add(
+    name: str = typer.Argument(..., help="User alias"),
+    label: str | None = typer.Option(None, "--label", help="Display label"),
+    nostr_public_key: str | None = typer.Option(
+        None,
+        "--nostr-public-key",
+        help="Identity Nostr public key as npub or hex.",
+    ),
+    nostr_private_key: str | None = typer.Option(
+        None,
+        "--nostr-private-key",
+        help="(Backward compatibility) Identity Nostr private key as nsec or hex.",
+    ),
 ):
-    """Bootstrap configured named workspaces without changing admin workspace behavior."""
-    if all and name is not None:
-        console.print("[red]Error: choose a workspace name or --all, not both[/red]")
+    """Add a user identity and bootstrap its identity root."""
+    config = _load_runtime_config()
+    if name in config.identities.registry:
+        console.print(f"[red]Error: user already exists: {name}[/red]")
         raise typer.Exit(1)
-    if not all and name is None:
-        console.print("[red]Error: provide a configured workspace name or use --all[/red]")
+
+    if nostr_public_key and nostr_private_key:
+        console.print("[red]Error: provide either --nostr-public-key or --nostr-private-key, not both[/red]")
+        raise typer.Exit(1)
+
+    generated_private_key: str | None = None
+    selected_pubkey = nostr_public_key or ""
+    selected_private_key = nostr_private_key or ""
+    if not selected_pubkey and not selected_private_key:
+        generated_private_key, generated_pubkey = generate_nostr_keypair()
+        selected_pubkey = generated_pubkey
+
+    try:
+        config.identities.registry[name] = IdentityConfig(
+            label=label,
+            nostr_public_key=selected_pubkey,
+            nostr_private_key=selected_private_key,
+        )
+        identity = config.identities.registry[name]
+        _bind_nostr_pubkey_to_identity(config, name, identity.nostr_public_key)
+    except Exception as exc:
+        console.print(f"[red]Error: {exc}[/red]")
+        raise typer.Exit(1) from exc
+
+    try:
+        validated = Config.model_validate(config.model_dump(by_alias=True))
+    except ValueError as exc:
+        console.print(f"[red]Error: {exc}[/red]")
+        raise typer.Exit(1) from exc
+
+    identity_root = validated.get_identity_path(name)
+    _ensure_root(identity_root, "identity root", announce=console.print)
+    _create_template_files(
+        identity_root,
+        ["IDENTITY.md", "SOUL.md", "USER.md", "HEARTBEAT.md", "ONBOARDING_MODE.md"],
+        announce=console.print,
+    )
+    _create_identity_directories(identity_root, announce=console.print)
+    _save_runtime_config(validated)
+    identity = validated.identities.registry[name]
+    console.print(f"[green]✓[/green] Added user '{name}'")
+    if nostr_public_key:
+        console.print(f"Nostr pubkey: {identity.nostr_public_key}")
+        console.print("User added with provided public key.")
+    elif selected_private_key:
+        console.print(f"Nostr pubkey: {identity.nostr_public_key}")
+        console.print("Private key accepted for backward compatibility.")
+    else:
+        generated_private_nsec = ""
+        try:
+            from pynostr.key import PrivateKey
+
+            if generated_private_key:
+                generated_private_nsec = PrivateKey.from_hex(generated_private_key).bech32()
+        except Exception:
+            generated_private_nsec = ""
+        console.print("Generated onboarding Nostr keypair:")
+        console.print(f"  Public key (hex): {identity.nostr_public_key}")
+        if generated_private_nsec:
+            console.print(f"  Private key (nsec): {generated_private_nsec}")
+        console.print(f"  Private key (hex): {generated_private_key}")
+        console.print("[yellow]Warning:[/yellow] private key is NOT stored in config; share it securely if needed.")
+
+    sent_intro = asyncio.run(_send_nostr_onboarding_intro(validated, identity.nostr_public_key, name))
+    if sent_intro:
+        console.print("Best-effort Nostr intro message: attempted.")
+    else:
+        console.print("Best-effort Nostr intro message: skipped/unavailable.")
+
+
+@user_app.command("remove")
+def user_remove(
+    name: str = typer.Argument(..., help="User alias"),
+):
+    """Disable routing for a user while keeping data in place."""
+    config = _load_runtime_config()
+    identity = config.identities.registry.get(name)
+    if identity is None:
+        console.print(f"[red]Error: unknown user: {name}[/red]")
+        raise typer.Exit(1)
+    if name == config.owner_identity_name:
+        console.print("[red]Error: owner user cannot be removed[/red]")
+        raise typer.Exit(1)
+
+    identity.active = False
+    _remove_identity_routes(config, name)
+    _save_runtime_config(config)
+    console.print(f"[green]✓[/green] Disabled user '{name}' and removed inbound routes")
+
+
+@user_app.command("archive")
+def user_archive(
+    name: str = typer.Argument(..., help="User alias"),
+):
+    """Archive a user without deleting identity data."""
+    config = _load_runtime_config()
+    identity = config.identities.registry.get(name)
+    if identity is None:
+        console.print(f"[red]Error: unknown user: {name}[/red]")
+        raise typer.Exit(1)
+    if name == config.owner_identity_name:
+        console.print("[red]Error: owner user cannot be archived[/red]")
+        raise typer.Exit(1)
+
+    identity.active = False
+    identity.role = "archived"
+    _remove_identity_routes(config, name)
+    _save_runtime_config(config)
+    console.print(f"[green]✓[/green] Archived user '{name}'")
+
+
+@user_app.command("route")
+def user_route(
+    channel: str = typer.Argument(..., help="Route channel. Currently only 'nostr'."),
+    name: str = typer.Argument(..., help="User alias"),
+    pubkey: str = typer.Argument(..., help="Inbound sender Nostr public key as npub or hex"),
+):
+    """Bind an inbound channel sender to a user."""
+    if channel != "nostr":
+        console.print("[red]Error: only nostr routes are supported[/red]")
         raise typer.Exit(1)
 
     config = _load_runtime_config()
-    rows = _configured_workspace_rows(config)
-    names = [workspace_name for workspace_name, _, _, _ in rows]
-    if not rows:
-        console.print("[red]Error: no named workspaces configured[/red]")
+    identity = config.identities.registry.get(name)
+    if identity is None:
+        console.print(f"[red]Error: unknown user: {name}[/red]")
+        raise typer.Exit(1)
+    if not identity.active:
+        console.print(f"[red]Error: user is inactive: {name}[/red]")
         raise typer.Exit(1)
 
-    target_names = names if all else [name]
-    missing = [workspace_name for workspace_name in target_names if workspace_name not in names]
-    if missing:
-        console.print(f"[red]Error: unknown workspace: {missing[0]}[/red]")
+    try:
+        normalized = _bind_nostr_pubkey_to_identity(config, name, pubkey)
+    except ValueError as exc:
+        console.print(f"[red]Error: {exc}[/red]")
+        raise typer.Exit(1) from exc
+    _save_runtime_config(config)
+    console.print(f"[green]✓[/green] Routed Nostr sender to user '{name}'")
+    console.print(f"Pubkey: {normalized}")
+
+
+@user_app.command("models")
+def user_models(
+    name: str = typer.Argument(..., help="User alias"),
+    interactive: str | None = typer.Option(None, "--interactive", help="Named model for interactive responses"),
+    exclude: list[str] = typer.Option([], "--exclude", help="Model name to block for this user"),
+    clear_interactive: bool = typer.Option(False, "--clear-interactive", help="Use the global default again"),
+    as_json: bool = typer.Option(False, "--json", help="Print model policy as JSON"),
+):
+    """Show or set per-user model policy."""
+    config = _load_runtime_config()
+    identity = config.identities.registry.get(name)
+    if identity is None:
+        console.print(f"[red]Error: unknown user: {name}[/red]")
         raise typer.Exit(1)
 
-    for workspace_name in target_names:
-        workspace_path = config.get_workspace_path(workspace_name)
-        console.print(f"[bold]Bootstrapping {workspace_name}[/bold]")
-        bootstrap_workspace(workspace_path, announce=console.print)
+    changed = False
+    if interactive is not None:
+        if interactive not in config.models:
+            console.print(f"[red]Error: unknown named model: {interactive}[/red]")
+            raise typer.Exit(1)
+        if interactive in identity.excluded_models:
+            console.print(f"[red]Error: model '{interactive}' is excluded for user '{name}'[/red]")
+            raise typer.Exit(1)
+        identity.models["interactiveResponse"] = interactive
+        changed = True
+
+    if clear_interactive:
+        identity.models.pop("interactiveResponse", None)
+        identity.models.pop("interactive_response", None)
+        changed = True
+
+    for model_name in exclude:
+        if model_name not in config.models:
+            console.print(f"[red]Error: unknown named model: {model_name}[/red]")
+            raise typer.Exit(1)
+        if model_name == _effective_identity_model(config, identity):
+            console.print(f"[red]Error: cannot exclude effective model '{model_name}'[/red]")
+            raise typer.Exit(1)
+        if model_name not in identity.excluded_models:
+            identity.excluded_models.append(model_name)
+            changed = True
+
+    if changed:
+        _save_runtime_config(config)
+        if not as_json:
+            console.print(f"[green]✓[/green] Updated model policy for '{name}'")
+
+    payload = {
+        "name": name,
+        "effective_interactive_model": _effective_identity_model(config, identity),
+        "explicit_models": dict(identity.models),
+        "excluded_models": list(identity.excluded_models),
+        "available_models": [m for m in sorted(config.models) if m not in identity.excluded_models],
+    }
+    if as_json:
+        typer.echo(json.dumps(payload, indent=2, ensure_ascii=False) + "\n", nl=False)
+        return
+    console.print(f"[bold]{name} model policy[/bold]")
+    console.print(f"Effective interactive model: [cyan]{payload['effective_interactive_model']}[/cyan]")
+    console.print(f"Excluded models: {', '.join(identity.excluded_models) or '-'}")
+    console.print(f"Available named models: {', '.join(payload['available_models']) or '-'}")
 
 
-@workspaces_app.command("resolve-nostr")
-def workspaces_resolve_nostr(
+@user_app.command("status")
+def user_status(
+    name: str = typer.Argument(..., help="User alias"),
+    as_json: bool = typer.Option(False, "--json", help="Print user status as JSON"),
+):
+    """Inspect user heartbeat and cron state."""
+    config = _load_runtime_config()
+    identity = config.identities.registry.get(name)
+    if identity is None:
+        console.print(f"[red]Error: unknown user: {name}[/red]")
+        raise typer.Exit(1)
+
+    root = config.get_identity_path(name)
+    heartbeat_file = root / "HEARTBEAT.md"
+    cron_service = _build_cron_service(identity_root=root, identity_name=name)
+    cron_jobs = cron_service.list_jobs(include_disabled=True)
+    effective_model = _effective_identity_model(config, identity)
+    nostr_routes = config.channels.nostr.identity_bindings.get(name, [])
+    payload = {
+        "name": name,
+        "active": identity.active,
+        "role": identity.role,
+        "root": str(root),
+        "nostr_public_key": identity.nostr_public_key,
+        "models": {
+            "effective_interactive": effective_model,
+            "explicit": dict(identity.models),
+            "excluded": list(identity.excluded_models),
+        },
+        "routes": {
+            "nostr": {
+                "enabled": config.channels.nostr.enabled,
+                "bound_senders": len(nostr_routes),
+            }
+        },
+        "heartbeat": {
+            "path": str(heartbeat_file),
+            "exists": heartbeat_file.exists(),
+        },
+        "cron": {
+            "path": str(cron_service.store_path),
+            "jobs": len(cron_jobs),
+            "enabled_jobs": len([job for job in cron_jobs if job.enabled]),
+            "next_wake_at_ms": cron_service.status()["next_wake_at_ms"],
+        },
+    }
+
+    if as_json:
+        typer.echo(json.dumps(payload, indent=2, ensure_ascii=False) + "\n", nl=False)
+        return
+
+    console.print(f"[bold]{name}[/bold]")
+    console.print(f"State: {'active' if identity.active else 'inactive'}")
+    console.print(f"Role: {identity.role}")
+    console.print(f"Root: {root}")
+    console.print(f"Interactive model: {effective_model}")
+    console.print(f"Excluded models: {', '.join(identity.excluded_models) or '-'}")
+    console.print(f"Nostr pubkey: {identity.nostr_public_key}")
+    console.print(
+        f"Nostr routes: {len(nostr_routes)} sender(s), channel {'enabled' if config.channels.nostr.enabled else 'disabled'}"
+    )
+    console.print(f"Heartbeat: {'present' if heartbeat_file.exists() else 'missing'} ({heartbeat_file})")
+    console.print(f"Cron jobs: {payload['cron']['enabled_jobs']} enabled / {payload['cron']['jobs']} total")
+
+
+@user_app.command("resolve-nostr")
+def user_resolve_nostr(
     pubkey: str = typer.Argument(..., help="Inbound Nostr sender pubkey (64-char hex)"),
     as_json: bool = typer.Option(False, "--json", help="Print resolution as JSON"),
 ):
-    """Resolve inbound Nostr sender to admin workspace, named workspace, or denial."""
+    """Resolve inbound Nostr sender to an identity or denial."""
     config = _load_runtime_config()
-    resolution = config.resolve_nostr_sender_workspace(pubkey)
+    resolution = config.resolve_nostr_sender_identity(pubkey)
 
     payload = {
         "target": resolution.target,
-        "workspace_name": resolution.workspace_name,
-        "workspace_path": (str(resolution.workspace_path) if resolution.workspace_path else None),
+        "identity_name": resolution.identity_name,
+        "identity_path": (str(resolution.identity_path) if resolution.identity_path else None),
         "normalized_pubkey": resolution.normalized_pubkey,
         "reason": resolution.reason,
     }
@@ -2320,10 +3081,10 @@ def workspaces_resolve_nostr(
     console.print(f"Reason: {resolution.reason or '-'}")
     if resolution.normalized_pubkey:
         console.print(f"Pubkey: {resolution.normalized_pubkey}")
-    if resolution.workspace_name:
-        console.print(f"Workspace: {resolution.workspace_name}")
-    if resolution.workspace_path:
-        console.print(f"Path: {resolution.workspace_path}")
+    if resolution.identity_name:
+        console.print(f"Identity: {resolution.identity_name}")
+    if resolution.identity_path:
+        console.print(f"Path: {resolution.identity_path}")
 
 
 # ============================================================================
@@ -2365,22 +3126,17 @@ def status(
         "Bootstrap: "
         + ("[green]ready[/green]" if report.bootstrap_ready else "[yellow]incomplete[/yellow]")
     )
-    if report.named_workspaces:
-        console.print(
-            "Named workspaces: "
-            f"{report.bootstrapped_named_workspaces}/{report.named_workspaces} bootstrapped"
-        )
-    if report.nostr_workspace_bindings:
-        console.print(f"Nostr workspace bindings: {report.nostr_workspace_bindings}")
+    if report.nostr_identity_bindings:
+        console.print(f"Nostr identity bindings: {report.nostr_identity_bindings}")
     console.print(
-        "Workspace routing: "
+        "Identity routing: "
         + (
-            "[green]active[/green] (Nostr bound senders can route to named workspaces)"
-            if report.multi_workspace_routing_active
-            else "[dim]inactive[/dim] (admin workspace only)"
+            "[green]active[/green] (Nostr bound senders route to identities)"
+            if report.identity_routing_active
+            else "[dim]owner fallback only[/dim]"
         )
     )
-    console.print("[dim]Cron/heartbeat remain admin-owned; unresolved workspace routes are denied[/dim]")
+    console.print("[dim]Cron/heartbeat/reminders run per active identity; unresolved routes are denied[/dim]")
 
     console.print(f"Selected model: {report.selected_model}")
     if report.resolved_model and report.resolved_model != report.selected_model:
@@ -2485,7 +3241,7 @@ def audit(
     from hermitcrab.agent.audit import AuditTrail
 
     config = _load_runtime_config()
-    trail = AuditTrail(config.workspace_path)
+    trail = AuditTrail(config.system_root_path)
     entries = trail.read_recent(limit)
     if event:
         entries = _filter_audit_entries(entries, event)
@@ -2685,13 +3441,13 @@ def _register_login(name: str):
 @provider_app.command("login")
 def provider_login(
     provider: str = typer.Argument(
-        ..., help="OAuth provider (e.g. 'openai-oauth', 'openai-codex', 'qwen-oauth')"
+        ..., help="OAuth provider (e.g. 'openai-codex')"
     ),
 ):
     """Authenticate with an OAuth provider."""
-    from hermitcrab.providers.registry import PROVIDERS
+    from hermitcrab.providers.registry import PROVIDERS, normalize_provider_name
 
-    key = provider.replace("-", "_")
+    key = normalize_provider_name(provider)
     spec = next((s for s in PROVIDERS if s.name == key and s.is_oauth), None)
     if not spec:
         names = ", ".join(s.name.replace("_", "-") for s in PROVIDERS if s.is_oauth)
@@ -2707,65 +3463,131 @@ def provider_login(
     handler()
 
 
-@_register_login("openai_oauth")
 @_register_login("openai_codex")
 def _login_openai_codex() -> None:
+    from hermitcrab.providers.openai_codex_auth import (
+        CODEX_OAUTH_CLIENT_ID,
+        CODEX_OAUTH_TOKEN_URL,
+        DEFAULT_CODEX_BASE_URL,
+        codex_access_token_is_expiring,
+        read_codex_cli_tokens,
+        resolve_codex_runtime_credentials,
+        save_codex_tokens,
+    )
+
     try:
-        from oauth_cli_kit import get_token, login_oauth_interactive
-
-        token = None
-        try:
-            token = get_token()
-        except Exception:
-            pass
-        if not (token and token.access):
-            console.print("[cyan]Starting interactive OAuth login...[/cyan]\n")
-            token = login_oauth_interactive(
-                print_fn=lambda s: console.print(s),
-                prompt_fn=lambda s: typer.prompt(s),
-            )
-        if not (token and token.access):
-            console.print("[red]✗ Authentication failed[/red]")
-            raise typer.Exit(1)
-        console.print(
-            f"[green]✓ Authenticated with OpenAI OAuth[/green]  [dim]{token.account_id}[/dim]"
-        )
-    except ImportError:
-        console.print("[red]oauth_cli_kit not installed. Run: pip install oauth-cli-kit[/red]")
-        raise typer.Exit(1)
-
-
-@_register_login("qwen_oauth")
-def _login_qwen_oauth() -> None:
-    from hermitcrab.providers.qwen_oauth_provider import resolve_qwen_runtime_credentials
-
-    qwen_binary = shutil.which("qwen")
-    try:
-        creds = resolve_qwen_runtime_credentials(refresh_if_expiring=False)
-        console.print(f"[green]✓ Authenticated with Qwen OAuth[/green]  [dim]{creds['auth_file']}[/dim]")
-        return
+        existing = resolve_codex_runtime_credentials()
+        access_token = str(existing.get("api_key", "") or "")
+        if access_token and not codex_access_token_is_expiring(access_token, 60):
+            console.print("[green]✓ Existing Codex OAuth credentials are valid[/green]")
+            return
     except Exception:
         pass
 
-    if qwen_binary:
-        console.print("[cyan]Starting Qwen CLI OAuth flow...[/cyan]\n")
-        result = subprocess.run([qwen_binary, "auth", "qwen-oauth"], check=False)
-        if result.returncode != 0:
-            console.print("[red]Qwen CLI login failed.[/red]")
-            raise typer.Exit(1)
-        try:
-            creds = resolve_qwen_runtime_credentials(refresh_if_expiring=False)
-            console.print(
-                f"[green]✓ Authenticated with Qwen OAuth[/green]  [dim]{creds['auth_file']}[/dim]"
-            )
+    cli_tokens = read_codex_cli_tokens()
+    if cli_tokens:
+        console.print("Found existing Codex CLI credentials at [cyan]~/.codex/auth.json[/cyan].")
+        console.print("HermitCrab can import them, but a separate login avoids token rotation conflicts.")
+        if typer.confirm("Import Codex CLI credentials instead of starting a new login?", default=False):
+            save_codex_tokens(cli_tokens)
+            console.print("[green]✓ Imported Codex OAuth credentials[/green]")
             return
-        except Exception as exc:
-            console.print(f"[red]Qwen OAuth credentials were not usable after login: {exc}[/red]")
-            raise typer.Exit(1) from exc
 
-    console.print("[red]Qwen CLI not found and no existing Qwen OAuth credentials were detected.[/red]")
-    console.print("Install the Qwen CLI, then run: [cyan]qwen auth qwen-oauth[/cyan]")
-    raise typer.Exit(1)
+    issuer = "https://auth.openai.com"
+    try:
+        with httpx.Client(timeout=httpx.Timeout(15.0)) as client:
+            response = client.post(
+                f"{issuer}/api/accounts/deviceauth/usercode",
+                json={"client_id": CODEX_OAUTH_CLIENT_ID},
+                headers={"Content-Type": "application/json"},
+            )
+    except Exception as exc:
+        console.print(f"[red]Failed to request Codex device code: {exc}[/red]")
+        raise typer.Exit(1)
+
+    if response.status_code != 200:
+        console.print(f"[red]Codex device code request failed: HTTP {response.status_code}[/red]")
+        raise typer.Exit(1)
+
+    device_data = response.json()
+    user_code = str(device_data.get("user_code", "") or "")
+    device_auth_id = str(device_data.get("device_auth_id", "") or "")
+    poll_interval = max(3, int(device_data.get("interval", "5") or 5))
+    if not user_code or not device_auth_id:
+        console.print("[red]Codex device code response was missing required fields[/red]")
+        raise typer.Exit(1)
+
+    console.print("To continue, open this URL in your browser:")
+    console.print(f"[cyan]{issuer}/codex/device[/cyan]\n")
+    console.print("Enter this code:")
+    console.print(f"[bold cyan]{user_code}[/bold cyan]\n")
+    console.print("Waiting for sign-in... press Ctrl+C to cancel.")
+
+    code_response = None
+    deadline = time.monotonic() + 15 * 60
+    try:
+        with httpx.Client(timeout=httpx.Timeout(15.0)) as client:
+            while time.monotonic() < deadline:
+                time.sleep(poll_interval)
+                poll_response = client.post(
+                    f"{issuer}/api/accounts/deviceauth/token",
+                    json={"device_auth_id": device_auth_id, "user_code": user_code},
+                    headers={"Content-Type": "application/json"},
+                )
+                if poll_response.status_code == 200:
+                    code_response = poll_response.json()
+                    break
+                if poll_response.status_code in (403, 404):
+                    continue
+                console.print(
+                    f"[red]Codex device auth polling failed: HTTP {poll_response.status_code}[/red]"
+                )
+                raise typer.Exit(1)
+    except KeyboardInterrupt:
+        console.print("\n[yellow]Login cancelled[/yellow]")
+        raise typer.Exit(130)
+
+    if code_response is None:
+        console.print("[red]Codex login timed out after 15 minutes[/red]")
+        raise typer.Exit(1)
+
+    authorization_code = str(code_response.get("authorization_code", "") or "")
+    code_verifier = str(code_response.get("code_verifier", "") or "")
+    if not authorization_code or not code_verifier:
+        console.print("[red]Codex device auth response was missing exchange fields[/red]")
+        raise typer.Exit(1)
+
+    try:
+        with httpx.Client(timeout=httpx.Timeout(15.0)) as client:
+            token_response = client.post(
+                CODEX_OAUTH_TOKEN_URL,
+                data={
+                    "grant_type": "authorization_code",
+                    "code": authorization_code,
+                    "redirect_uri": f"{issuer}/deviceauth/callback",
+                    "client_id": CODEX_OAUTH_CLIENT_ID,
+                    "code_verifier": code_verifier,
+                },
+                headers={"Content-Type": "application/x-www-form-urlencoded"},
+            )
+    except Exception as exc:
+        console.print(f"[red]Codex token exchange failed: {exc}[/red]")
+        raise typer.Exit(1)
+
+    if token_response.status_code != 200:
+        console.print(f"[red]Codex token exchange failed: HTTP {token_response.status_code}[/red]")
+        raise typer.Exit(1)
+
+    tokens = token_response.json()
+    access_token = str(tokens.get("access_token", "") or "")
+    refresh_token = str(tokens.get("refresh_token", "") or "")
+    if not access_token or not refresh_token:
+        console.print("[red]Codex token exchange did not return complete credentials[/red]")
+        raise typer.Exit(1)
+
+    save_codex_tokens({"access_token": access_token, "refresh_token": refresh_token})
+    console.print("[green]✓ Authenticated with OpenAI Codex OAuth[/green]")
+    console.print(f"[dim]Endpoint: {DEFAULT_CODEX_BASE_URL}[/dim]")
 
 
 @_register_login("github_copilot")

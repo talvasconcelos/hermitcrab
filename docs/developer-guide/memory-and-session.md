@@ -74,7 +74,7 @@ This prevents memory from flooding the prompt window.
 
 ### Session structure
 
-Sessions are stored as JSONL files in `workspace/sessions/`:
+Sessions are stored as JSONL files in `identities/<name>/sessions/`:
 
 ```
 sessions/
@@ -104,21 +104,21 @@ The session manager detects broken leading segments in session files. If a sessi
 
 ## Scratchpads
 
-Every session has a scratchpad at `workspace/scratchpads/<session>.md`. It holds:
+Every session has a scratchpad at `identities/<name>/scratchpads/<session>.md`. It holds:
 
 - Intermediate reasoning
 - Tool outputs
 - Draft thoughts
 - Working notes
 
-On session end, scratchpads are archived to `workspace/scratchpads/archive/` and excluded from distillation. They are transient working artifacts, not long-term knowledge.
+On session end, scratchpads are archived to `identities/<name>/scratchpads/archive/` and excluded from distillation. They are transient working artifacts, not long-term knowledge.
 
 ## People
 
 `PeopleStore` (in `agent/people.py`) manages named people:
 
-- Profiles stored as Markdown in `workspace/people/profiles/`
-- Interaction history as JSON in `workspace/people/interactions/`
+- Profiles stored as Markdown in `identities/<name>/people/profiles/`
+- Interaction history as JSON in `identities/<name>/people/interactions/`
 - Duplicate guard prevents creating profiles for the same person
 - Linked follow-ups track engagement patterns
 
@@ -140,7 +140,7 @@ Managed by `KnowledgeStore`. Content is ingested via `knowledge_ingest` and `kno
 
 `ListStore` (in `agent/lists.py`) manages checklists:
 
-- Lists stored in `workspace/lists/`
+- Lists stored in `identities/<name>/lists/`
 - Items have status: open, done, deferred
 - Operations: show, add, set status, remove, delete
 
@@ -151,7 +151,7 @@ Managed by `KnowledgeStore`. Content is ingested via `knowledge_ingest` and `kno
 - Generated after each session ends
 - Uses a cheap local model
 - Provides human-readable session overview
-- Stored in `workspace/journal/`
+- Stored in `identities/<name>/journal/`
 
 ## Key invariants
 

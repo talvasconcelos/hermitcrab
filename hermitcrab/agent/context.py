@@ -25,7 +25,8 @@ class ContextBuilder:
     into a coherent prompt for the LLM.
     """
 
-    BOOTSTRAP_FILES = ["AGENTS.md", "SOUL.md", "USER.md", "TOOLS.md", "IDENTITY.md"]
+    SYSTEM_BOOTSTRAP_FILES = ["AGENTS.md", "TOOLS.md"]
+    IDENTITY_BOOTSTRAP_FILES = ["IDENTITY.md", "SOUL.md", "USER.md"]
     ONBOARDING_FLAG_FILE = ".onboarding_mode"
     ONBOARDING_PROMPT_FILE = "ONBOARDING_MODE.md"
 
@@ -37,9 +38,11 @@ class ContextBuilder:
         memory_max_item_chars: int = 600,
         model_aliases: dict[str, str | ModelAliasConfig] | None = None,
         named_models: dict[str, NamedModelConfig] | None = None,
-        prompt_token_budget: int = 4000,
+        prompt_token_budget: int = 6000,
+        system_root: Path | None = None,
     ):
         self.workspace = workspace
+        self.system_root = system_root
         self.memory = MemoryStore(workspace)
         self.skills = SkillsLoader(workspace)
         self.memory_max_chars = memory_max_chars
@@ -47,7 +50,7 @@ class ContextBuilder:
         self.memory_max_item_chars = memory_max_item_chars
         self.model_aliases = model_aliases or {}
         self.named_models = named_models or {}
-        self.prompt_token_budget = max(800, prompt_token_budget)
+        self.prompt_token_budget = max(1200, prompt_token_budget)
 
     def build_system_prompt(
         self,
@@ -74,18 +77,10 @@ class ContextBuilder:
         auto_skills = self.skills.select_skills(current_message, history or [])
         selected_skills = list(dict.fromkeys((skill_names or []) + auto_skills))
 
-        fixed_parts = []
-
-        # Core identity
-        fixed_parts.append(self._get_identity())
-
-        fixed_parts.append(
-            "You are the assistant. Treat this workspace as your working area and follow the "
-            "bootstrap files below as the authoritative operating rules."
-        )
+        fixed_parts = [self._load_identity_contract(), self._get_identity()]
 
         # Bootstrap files
-        bootstrap = self._load_bootstrap_files()
+        bootstrap = self._load_system_bootstrap_files()
         if bootstrap:
             fixed_parts.append(bootstrap)
         onboarding_prompt = self._load_onboarding_prompt()
@@ -98,9 +93,18 @@ class ContextBuilder:
         if scratchpad_path:
             fixed_parts.append(
                 "# Scratchpad\n\n"
-                f"Session scratchpad: {scratchpad_path}\n"
+                "A session scratchpad may be provided near the active user turn. "
                 "Use it as transient working memory only. It is archived and not long-term memory."
             )
+        fixed_parts.append(
+            "# Context Honesty\n\n"
+            "The chat platform normally delivers only the newest inbound message; HermitCrab is responsible "
+            "for restoring prior turns from its local session history. Do not blame platform truncation, UI "
+            "truncation, or the user for missing context unless a tool or log proves it. If the user says you "
+            "forgot, contradicted recent messages, or asks what happened, inspect recent session history with "
+            "`session_search` using `recent=true` before explaining. If evidence is unavailable, say that the "
+            "cause is unverified instead of inventing one."
+        )
 
         always_skills = self.skills.get_always_skills()
         fixed_prompt = "\n\n---\n\n".join(fixed_parts)
@@ -177,20 +181,18 @@ class ContextBuilder:
             if relevant_memory:
                 parts.append(f"# Relevant Memory\n\n{relevant_memory}")
 
-            remaining_memory_tokens = max(0, available_memory_tokens - relevant_memory_tokens)
-            remaining_memory_chars = min(self.memory_max_chars, remaining_memory_tokens * 4)
-            if remaining_memory_chars > 0:
-                general_memory = self.memory.get_memory_context(
-                    max_chars=remaining_memory_chars,
-                    max_items_per_category=(
-                        max(1, self.memory_max_items_per_category // 2)
-                        if relevant_memory
-                        else self.memory_max_items_per_category
-                    ),
-                    max_item_chars=self.memory_max_item_chars,
-                )
-                if general_memory:
-                    parts.append(f"# Memory\n\n{general_memory}")
+            include_general_memory = (not relevant_memory) and (not current_message or not memory_queries)
+            if include_general_memory:
+                remaining_memory_tokens = max(0, available_memory_tokens - relevant_memory_tokens)
+                remaining_memory_chars = min(self.memory_max_chars, remaining_memory_tokens * 4)
+                if remaining_memory_chars > 0:
+                    general_memory = self.memory.get_memory_context(
+                        max_chars=remaining_memory_chars,
+                        max_items_per_category=self.memory_max_items_per_category,
+                        max_item_chars=self.memory_max_item_chars,
+                    )
+                    if general_memory:
+                        parts.append(f"# Memory\n\n{general_memory}")
 
         logger.debug(
             "Prompt budget estimate: fixed_tokens={}, history_tokens={}, reserved_history_tokens={}, current_tokens={}, available_memory_tokens={}, relevant_memory_tokens={}",
@@ -223,27 +225,53 @@ class ContextBuilder:
                 parts.append(path.read_text(encoding="utf-8").strip())
         return "\n\n".join(p for p in parts if p)
 
+    def _load_identity_contract(self) -> str:
+        """Load the identity-defining prompt layer."""
+        parts = []
+        for filename in self.IDENTITY_BOOTSTRAP_FILES:
+            file_path = self.workspace / filename
+            if not file_path.exists():
+                continue
+            content = file_path.read_text(encoding="utf-8").strip()
+            if content:
+                parts.append(f"## {filename}\n\n{content}")
+
+        if not parts:
+            parts.append("HermitCrab is a durable local AI collaborator rooted in this workspace.")
+
+        return (
+            "# Identity Contract\n\n"
+            "This section defines HermitCrab's identity, personality, user relationship, and "
+            "communication style. The model provider is only the execution backend; preserve "
+            "this identity across model changes. Follow this contract unless a higher-priority "
+            "safety, security, or user instruction explicitly conflicts.\n\n"
+            "Do not identify as ChatGPT, OpenAI, Anthropic, or any other backend unless the user "
+            "asks which provider/model is being used.\n\n"
+            "## Output Style\n\n"
+            "- Default to concise, direct replies.\n"
+            "- Do not add generic assistant closers or offers for next steps.\n"
+            "- Match the active identity files and channel context before provider defaults.\n\n"
+            + "\n\n".join(parts)
+        )
+
     def _get_identity(self) -> str:
-        """Get the core identity section."""
-        now = datetime.now().strftime("%Y-%m-%d %H:%M (%A)")
-        tz = _time.strftime("%Z") or "UTC"
+        """Get the runtime operating context section."""
         workspace_root = self.workspace.expanduser().resolve()
         workspace_path = str(workspace_root)
         system = platform.system()
         runtime = f"{'macOS' if system == 'Darwin' else system} {platform.machine()}, Python {platform.python_version()}"
 
-        return f"""# hermitcrab
-
-## Current Time
-{now} ({tz})
+        return f"""# HermitCrab Runtime
 
 ## Runtime
 {runtime}
 
 ## Workspace
-Your workspace is at: {workspace_path}
+Your workspace and filesystem tool boundary is: {workspace_path}
+- Use relative paths like `memory/`, `knowledge/`, or `scratchpads/...`, or absolute paths under `{workspace_path}`.
+- Do not call filesystem tools on parent HermitCrab directories such as `{workspace_root.parent.parent}` or `{workspace_root.parent}`; they are outside this identity's allowed workspace and will be denied.
 - Custom skills: {workspace_path}/skills/{{skill-name}}/SKILL.md
-- Bootstrap files in the workspace define repo policy, file placement, and long-term memory rules.
+- Bootstrap files define repo policy, file placement, operating rules, and long-term memory rules.
 
 ## Surroundings
 - Workspace surfaces by purpose:
@@ -269,6 +297,7 @@ Reply directly for normal conversation. Only use `message` to send to a specific
 - Do not assume a file or directory exists — use list_dir or read_file to verify.
 - After writing or editing a file, re-read it if accuracy matters.
 - If a tool call fails, analyze the error before retrying with a different approach.
+- Use `exec` for workspace-scoped filesystem operations not covered by file tools, such as deleting or renaming files. In workspace-restricted mode, `exec` applies best-effort path checks (for traversal/home/outside paths), but it is not a sandbox or true confinement.
 
 ## Memory
 - Search memory before answering when durable past context may matter.
@@ -321,17 +350,38 @@ Use subagents for complex, time-consuming, or specialized tasks. For substantial
             '- spawn(task="...", label="...", model="qwen")'
         )
 
-    def _load_bootstrap_files(self) -> str:
-        """Load all bootstrap files from workspace."""
+    def _load_system_bootstrap_files(self) -> str:
+        """Load operational bootstrap files that do not define identity."""
         parts = []
 
-        for filename in self.BOOTSTRAP_FILES:
-            file_path = self.workspace / filename
-            if file_path.exists():
+        roots_and_files: list[tuple[Path, list[str]]] = []
+        if self.system_root is not None:
+            roots_and_files.append((self.system_root, self.SYSTEM_BOOTSTRAP_FILES))
+        roots_and_files.append((self.workspace, self.SYSTEM_BOOTSTRAP_FILES))
+
+        seen: set[Path] = set()
+        for root, filenames in roots_and_files:
+            for filename in filenames:
+                file_path = root / filename
+                if file_path in seen or not file_path.exists():
+                    continue
+                seen.add(file_path)
                 content = file_path.read_text(encoding="utf-8")
                 parts.append(f"## {filename}\n\n{content}")
 
         return "\n\n".join(parts) if parts else ""
+
+    def _load_bootstrap_files(self) -> str:
+        """Load all bootstrap files for compatibility with older callers."""
+        parts = [self._load_system_bootstrap_files()]
+        identity = []
+        for filename in self.IDENTITY_BOOTSTRAP_FILES:
+            file_path = self.workspace / filename
+            if file_path.exists():
+                identity.append(f"## {filename}\n\n{file_path.read_text(encoding='utf-8')}")
+        if identity:
+            parts.append("\n\n".join(identity))
+        return "\n\n".join(p for p in parts if p)
 
     def _load_onboarding_prompt(self) -> str:
         """Load onboarding instructions when workspace onboarding flag is enabled."""
@@ -383,20 +433,104 @@ Use subagents for complex, time-consuming, or specialized tasks. For substantial
             history=history,
         )
         if channel and chat_id:
-            system_prompt += f"\n\n## Current Session\nChannel: {channel}\nChat ID: {chat_id}"
+            system_prompt += "\n\n## Session Context\nRuntime session details are provided near the active user turn."
         messages.append({"role": "system", "content": system_prompt})
 
-        # History (last N messages, for conversation context and to limit token usage)
+        # History (last N messages, then token-aware trim to fit remaining prompt budget)
         if max_history is not None:
-            messages.extend(history[-max_history:])
+            candidate_history = history[-max_history:]
         else:
-            messages.extend(history)
+            candidate_history = history
+
+        history_budget = self._calculate_history_token_budget(
+            messages,
+            current_message,
+            channel,
+            chat_id,
+            scratchpad_path,
+            candidate_history,
+        )
+        selected_history = self._trim_history_to_token_budget(candidate_history, history_budget)
+        logger.debug(
+            "Prompt history selection: candidate_messages={}, selected_messages={}, history_budget_tokens={}",
+            len(candidate_history),
+            len(selected_history),
+            history_budget,
+        )
+        messages.extend(selected_history)
+
+        runtime_context = self._build_runtime_context(channel, chat_id, scratchpad_path)
+        if runtime_context:
+            messages.append({"role": "user", "content": runtime_context})
 
         # Current message (with optional image attachments)
         user_content = self._build_user_content(current_message, media)
         messages.append({"role": "user", "content": user_content})
 
         return messages
+
+    def _calculate_history_token_budget(
+        self,
+        messages_without_history: list[dict[str, Any]],
+        current_message: str,
+        channel: str | None,
+        chat_id: str | None,
+        scratchpad_path: str | None,
+        history: list[dict[str, Any]] | None = None,
+    ) -> int:
+        runtime_context = self._build_runtime_context(channel, chat_id, scratchpad_path)
+        runtime_tokens = estimate_text_tokens(runtime_context) if runtime_context else 0
+        current_tokens = estimate_text_tokens(current_message)
+        reserved_tokens = estimate_message_tokens(messages_without_history) + runtime_tokens + current_tokens
+        budget = max(0, self.prompt_token_budget - reserved_tokens)
+        if history:
+            # Recent turns are core conversational state, not optional garnish. In beta4 the
+            # fixed/system prompt can exceed this conservative planning budget. The planning
+            # budget is only a soft budget for optional sections; it must never zero out the
+            # recent chat tail. Providers still enforce the true model context window later.
+            budget = max(budget, min(1200, max(384, self.prompt_token_budget // 4)))
+        return budget
+
+    def _trim_history_to_token_budget(
+        self,
+        history: list[dict[str, Any]],
+        token_budget: int,
+    ) -> list[dict[str, Any]]:
+        if not history or token_budget <= 0:
+            return []
+
+        selected_reversed: list[dict[str, Any]] = []
+        selected_tokens = 0
+        i = len(history) - 1
+        while i >= 0:
+            msg = history[i]
+            chunk = [msg]
+            if msg.get("role") == "tool" and i - 1 >= 0 and history[i - 1].get("role") == "assistant":
+                chunk = [history[i - 1], msg]
+                i -= 1
+
+            chunk_tokens = estimate_message_tokens(chunk)
+            if selected_tokens + chunk_tokens > token_budget:
+                break
+
+            selected_reversed.extend(reversed(chunk))
+            selected_tokens += chunk_tokens
+            i -= 1
+
+        return list(reversed(selected_reversed))
+
+    def _build_runtime_context(
+        self, channel: str | None, chat_id: str | None, scratchpad_path: str | None
+    ) -> str:
+        """Build volatile per-turn context outside the stable system prompt prefix."""
+        now = datetime.now().strftime("%Y-%m-%d %H:%M (%A)")
+        tz = _time.strftime("%Z") or "UTC"
+        lines = ["## Runtime Context", f"Current time: {now} ({tz})"]
+        if channel and chat_id:
+            lines.extend((f"Channel: {channel}", f"Chat ID: {chat_id}"))
+        if scratchpad_path:
+            lines.append(f"Session scratchpad: {scratchpad_path}")
+        return "\n".join(lines)
 
     def _build_memory_queries(
         self, current_message: str | None, history: list[dict[str, Any]]
