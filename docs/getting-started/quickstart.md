@@ -15,7 +15,7 @@ This creates `~/.hermitcrab/config.json`, bootstraps the system state, and prepa
 For non-interactive installs, pass safe defaults:
 
 ```bash
-hermitcrab setup --yes --provider ollama --model ollama/gemma4:e4b
+hermitcrab setup --yes --provider ollama --model ollama/llama3.2:3b
 ```
 
 `hermitcrab onboard` remains available as the lower-level/scriptable bootstrap command.
@@ -29,8 +29,8 @@ HermitCrab uses named models so admins do not need to hand-edit JSON for common 
 Install [Ollama](https://ollama.com), then pull a model:
 
 ```bash
-ollama pull gemma4:e4b
-hermitcrab model add main ollama/gemma4:e4b --provider ollama
+ollama pull llama3.2:3b
+hermitcrab model add main ollama/llama3.2:3b --provider ollama
 hermitcrab model set-default main
 ```
 

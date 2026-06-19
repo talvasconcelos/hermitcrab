@@ -43,7 +43,7 @@ Check the model string format:
 
 - Cloud models: `"anthropic/claude-opus-4-5"`, `"openai/gpt-4o"`
 - OpenRouter: `"anthropic/claude-sonnet-4"` or `"openrouter/anthropic/claude-sonnet-4"`
-- Ollama: `"ollama/gemma4:e4b"`
+- Ollama: `"ollama/llama3.2:3b"`
 
 Run `hermitcrab doctor` to validate.
 

@@ -1142,7 +1142,7 @@ def _build_onboard_next_steps() -> list[str]:
         lines.extend(
             [
                 "  1. Recommended local setup detected: [cyan]ollama[/cyan] is installed",
-                "     Start it with [cyan]ollama serve[/cyan] and pull a model like [cyan]ollama pull qwen3.5:4b[/cyan]",
+                "     Start it with [cyan]ollama serve[/cyan] and pull a model like [cyan]ollama pull llama3.2:3b[/cyan]",
                 "  2. Review [cyan]~/.hermitcrab/config.json[/cyan] and point your main model at Ollama or your preferred provider",
                 "  3. Run a quick readiness check: [cyan]hermitcrab doctor[/cyan]",
                 '  4. Start chatting: [cyan]hermitcrab agent[/cyan] or [cyan]hermitcrab agent -m "Hello!"[/cyan]',

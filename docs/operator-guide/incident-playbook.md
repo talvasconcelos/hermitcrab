@@ -51,7 +51,7 @@ Look for provider connection errors or rate limiting messages.
 Verify the model string in `config.json` matches the provider format:
 - Anthropic: `"anthropic/claude-opus-4-5"`
 - OpenRouter: `"anthropic/claude-sonnet-4"`
-- Ollama: `"ollama/gemma4:e4b"`
+- Ollama: `"ollama/llama3.2:3b"`
 
 5. Retry with backoff:
 

@@ -2,6 +2,20 @@
 
 All notable changes to HermitCrab.
 
+## [0.1.0b4] — 2026-06-14
+
+### Added
+
+- Concise `/capabilities` diagnostics for operator-facing runtime visibility
+- OpenRouter attribution headers for provider requests
+
+### Changed
+
+- Preserved recent session context more reliably across turns
+- Reduced surprising progress/tool hint behavior during agent runs
+- Improved partial reflection-output salvage so useful reflections are not discarded unnecessarily
+- Refreshed release metadata and public setup examples for the beta4 line
+
 ## [0.1.0b3] — 2026-04-24
 
 ### Added

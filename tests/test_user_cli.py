@@ -59,8 +59,9 @@ def test_user_add_creates_identity_config_and_bootstrap_root(monkeypatch, tmp_pa
 
 
 def test_user_add_accepts_nostr_public_key_only(monkeypatch, tmp_path) -> None:
-    from hermitcrab.config.schema import normalize_nostr_pubkey
     from pynostr.key import PrivateKey
+
+    from hermitcrab.config.schema import normalize_nostr_pubkey
 
     pubkey = PrivateKey().public_key.bech32()
     _use_config(monkeypatch, tmp_path, Config.model_validate({"root": str(tmp_path)}))

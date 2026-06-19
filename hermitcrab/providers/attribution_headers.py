@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from urllib.parse import urlparse
 
-
 _OPENROUTER_ATTRIBUTION_HEADERS = {
     "HTTP-Referer": "https://github.com/talvasconcelos/hermitcrab",
     "X-Title": "HermitCrab",

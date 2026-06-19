@@ -83,9 +83,9 @@ The installer itself is meant to be generic for Unix-like systems; the `systemd 
    
    b. Pull a model:
    ```bash
-   ollama pull gemma4:e4b  # Fast thinking model
+   ollama pull llama3.2:3b  # Fast general-purpose local model
    # Or: ollama pull llama3.1:8b      # General purpose
-   # Or: ollama pull qwen3.5:7b # Coding specialist
+   # Or: ollama pull qwen2.5-coder:7b # Coding specialist
    ```
    
    c. Edit `~/.hermitcrab/config.json`:
@@ -99,10 +99,10 @@ The installer itself is meant to be generic for Unix-like systems; the `systemd 
      },
      "models": {
        "main": {
-         "model": "ollama/gemma4:e4b"
+         "model": "ollama/llama3.2:3b"
        },
        "localCoder": {
-         "model": "ollama/qwen3.5:7b"
+         "model": "ollama/qwen2.5-coder:7b"
        }
      },
      "agents": {
@@ -133,10 +133,10 @@ The installer itself is meant to be generic for Unix-like systems; the `systemd 
          "model": "ollama/glm-5:cloud"
        },
        "coder": {
-         "model": "ollama/qwen3.5:4b"
+         "model": "ollama/qwen2.5-coder:7b"
        },
        "fast": {
-         "model": "ollama/gemma4:e2b",
+         "model": "ollama/llama3.2:3b",
          "reasoningEffort": "medium"
        }
      },
@@ -267,7 +267,7 @@ owner/operator surfaces.
 | write_file        | Create / overwrite files                  |
 | edit_file         | Precise replacements                      |
 | list_dir          | Browse directories                        |
-| exec              | Run safe shell commands                   |
+| exec              | Run permission-gated shell commands       |
 | web_search        | DuckDuckGo search (no API key needed)     |
 | web_fetch         | Fetch & extract URL content (sanitized)   |
 | knowledge_search  | Search your knowledge library             |

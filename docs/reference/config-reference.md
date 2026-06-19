@@ -99,7 +99,7 @@ Shorthand aliases for model names:
     "modelAliases": {
       "coder": "localCoder",
       "fast": {
-        "model": "ollama/gemma4:e2b",
+        "model": "ollama/llama3.2:3b",
         "reasoningEffort": "medium"
       }
     }
@@ -179,10 +179,10 @@ Named model definitions with optional provider-specific options:
 {
   "models": {
     "main": {
-      "model": "ollama/gemma4:e4b"
+      "model": "ollama/llama3.2:3b"
     },
     "coder": {
-      "model": "ollama/qwen3.5:7b",
+      "model": "ollama/qwen2.5-coder:7b",
       "providerOptions": {
         "num_ctx": 32768
       }
