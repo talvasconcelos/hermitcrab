@@ -1,5 +1,5 @@
 # 🦀 HermitCrab  
-**Your local, private AI companion that actually remembers — and gets better over time**
+**Your local, private AI companion that actually remembers - and gets better over time**
 
 [![PyPI version](https://img.shields.io/pypi/v/hermitcrab-ai)](https://pypi.org/project/hermitcrab-ai/)
 [![Python ≥3.11](https://img.shields.io/badge/python-≥3.11-blue)](https://python.org)
@@ -15,7 +15,7 @@ HermitCrab is a **personal AI agent** you run on your own machine.
 It’s not another cloud wrapper, not a bloated framework, not yet another SaaS subscription trap.  
 
 It’s lean, readable, auditable, and built around one simple idea:  
-**Your AI should remember what matters to you — forever — without turning into a black box.**
+**Your AI should remember what matters to you - forever - without turning into a black box.**
 
 Think of it as a **second brain** you can carry in your pocket (or copy to a new laptop/VPS in seconds).  
 Back up `~/.hermitcrab/` and you have the config, system guidance, identities, memory, sessions, and routines.
@@ -25,9 +25,9 @@ Back up `~/.hermitcrab/` and you have the config, system guidance, identities, m
 - Supports **fully offline** operation with local models (native Ollama or OpenAI-compatible local routes)  
 - Remembers things in **plain, human-readable Markdown files** (Obsidian compatible, git-friendly)  
 - Can **distill** conversations into facts, tasks, decisions, goals, and reflections when that optional background pass is enabled  
-- **Reflects** on itself — spots patterns, mistakes, contradictions, and suggests improvements  
-- Talks via **Nostr** (primary), Telegram, email, or plain CLI — your choice  
-- Stays tiny, fast, and cheap — no 100k+ line monolith
+- **Reflects** on itself - spots patterns, mistakes, contradictions, and suggests improvements  
+- Talks via **Nostr** (primary), Telegram, email, or plain CLI - your choice  
+- Stays tiny, fast, and cheap - no 100k+ line monolith
 - Aims to stay powerful for operators while still being approachable for normal household use
 
 **Same crab, new shell.**  
@@ -209,10 +209,10 @@ Every session follows a clean lifecycle:
 
 1. You talk → agent responds → tools run if needed  
 2. Session ends (you exit, or 30 min of silence)  
-3. **Journal synthesis** — narrative summary of what happened (cheap model)  
-4. **Optional distillation** — proposes fallback facts, tasks, goals, and decisions when enabled  
-5. **Reflection** — looks for mistakes, contradictions, patterns (smarter model)
-6. **Scratchpad archival** — per-session transient notes are archived on session end
+3. **Journal synthesis** - narrative summary of what happened (cheap model)  
+4. **Optional distillation** - proposes fallback facts, tasks, goals, and decisions when enabled  
+5. **Reflection** - looks for mistakes, contradictions, patterns (smarter model)
+6. **Scratchpad archival** - per-session transient notes are archived on session end
 
 All extracted knowledge lands as tiny, atomic Markdown notes in the active identity's `memory/`:
 
@@ -234,7 +234,7 @@ Everything is:
 - Human-readable & editable (open in Obsidian, Vim, Notepad)
 - Structured with YAML frontmatter
 - Wikilink-friendly
-- Deterministic — Python, not the LLM, writes the files
+- Deterministic - Python, not the LLM, writes the files
 
 No vector databases. No silent embeddings. No hidden state corruption.
 
@@ -249,17 +249,17 @@ Distillation is conservative and optional by design. Explicit memory writes rema
   - `identities/<name>/prompts/<channel>.md`
   - `identities/<name>/prompts/<channel>/<chat_id>.md`
 
-### Channels — where you talk to your crab
+### Channels - where you talk to your crab
 
-- **Nostr** (default / primary) — encrypted DMs via NIP-04 or modern NIP-17  
-- **Telegram** — classic bot  
-- **Email** — IMAP/SMTP  
-- **CLI** — quick local chats
+- **Nostr** (default / primary) - encrypted DMs via NIP-04 or modern NIP-17  
+- **Telegram** - classic bot  
+- **Email** - IMAP/SMTP  
+- **CLI** - quick local chats
 
 The gateway can route channel traffic to isolated identities. CLI and `config.json` remain
 owner/operator surfaces.
 
-### Tools — what the agent can actually do
+### Tools - what the agent can actually do
 
 | Tool              | What it does                              |
 |-------------------|-------------------------------------------|
@@ -278,9 +278,9 @@ owner/operator surfaces.
 
 **Security:** Web content is automatically sanitized to remove prompt injection attacks, hidden instructions, and encoded payloads.
 
-Execution is **always** gated by Python — the LLM can only propose.
+Execution is **always** gated by Python - the LLM can only propose.
 
-### Self-Improvement — the part that actually matters
+### Self-Improvement - the part that actually matters
 
 HermitCrab gets smarter over time by:
 
@@ -321,7 +321,7 @@ hermitcrab/
 ```
 
 Design rules we live by:
-- Python is the source of truth — LLM is untrusted
+- Python is the source of truth - LLM is untrusted
 - Memory is deterministic & auditable
 - Local-first by default
 - Small enough to read in a weekend
@@ -337,7 +337,7 @@ Production-minded defaults are in `hermitcrab/config/schema.py` and are written 
 - Bounded memory context injection
 - Reflection auto-promotion disabled by default (safer file integrity)
 
-### Comparison — why this feels different
+### Comparison - why this feels different
 
 | Aspect              | HermitCrab                          | Typical AI Framework / Chatbot      |
 |---------------------|-------------------------------------|-------------------------------------|
@@ -366,7 +366,7 @@ Most AI tools today are:
 
 HermitCrab exists to prove a quieter truth:
 
-A personal AI can be **small**, **local**, **private**, **deterministic**, and still **grow with you** — without turning into a 200k-line monster or a subscription bill.
+A personal AI can be **small**, **local**, **private**, **deterministic**, and still **grow with you** - without turning into a 200k-line monster or a subscription bill.
 
 Keep it yours. Keep it local. Keep it simple. 🦀
 
@@ -381,6 +381,12 @@ hermitcrab agent
 Welcome to your own second brain.
 Let's make it remember everything that matters.
 
+### Nostr
+
+HermitCrab's primary channel is Nostr, using encrypted DMs for private conversations. It supports both legacy NIP-04 and modern NIP-17 DM handling for compatibility with a wide range of clients.
+
+Check out more about Nostr [here](https://nostr.com/info), and consider using a dedicated [Nostr chat client](https://chat.nostr.com/) to interact with your HermitCrab agent.
+
 ### Docker
 
 `Dockerfile` and `docker-compose.yml` build/run HermitCrab directly.
@@ -388,9 +394,11 @@ Let's make it remember everything that matters.
 - Build: `docker compose build`
 - Run gateway: `docker compose up -d hermitcrab-gateway`
 
+Persisted data lives at `~/.hermitcrab` and can be mounted into containers when you use Docker.
+
 ## 🤝 Acknowledgments
 
-**HermitCrab is a fork of [nanobot](https://github.com/HKUDS/nanobot)** by [HKUDS](https://github.com/HKUDS).
+**HermitCrab started as a fork of [nanobot](https://github.com/HKUDS/nanobot)** by [HKUDS](https://github.com/HKUDS).
 
 We stand on the shoulders of giants:
 - Original nanobot architecture © HKUDS (MIT License)
@@ -398,4 +406,3 @@ We stand on the shoulders of giants:
 
 **Thank you** to the nanobot team for creating the foundation that made HermitCrab possible.
 
-Persisted data lives at `~/.hermitcrab` and can be mounted into containers when you use Docker.

@@ -52,6 +52,9 @@ dev = [
     "ruff>=0.1.0",
 ]
 
+[tool.uv]
+exclude-newer = "1 week"
+
 [project.scripts]
 hermitcrab = "hermitcrab.cli.commands:app"
 
