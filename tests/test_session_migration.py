@@ -6,7 +6,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from hermitcrab.session import SQLiteSessionStore
-from hermitcrab.session.migration import import_jsonl_sessions
+from hermitcrab.session.migration import import_jsonl_sessions, migrate_jsonl_sessions_once
 
 
 def write_jsonl(path: Path, rows: list[dict]) -> None:
@@ -159,3 +159,27 @@ def test_import_jsonl_sessions_preserves_tool_messages(tmp_path) -> None:
 
     assert call_count == 1
     assert result_count == 1
+
+
+def test_migrate_jsonl_sessions_once_writes_marker_and_moves_legacy_files(tmp_path) -> None:
+    workspace = tmp_path / "identity"
+    jsonl_path = workspace / "sessions" / "cli_local.jsonl"
+    write_jsonl(
+        jsonl_path,
+        [
+            {"_type": "metadata", "key": "cli:local", "metadata": {}},
+            {"role": "user", "content": "legacy session"},
+        ],
+    )
+
+    with SQLiteSessionStore(tmp_path / "sessions.sqlite3") as store:
+        report = migrate_jsonl_sessions_once(workspace, store)
+        second_report = migrate_jsonl_sessions_once(workspace, store)
+        messages = store.get_messages("cli:local")
+
+    assert report.imported == 1
+    assert second_report.scanned == 0
+    assert [message.content for message in messages] == ["legacy session"]
+    assert not jsonl_path.exists()
+    assert (workspace / "sessions" / ".sqlite_migration_complete").exists()
+    assert list((workspace / "sessions" / "jsonl-migrated-backup").glob("**/*.jsonl"))

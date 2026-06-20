@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import re
+import shutil
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -44,6 +45,61 @@ class SessionImportReport:
     @property
     def ok(self) -> bool:
         return self.failed == 0
+
+
+MIGRATION_MARKER = ".sqlite_migration_complete"
+JSONL_BACKUP_DIR = "jsonl-migrated-backup"
+
+
+def migrate_jsonl_sessions_once(
+    workspace: Path,
+    store: SQLiteSessionStore,
+    *,
+    backup: bool = True,
+) -> SessionImportReport:
+    """Migrate legacy JSONL sessions once, then mark SQLite authoritative."""
+    workspace = Path(workspace)
+    sessions_dir = workspace / "sessions"
+    sessions_dir.mkdir(parents=True, exist_ok=True)
+    marker = sessions_dir / MIGRATION_MARKER
+    if marker.exists():
+        return SessionImportReport(dry_run=False)
+
+    report = import_jsonl_sessions(workspace, store)
+    if not report.ok:
+        return report
+
+    if backup:
+        _backup_jsonl_sessions(workspace, report)
+    else:
+        _delete_imported_jsonl_sessions(report)
+
+    marker.write_text(
+        "SQLite session migration complete. Legacy JSONL session files are no longer live.\n",
+        encoding="utf-8",
+    )
+    return report
+
+
+def _backup_jsonl_sessions(workspace: Path, report: SessionImportReport) -> None:
+    imported = [item for item in report.items if item.status == "imported"]
+    if not imported:
+        return
+    backup_root = workspace / "sessions" / JSONL_BACKUP_DIR / datetime.now().strftime(
+        "%Y-%m-%dT%H-%M-%S"
+    )
+    for item in imported:
+        if not item.path.exists():
+            continue
+        target = backup_root / item.source_id
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.move(str(item.path), str(target))
+
+
+def _delete_imported_jsonl_sessions(report: SessionImportReport) -> None:
+    for item in report.items:
+        if item.status == "imported" and item.path.exists():
+            item.path.unlink()
 
 
 def import_jsonl_sessions(
@@ -284,4 +340,11 @@ def _slug(value: str) -> str:
     return slug or "session"
 
 
-__all__ = ["SessionImportItem", "SessionImportReport", "import_jsonl_sessions"]
+__all__ = [
+    "JSONL_BACKUP_DIR",
+    "MIGRATION_MARKER",
+    "SessionImportItem",
+    "SessionImportReport",
+    "import_jsonl_sessions",
+    "migrate_jsonl_sessions_once",
+]

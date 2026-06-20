@@ -7,7 +7,7 @@ from hermitcrab.session import SQLiteSessionStore
 from hermitcrab.session.manager import SessionManager, create_session_manager
 
 
-def test_session_manager_mirrors_saved_sessions_to_sqlite(tmp_path) -> None:
+def test_session_manager_writes_new_sessions_to_sqlite_only(tmp_path) -> None:
     with SQLiteSessionStore(tmp_path / "sessions.sqlite3") as store:
         manager = SessionManager(tmp_path, sqlite_store=store)
         session = manager.get_or_create("telegram:tal")
@@ -22,9 +22,10 @@ def test_session_manager_mirrors_saved_sessions_to_sqlite(tmp_path) -> None:
     assert stored.channel == "telegram"
     assert stored.chat_id == "tal"
     assert [message.content for message in messages] == ["remember the sqlite migration plan"]
+    assert not (tmp_path / "sessions" / "telegram_tal.jsonl").exists()
 
 
-def test_session_manager_mirror_is_idempotent_on_save(tmp_path) -> None:
+def test_session_manager_sqlite_save_is_idempotent(tmp_path) -> None:
     with SQLiteSessionStore(tmp_path / "sessions.sqlite3") as store:
         manager = SessionManager(tmp_path, sqlite_store=store)
         session = manager.get_or_create("cli:local")
@@ -43,11 +44,12 @@ def test_session_manager_marks_sqlite_session_archived(tmp_path) -> None:
         session = manager.get_or_create("nostr:alice")
         session.add_message("user", "old context")
         manager.save(session)
-        manager.archive(session, "timeout")
+        archive_path = manager.archive(session, "timeout")
 
         stored = store.get_session("nostr:alice")
         messages = store.get_messages("nostr:alice")
 
+    assert archive_path is None
     assert stored is not None
     assert stored.status == "archived"
     assert stored.archive_reason == "timeout"
@@ -83,10 +85,11 @@ async def test_session_search_tool_recent_uses_sqlite_history_when_available(tmp
     assert "recent sqlite tail" in result
 
 
-def test_create_session_manager_imports_existing_jsonl_sessions(tmp_path) -> None:
+def test_create_session_manager_migrates_existing_jsonl_once_then_uses_marker(tmp_path) -> None:
     sessions_dir = tmp_path / "sessions"
     sessions_dir.mkdir()
-    (sessions_dir / "telegram_tal.jsonl").write_text(
+    jsonl_path = sessions_dir / "telegram_tal.jsonl"
+    jsonl_path.write_text(
         '{"_type":"metadata","key":"telegram:tal","metadata":{}}\n'
         '{"role":"user","content":"existing jsonl context"}\n',
         encoding="utf-8",
@@ -97,3 +100,17 @@ def test_create_session_manager_imports_existing_jsonl_sessions(tmp_path) -> Non
     assert manager.sqlite_store is not None
     assert manager.sqlite_store.get_session("telegram:tal") is not None
     assert manager.search_history("existing jsonl")
+    assert not jsonl_path.exists()
+    assert (sessions_dir / ".sqlite_migration_complete").exists()
+    assert list((sessions_dir / "jsonl-migrated-backup").glob("**/*.jsonl"))
+
+    # A second startup should trust the marker and ignore new stray JSONL files.
+    stray_path = sessions_dir / "telegram_tal.jsonl"
+    stray_path.write_text(
+        '{"_type":"metadata","key":"telegram:tal","metadata":{}}\n'
+        '{"role":"user","content":"should not import"}\n',
+        encoding="utf-8",
+    )
+    manager = create_session_manager(tmp_path)
+
+    assert manager.search_history("should not import") == []
