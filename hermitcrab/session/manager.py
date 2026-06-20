@@ -146,6 +146,20 @@ class Session:
         self.updated_at = datetime.now()
 
 
+def create_session_manager(workspace: Path, *, import_existing: bool = True) -> "SessionManager":
+    """Create the default beta5 session manager with SQLite mirror/search enabled."""
+    sqlite_store = SQLiteSessionStore(workspace / "sessions" / "sessions.sqlite3")
+    manager = SessionManager(workspace, sqlite_store=sqlite_store)
+    if import_existing:
+        try:
+            from hermitcrab.session.migration import import_jsonl_sessions
+
+            import_jsonl_sessions(workspace, sqlite_store)
+        except Exception as exc:
+            logger.warning("Failed to import existing JSONL sessions into SQLite: {}", exc)
+    return manager
+
+
 class SessionManager:
     """
     Manages conversation sessions.

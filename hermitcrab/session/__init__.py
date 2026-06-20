@@ -1,6 +1,6 @@
 """Session management module."""
 
-from hermitcrab.session.manager import Session, SessionManager
+from hermitcrab.session.manager import Session, SessionManager, create_session_manager
 from hermitcrab.session.migration import SessionImportItem, SessionImportReport, import_jsonl_sessions
 from hermitcrab.session.sqlite_store import SQLiteSessionStore
 from hermitcrab.session.storage import (
@@ -20,5 +20,6 @@ __all__ = [
     "SessionManager",
     "SessionRecord",
     "SessionStorage",
+    "create_session_manager",
     "import_jsonl_sessions",
 ]

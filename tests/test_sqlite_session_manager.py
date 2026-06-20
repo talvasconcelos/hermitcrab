@@ -4,7 +4,7 @@ import pytest
 
 from hermitcrab.agent.tools.session_search import SessionSearchTool
 from hermitcrab.session import SQLiteSessionStore
-from hermitcrab.session.manager import SessionManager
+from hermitcrab.session.manager import SessionManager, create_session_manager
 
 
 def test_session_manager_mirrors_saved_sessions_to_sqlite(tmp_path) -> None:
@@ -81,3 +81,19 @@ async def test_session_search_tool_recent_uses_sqlite_history_when_available(tmp
 
     assert "Found 1 recent session" in result
     assert "recent sqlite tail" in result
+
+
+def test_create_session_manager_imports_existing_jsonl_sessions(tmp_path) -> None:
+    sessions_dir = tmp_path / "sessions"
+    sessions_dir.mkdir()
+    (sessions_dir / "telegram_tal.jsonl").write_text(
+        '{"_type":"metadata","key":"telegram:tal","metadata":{}}\n'
+        '{"role":"user","content":"existing jsonl context"}\n',
+        encoding="utf-8",
+    )
+
+    manager = create_session_manager(tmp_path)
+
+    assert manager.sqlite_store is not None
+    assert manager.sqlite_store.get_session("telegram:tal") is not None
+    assert manager.search_history("existing jsonl")

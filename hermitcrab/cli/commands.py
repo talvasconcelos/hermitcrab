@@ -200,7 +200,7 @@ class GatewayIdentityRuntimeState:
 
     async def attach_configured_identity_agents(self) -> None:
         from hermitcrab.agent.loop import AgentLoop
-        from hermitcrab.session.manager import SessionManager
+        from hermitcrab.session.manager import create_session_manager
 
         for identity_name, identity in self.config.identities.registry.items():
             if identity_name == self.config.owner_identity_name or not identity.active:
@@ -219,7 +219,7 @@ class GatewayIdentityRuntimeState:
                     identity_name=identity_name,
                     identity_root=identity_root,
                     cron_service=cron,
-                    session_manager=SessionManager(identity_root),
+                    session_manager=create_session_manager(identity_root),
                 ),
             )
             await self.attach_agent_services(key, loop, cron)
@@ -250,7 +250,7 @@ class GatewayIdentityRuntimeState:
         identity_root = self.config.get_identity_path(identity_name)
         cron = self.build_cron_service(identity_root, identity_name, key)
         from hermitcrab.agent.loop import AgentLoop
-        from hermitcrab.session.manager import SessionManager
+        from hermitcrab.session.manager import create_session_manager
 
         loop = AgentLoop(
             bus=self.bus,
@@ -261,7 +261,7 @@ class GatewayIdentityRuntimeState:
                 identity_name=identity_name,
                 identity_root=identity_root,
                 cron_service=cron,
-                session_manager=SessionManager(identity_root),
+                session_manager=create_session_manager(identity_root),
             ),
         )
         await self.attach_agent_services(key, loop, cron)
@@ -1362,7 +1362,7 @@ def gateway(
     from hermitcrab.channels.manager import ChannelManager
     from hermitcrab.heartbeat.service import HeartbeatService
     from hermitcrab.reminders.service import ReminderService
-    from hermitcrab.session.manager import SessionManager
+    from hermitcrab.session.manager import create_session_manager
     from hermitcrab.session.timeout_service import SessionTimeoutService
 
     configured_level = "DEBUG" if verbose else log_level.upper()
@@ -1377,7 +1377,7 @@ def gateway(
         raise RuntimeError("admin workspace invariant failed: workspace_path must equal admin_workspace_path")
     bus = MessageBus()
     provider = _make_provider(config)
-    session_manager = SessionManager(config.owner_identity_root_path)
+    session_manager = create_session_manager(config.owner_identity_root_path)
     identity_routing_active = _identity_routing_active(config)
 
     owner_key = f"identity:{config.identities.registry[config.owner_identity_name].nostr_public_key}"
