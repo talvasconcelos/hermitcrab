@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import re
+from datetime import datetime, timezone
 from difflib import SequenceMatcher
 from pathlib import Path
 from typing import Any, Awaitable, Callable
@@ -111,6 +112,8 @@ class DistillationManager:
     def commit_candidate_to_memory(self, candidate: AtomicCandidate) -> None:
         try:
             if not self.should_commit_distilled_candidate(candidate):
+                reason = candidate.skip_reason or "filtered_by_policy"
+                self._audit_distillation_candidate("filtered", candidate, reason=reason)
                 logger.info("Distillation filtered candidate '{}'", candidate.title)
                 return
 
@@ -132,8 +135,33 @@ class DistillationManager:
             elif candidate.type == CandidateType.REFLECTION:
                 self.memory.write_reflection(**params)
                 logger.info("Memory commit: reflection '{}'", candidate.title)
+            self._audit_distillation_candidate("committed", candidate, reason="committed")
         except Exception as exc:
+            self._audit_distillation_candidate("failed", candidate, reason=str(exc))
             logger.error("Failed to commit candidate to memory: {}: {}", candidate.title, exc)
+
+    def _audit_distillation_candidate(
+        self,
+        event: str,
+        candidate: AtomicCandidate,
+        *,
+        reason: str,
+    ) -> None:
+        """Append a local audit event for distilled candidate decisions."""
+        audit_path = self.memory.memory_dir / "distillation_audit.jsonl"
+        payload = {
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "event": event,
+            "reason": reason,
+            "type": candidate.type.value,
+            "title": candidate.title,
+            "source_session": candidate.source_session,
+            "skip_reason": candidate.skip_reason,
+            "evidence": candidate.evidence,
+        }
+        audit_path.parent.mkdir(parents=True, exist_ok=True)
+        with audit_path.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(payload, sort_keys=True) + "\n")
 
     @staticmethod
     def normalize_memory_text(text: str) -> str:
