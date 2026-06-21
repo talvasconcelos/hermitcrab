@@ -111,10 +111,10 @@ class DistillationManager:
 
     def commit_candidate_to_memory(self, candidate: AtomicCandidate) -> None:
         try:
-            if not self.should_commit_distilled_candidate(candidate):
-                reason = candidate.skip_reason or "filtered_by_policy"
-                self._audit_distillation_candidate("filtered", candidate, reason=reason)
-                logger.info("Distillation filtered candidate '{}'", candidate.title)
+            filter_reason = self.distilled_candidate_filter_reason(candidate)
+            if filter_reason is not None:
+                self._audit_distillation_candidate("filtered", candidate, reason=filter_reason)
+                logger.info("Distillation filtered candidate '{}' ({})", candidate.title, filter_reason)
                 return
 
             params = candidate.to_memory_params()
@@ -163,9 +163,72 @@ class DistillationManager:
         with audit_path.open("a", encoding="utf-8") as handle:
             handle.write(json.dumps(payload, sort_keys=True) + "\n")
 
+    def _audit_distillation_payload(self, event: str, session_key: str, *, reason: str) -> None:
+        audit_path = self.memory.memory_dir / "distillation_audit.jsonl"
+        payload = {
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "event": event,
+            "reason": reason,
+            "source_session": session_key,
+        }
+        audit_path.parent.mkdir(parents=True, exist_ok=True)
+        with audit_path.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(payload, sort_keys=True) + "\n")
+
+    def _audit_raw_candidate(
+        self,
+        event: str,
+        session_key: str,
+        candidate_data: Any,
+        *,
+        reason: str,
+    ) -> None:
+        title = candidate_data.get("title", "unknown") if isinstance(candidate_data, dict) else "unknown"
+        candidate_type = candidate_data.get("type", "unknown") if isinstance(candidate_data, dict) else "unknown"
+        audit_path = self.memory.memory_dir / "distillation_audit.jsonl"
+        payload = {
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "event": event,
+            "reason": reason,
+            "type": candidate_type,
+            "title": title,
+            "source_session": session_key,
+        }
+        audit_path.parent.mkdir(parents=True, exist_ok=True)
+        with audit_path.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(payload, sort_keys=True) + "\n")
+
     @staticmethod
     def normalize_memory_text(text: str) -> str:
         return " ".join(re.sub(r"[^a-z0-9\s]+", " ", text.lower()).split())
+
+    @classmethod
+    def _messages_text(cls, messages: list[dict[str, Any]]) -> str:
+        parts: list[str] = []
+        for message in messages:
+            content = message.get("content")
+            if isinstance(content, str):
+                parts.append(content)
+            if isinstance(message.get("tool_calls"), list):
+                parts.extend(cls.iter_strings(message["tool_calls"]))
+        return cls.normalize_memory_text(" ".join(parts))
+
+    def _candidate_evidence_is_grounded(self, candidate: AtomicCandidate, session_text: str) -> bool:
+        if candidate.type == CandidateType.IGNORED:
+            return True
+        if not session_text:
+            return True
+        evidence = self.normalize_memory_text(candidate.evidence or "")
+        if not evidence:
+            return False
+        if evidence in session_text:
+            return True
+        evidence_tokens = set(evidence.split())
+        if not evidence_tokens:
+            return False
+        session_tokens = set(session_text.split())
+        overlap = evidence_tokens & session_tokens
+        return len(overlap) / len(evidence_tokens) >= 0.8
 
     def is_near_duplicate_memory_item(self, candidate: AtomicCandidate, existing: Any) -> bool:
         title_ratio = SequenceMatcher(
@@ -192,21 +255,37 @@ class DistillationManager:
         return [item for item in existing if self.is_near_duplicate_memory_item(candidate, item)]
 
     def should_commit_distilled_candidate(self, candidate: AtomicCandidate) -> bool:
+        return self.distilled_candidate_filter_reason(candidate) is None
+
+    def distilled_candidate_filter_reason(self, candidate: AtomicCandidate) -> str | None:
         allowed_types = {CandidateType.FACT, CandidateType.GOAL, CandidateType.TASK}
+        if candidate.type == CandidateType.IGNORED:
+            return candidate.skip_reason or "ignored"
+        if candidate.confidence < 0.65:
+            return "low_confidence"
+
         if candidate.type == CandidateType.DECISION:
             has_rationale = bool((candidate.decision_rationale or "").strip())
             has_status = candidate.decision_status is not None
             if candidate.confidence < 0.9 or not has_rationale or not has_status:
-                return False
+                return "decision_missing_rationale_or_status"
         elif candidate.type == CandidateType.FACT:
             if self.looks_like_bootstrap_instruction(candidate):
-                return False
+                return "bootstrap_instruction"
         elif candidate.type not in allowed_types:
-            return False
+            return "unsupported_type"
 
-        if candidate.confidence < 0.65:
-            return False
-        return not self.find_existing_memory_duplicates(candidate)
+        duplicates = self.find_existing_memory_duplicates(candidate)
+        if duplicates:
+            if candidate.type == CandidateType.FACT:
+                normalized_title = self.normalize_memory_text(candidate.title)
+                normalized_content = self.normalize_memory_text(candidate.content)
+                for existing in duplicates:
+                    if self.normalize_memory_text(existing.title) == normalized_title:
+                        if self.normalize_memory_text(existing.content) != normalized_content:
+                            return None
+            return "duplicate"
+        return None
 
     @staticmethod
     def looks_like_bootstrap_instruction(candidate: AtomicCandidate) -> bool:
@@ -259,7 +338,7 @@ class DistillationManager:
                 content = self.strip_think(response.content)
                 if not content:
                     return
-                await self._commit_distillation_response(content, session.key)
+                await self._commit_distillation_response(content, session.key, messages)
             except json.JSONDecodeError as exc:
                 logger.warning("Distillation response not valid JSON: {}: {}", session.key, exc)
             except Exception as exc:
@@ -299,17 +378,37 @@ class DistillationManager:
         )
         return prompt
 
-    async def _commit_distillation_response(self, content: str, session_key: str) -> None:
+    async def _commit_distillation_response(
+        self,
+        content: str,
+        session_key: str,
+        messages: list[dict[str, Any]] | None = None,
+    ) -> None:
         data = self._extract_distillation_payload(content, session_key)
         if data is None:
+            self._audit_distillation_payload("parse_failed", session_key, reason="invalid_json_payload")
             return
 
         candidates = data.get("candidates", [])
         validated_count = 0
+        session_text = self._messages_text(messages or [])
         for candidate_data in candidates:
             try:
                 candidate = self._parse_candidate(candidate_data, session_key)
                 if candidate is None:
+                    self._audit_raw_candidate(
+                        "validation_failed",
+                        session_key,
+                        candidate_data,
+                        reason="invalid_candidate",
+                    )
+                    continue
+                if not self._candidate_evidence_is_grounded(candidate, session_text):
+                    self._audit_distillation_candidate(
+                        "validation_failed",
+                        candidate,
+                        reason="evidence_not_in_session",
+                    )
                     continue
                 self.commit_candidate_to_memory(candidate)
                 validated_count += 1
@@ -318,6 +417,12 @@ class DistillationManager:
                     candidate_data.get("title", "unknown")
                     if isinstance(candidate_data, dict)
                     else "unknown"
+                )
+                self._audit_raw_candidate(
+                    "validation_failed",
+                    session_key,
+                    candidate_data,
+                    reason=str(exc),
                 )
                 logger.warning("Failed to parse candidate: {}: {}", title, exc)
 
@@ -353,12 +458,21 @@ class DistillationManager:
                 type(candidate_data).__name__,
             )
             return None
+        missing_errors = []
+        if not str(candidate_data.get("content", "")).strip():
+            missing_errors.append("Content is required")
+        if candidate_data.get("type") != CandidateType.IGNORED.value and not str(
+            candidate_data.get("evidence", "")
+        ).strip():
+            missing_errors.append("Evidence is required")
+        if missing_errors:
+            raise ValueError("; ".join(missing_errors))
         candidate = AtomicCandidate.from_dict(candidate_data)
         candidate.source_session = session_key
         errors = candidate.validate()
         if errors:
             logger.warning("Candidate validation failed: {}: {}", candidate.title, errors)
-            return None
+            raise ValueError("; ".join(errors))
         return candidate
 
     async def distill_session_from_messages(
