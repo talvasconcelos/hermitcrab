@@ -31,6 +31,41 @@ def audit_events(tmp_path: Path) -> list[dict]:
     return [json.loads(line) for line in audit_path.read_text(encoding="utf-8").splitlines()]
 
 
+def test_distillation_prompt_includes_related_existing_memory_before_candidate_generation(tmp_path):
+    manager = make_manager(tmp_path)
+    manager.memory.write_fact(
+        "Estilo de resposta do utilizador",
+        "O utilizador prefere respostas concisas por defeito.",
+        tags=["preferência"],
+        evidence="Sê conciso, por favor.",
+    )
+    messages = [
+        {
+            "role": "user",
+            "content": "Sê conciso, por favor, e dá-me apenas o estado actual.",
+        }
+    ]
+
+    prompt = manager._build_distillation_prompt(messages)
+
+    assert "Existing related memory" in prompt
+    assert "Estilo de resposta do utilizador" in prompt
+    assert "preferes" not in prompt.lower()
+    assert "reuse" in prompt
+    assert "update" in prompt
+    assert "ignore" in prompt
+
+
+def test_distillation_prompt_omits_related_memory_section_when_search_has_no_hits(tmp_path):
+    manager = make_manager(tmp_path)
+
+    prompt = manager._build_distillation_prompt(
+        [{"role": "user", "content": "Completely new project context with no memory overlap."}]
+    )
+
+    assert "Existing related memory" not in prompt
+
+
 def test_distilled_fact_commit_persists_evidence_metadata(tmp_path):
     manager = make_manager(tmp_path)
     candidate = AtomicCandidate(

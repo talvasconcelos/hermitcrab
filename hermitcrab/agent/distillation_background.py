@@ -346,6 +346,20 @@ class DistillationManager:
         except Exception as exc:
             logger.warning("Distillation failed (non-fatal): {}: {}", session.key, exc)
 
+    def _related_memory_for_distillation(self, messages: list[dict[str, Any]]) -> str:
+        """Retrieve existing memory before asking the model to propose candidates."""
+        queries = []
+        for message in messages[:20]:
+            content = str(message.get("content") or "").strip()
+            if content:
+                queries.append(content[:500])
+        return self.memory.get_relevant_context_for_queries(
+            queries,
+            limit=6,
+            max_chars=2500,
+            max_item_chars=500,
+        )
+
     def _build_distillation_prompt(self, messages: list[dict[str, Any]]) -> str:
         prompt = (
             "Extract conservative atomic knowledge candidates from this session.\n\n"
@@ -356,8 +370,18 @@ class DistillationManager:
             "- TASKS: Action items, todos, things to do (must include task_assignee)\n\n"
             "Do not produce reflections here.\n"
             "For TASK candidates, include task_assignee. Use 'user' for user tasks.\n\n"
-            "Session content:\n"
         )
+        related_memory = self._related_memory_for_distillation(messages)
+        if related_memory:
+            prompt += (
+                "Existing related memory (check this before proposing candidates):\n"
+                f"{related_memory}\n\n"
+                "If the session repeats existing memory, return an ignored candidate with skip_reason.\n"
+                "If the session corrects existing memory, propose the smallest update and cite evidence.\n"
+                "Only create new candidates when the learning is not already present.\n"
+                "Allowed actions in candidate extra: create, update, reuse, ignore.\n\n"
+            )
+        prompt += "Session content:\n"
         for msg in messages[:50]:
             role = msg.get("role", "unknown")
             content = msg.get("content", "")[:500]
