@@ -12,6 +12,7 @@ from typing import Any
 from loguru import logger
 
 from hermitcrab.agent.memory import MemoryStore
+from hermitcrab.agent.onboarding import OnboardingProfileService
 from hermitcrab.agent.skills import SkillsLoader
 from hermitcrab.config.schema import ModelAliasConfig, NamedModelConfig
 from hermitcrab.utils.helpers import estimate_message_tokens, estimate_text_tokens, safe_filename
@@ -387,6 +388,8 @@ Use subagents for complex, time-consuming, or specialized tasks. For substantial
         """Load onboarding instructions when workspace onboarding flag is enabled."""
         flag_path = self.workspace / self.ONBOARDING_FLAG_FILE
         if not flag_path.exists():
+            return ""
+        if not OnboardingProfileService.is_workspace_onboarding_active(self.workspace):
             return ""
 
         prompt_path = self.workspace / self.ONBOARDING_PROMPT_FILE

@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import json
 import re
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Awaitable, Callable
 
@@ -10,10 +12,18 @@ import json_repair
 from loguru import logger
 
 
+async def _noop_chat_callable(**_kwargs: Any) -> Any:
+    return None
+
+
 class OnboardingProfileService:
     """Extract durable onboarding insights and sync bootstrap profile files."""
 
     ONBOARDING_FLAG_FILE = ".onboarding_mode"
+    STATE_FILE = Path("onboarding/state.json")
+    ACTIVE_STATUSES = {"active", "ready_to_confirm"}
+    TERMINAL_STATUSES = {"completed", "paused"}
+    VALID_STATUSES = ACTIVE_STATUSES | TERMINAL_STATUSES
     MIN_CONFIDENCE = 0.75
     MAX_CONTEXT_MESSAGES = 12
     MAX_BULLETS_PER_FILE = 6
@@ -58,7 +68,80 @@ Rules:
         self.model = model
 
     def is_enabled(self) -> bool:
-        return (self.workspace / self.ONBOARDING_FLAG_FILE).exists()
+        if not (self.workspace / self.ONBOARDING_FLAG_FILE).exists():
+            return False
+        return self.read_state().get("status") in self.ACTIVE_STATUSES
+
+    @property
+    def state_path(self) -> Path:
+        return self.workspace / self.STATE_FILE
+
+    @staticmethod
+    def _now() -> str:
+        return datetime.now(timezone.utc).isoformat()
+
+    def _default_state(self, status: str = "active") -> dict[str, Any]:
+        now = self._now()
+        return {
+            "status": status,
+            "started_at": now,
+            "last_updated_at": now,
+            "observed_domains": [],
+            "pending_assumptions": [],
+            "confirmed_insights": [],
+            "suggested_use_cases": [],
+        }
+
+    def read_state(self) -> dict[str, Any]:
+        """Read or initialize the inspectable onboarding state artifact."""
+        if not (self.workspace / self.ONBOARDING_FLAG_FILE).exists():
+            return self._default_state("completed")
+        path = self.state_path
+        if not path.exists():
+            state = self._default_state("active")
+            self._write_state(state)
+            return state
+        try:
+            state = json.loads(path.read_text(encoding="utf-8"))
+        except Exception as exc:
+            logger.warning("Onboarding state is corrupt; resetting to active: {}", exc)
+            state = self._default_state("active")
+            self._write_state(state)
+            return state
+        if not isinstance(state, dict) or state.get("status") not in self.VALID_STATUSES:
+            state = self._default_state("active")
+            self._write_state(state)
+            return state
+        return state
+
+    def _write_state(self, state: dict[str, Any]) -> None:
+        state = dict(state)
+        state["last_updated_at"] = self._now()
+        if not state.get("started_at"):
+            state["started_at"] = state["last_updated_at"]
+        self.state_path.parent.mkdir(parents=True, exist_ok=True)
+        self.state_path.write_text(json.dumps(state, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+    def set_status(self, status: str) -> None:
+        if status not in self.VALID_STATUSES:
+            raise ValueError(f"Invalid onboarding status: {status}")
+        state = self.read_state()
+        state["status"] = status
+        self._write_state(state)
+
+    def pause(self) -> None:
+        self.set_status("paused")
+
+    def resume(self) -> None:
+        self.set_status("active")
+
+    def complete(self) -> None:
+        self.set_status("completed")
+
+    @classmethod
+    def is_workspace_onboarding_active(cls, workspace: Path) -> bool:
+        service = cls(workspace, chat_callable=_noop_chat_callable, model="")
+        return service.is_enabled()
 
     async def maybe_sync_from_messages(self, messages: list[dict[str, Any]]) -> bool:
         """Extract onboarding insights and persist bootstrap profile updates."""
