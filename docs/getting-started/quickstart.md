@@ -78,6 +78,17 @@ hermitcrab user route nostr alice <alice-npub-or-hex-pubkey>
 hermitcrab user status alice
 ```
 
+New identities start in onboarding mode. Onboarding is conversational: HermitCrab should help normally while learning durable preferences and workflow context. It writes an inspectable state file under `identities/<name>/onboarding/state.json` and can be controlled by the admin:
+
+```bash
+hermitcrab onboarding status alice
+hermitcrab onboarding pause alice
+hermitcrab onboarding resume alice
+hermitcrab onboarding complete alice
+```
+
+Use `pause` or `complete` when you no longer want onboarding guidance injected into that identity's prompt.
+
 ## 5. Try key interactions
 
 ### Ask it to use the terminal
