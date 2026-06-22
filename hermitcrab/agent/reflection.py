@@ -11,8 +11,10 @@ Output: 0-1 reflection file + optional bootstrap update.
 
 from __future__ import annotations
 
+import json
 import re
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from difflib import SequenceMatcher
 from importlib.resources import files as package_files
 from pathlib import Path
@@ -73,8 +75,11 @@ Session digest:
 
 {recent_reflections_section}
 
+{related_memory_section}
+
 Respond with JSON:
 {{
+  "action": "new|reuse|update|ignore|needs_review",
   "title": "Short, descriptive title",
   "observation": "What happened in this session that matters?",
   "impact": "Why does it matter for future behavior?",
@@ -97,6 +102,7 @@ Rules:
 - prioritize user corrections, preferences, workflow expectations, and durable behavior changes
 - do not produce a generic summary of the session
 - avoid duplicating recent reflections
+- use action=reuse/ignore when the learning is already covered, update when the session corrects prior memory, and needs_review when a conflict is plausible
 - only set should_promote=true if the learning is durable enough to belong in persistent context, not just this one session
 - prefer `AGENTS.md` for product/workflow policy, `TOOLS.md` for tool discipline, `SOUL.md` for stable behavior style, and `IDENTITY.md` only for durable self-model constraints
 - user-specific preferences usually stay in memory; only promote them when they clearly belong in durable assistant-wide context
@@ -152,6 +158,7 @@ Rules:
             # Skip empty sessions
             if not messages:
                 logger.debug("Reflection skipped: empty session {}", session_key)
+                self._audit_reflection("skipped", session_key, reason="empty_session")
                 return ReflectionOutcome(status="skipped", reason="empty_session")
 
             # 1. Load recent reflections for dedup context
@@ -160,10 +167,12 @@ Rules:
             # 2. Build prompt
             digest_text = self._format_digest(digest)
             recent_section = self._format_recent_reflections(recent)
+            related_memory_section = self._related_memory_for_reflection(digest)
 
             user_prompt = self.USER_PROMPT.format(
                 digest=digest_text,
                 recent_reflections_section=recent_section,
+                related_memory_section=related_memory_section,
             )
 
             # 3. Single LLM call
@@ -201,7 +210,17 @@ Rules:
             if result.get("skip"):
                 reason = str(result.get("reason", "no_insights"))
                 logger.debug("Reflection skipped: {}", reason)
+                self._audit_reflection("skipped", session_key, reason=reason, result=result)
                 return ReflectionOutcome(status="skipped", reason=reason)
+
+            action = self._normalize_action(result.get("action"))
+            if action in {"reuse", "ignore", "update", "needs_review"}:
+                self._audit_reflection("skipped", session_key, reason=action, result=result)
+                return ReflectionOutcome(
+                    status="skipped",
+                    reason=action,
+                    title=result.get("title"),
+                )
 
             # 5. Validate required fields.
             # Evidence is optional in the model contract in practice: if the model
@@ -219,11 +238,18 @@ Rules:
 
             if not valid:
                 logger.debug("Reflection rejected by validation (reason={}): {}", reason, result)
+                self._audit_reflection("validation_failed", session_key, reason=reason, result=result)
                 return ReflectionOutcome(status="skipped", reason=reason)
 
             if self._is_duplicate_or_contradictory(result, recent):
                 logger.info(
                     "Reflection skipped after duplicate/contradiction guard: {}", result["title"]
+                )
+                self._audit_reflection(
+                    "duplicate",
+                    session_key,
+                    reason="duplicate_or_contradictory",
+                    result=result,
                 )
                 return ReflectionOutcome(
                     status="skipped",
@@ -235,9 +261,17 @@ Rules:
             item = self._write_reflection(result, session_key)
 
             # 7. Auto-promote if flagged
+            if result.get("_promotion_skip_reason"):
+                self._audit_reflection(
+                    "promotion_skipped",
+                    session_key,
+                    reason=str(result["_promotion_skip_reason"]),
+                    result=result,
+                )
             if self.auto_promote and result.get("should_promote") and result.get("promote_content"):
-                await self._promote(result)
+                await self._promote(result, session_key)
 
+            self._audit_reflection("saved", session_key, reason="saved", result=result)
             logger.info("Reflection complete: {}", result.get("title", "unknown"))
             return ReflectionOutcome(
                 status="saved",
@@ -248,7 +282,33 @@ Rules:
 
         except Exception as e:
             logger.warning("Reflection failed (non-fatal): {}", e)
+            self._audit_reflection("failed", session_key, reason=str(e))
             return ReflectionOutcome(status="failed", reason=str(e))
+
+    def _audit_reflection(
+        self,
+        event: str,
+        session_key: str,
+        *,
+        reason: str,
+        result: dict[str, Any] | None = None,
+    ) -> None:
+        """Append a local JSONL audit event for reflection decisions."""
+        result = result or {}
+        payload = {
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "event": event,
+            "reason": reason,
+            "session_key": session_key,
+            "title": result.get("title"),
+            "scope": result.get("scope"),
+            "evidence": result.get("evidence"),
+            "promotion_target": result.get("promotion_target"),
+        }
+        audit_path = self.memory.memory_dir / "reflection_audit.jsonl"
+        audit_path.parent.mkdir(parents=True, exist_ok=True)
+        with audit_path.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(payload, sort_keys=True) + "\n")
 
     def _format_digest(self, digest: SessionDigest) -> str:
         """Format deterministic digest data for reflection."""
@@ -295,6 +355,36 @@ Rules:
             content_preview = (ref.content or "")[:100].replace("\n", " ")
             lines.append(f"{i}. {ref.title}: {content_preview}...")
         return "\n".join(lines)
+
+    def _related_memory_for_reflection(self, digest: SessionDigest) -> str:
+        """Retrieve related memory before asking the model to propose a reflection."""
+        queries = [
+            *digest.user_corrections,
+            *digest.user_requests,
+            *digest.outcomes,
+            *digest.decisions_made,
+            *digest.open_loops,
+        ]
+        related = self.memory.get_relevant_context_for_queries(
+            [query[:500] for query in queries if str(query).strip()],
+            limit=6,
+            max_chars=2500,
+            max_item_chars=500,
+        )
+        if not related:
+            return "No existing related memory."
+        return (
+            "Existing related memory (check before proposing a new reflection):\n"
+            f"{related}\n\n"
+            "Choose action=reuse or action=ignore if this is already covered.\n"
+            "Choose action=update if this session corrects existing memory.\n"
+            "Choose action=needs_review if there is a possible conflict."
+        )
+
+    @staticmethod
+    def _normalize_action(value: Any) -> str:
+        action = str(value or "new").strip().lower().replace("-", "_")
+        return action if action in {"new", "reuse", "update", "ignore", "needs_review"} else "new"
 
     def _parse_response(self, content: str | None) -> dict:
         """Parse LLM JSON response."""
@@ -425,6 +515,8 @@ Rules:
 
         if self._looks_like_failure_report(scope, normalized, digest):
             return False, "failure_report"
+        if not self._digest_has_learning_signal(digest):
+            return False, "no_learning_signal"
 
         result["should_promote"] = self._coerce_bool(result.get("should_promote", False))
         result["scope"] = self._normalize_learning_scope(result, digest)
@@ -432,6 +524,7 @@ Rules:
         if result["promotion_target"] not in self.VALID_PROMOTION_TARGETS:
             return False, "invalid_promotion_target"
         if not self._promotion_is_viable(result):
+            result["_promotion_skip_reason"] = "promotion_not_viable"
             result["should_promote"] = False
             result["promotion_target"] = "none"
 
@@ -553,7 +646,7 @@ Rules:
             return digest.user_requests[-1]
         if digest.outcomes:
             return digest.outcomes[-1]
-        return f"Grounded in session {digest.session_key}."
+        return ""
 
     @staticmethod
     def _parse_confidence(value: Any) -> float | None:
@@ -900,18 +993,21 @@ Rules:
 
         return False
 
-    async def _promote(self, result: dict) -> None:
+    async def _promote(self, result: dict, session_key: str) -> None:
         """Auto-promote reflection to bootstrap file."""
         target_file = self._normalize_promotion_target(result.get("promotion_target", "none"))
         content = self._normalize_promote_content(str(result.get("promote_content", "")))
 
         if not content:
+            self._audit_reflection("promotion_skipped", session_key, reason="empty_promote_content", result=result)
             return
 
         if target_file == "none":
+            self._audit_reflection("promotion_skipped", session_key, reason="no_promotion_target", result=result)
             return
         if target_file not in self.allowed_targets:
             logger.warning("Invalid promote target: {}", target_file)
+            self._audit_reflection("promotion_skipped", session_key, reason="target_not_allowed", result=result)
             return
 
         section_map = {
@@ -929,6 +1025,7 @@ Rules:
                 "Skipping bootstrap promotion for {} due to duplicate/conflict in existing bootstrap guidance",
                 result["title"],
             )
+            self._audit_reflection("promotion_skipped", session_key, reason="bootstrap_duplicate_or_conflict", result=result)
             return
         self._ensure_bootstrap_file(file_path)
         if file_path.exists():
@@ -939,9 +1036,11 @@ Rules:
                     target_file,
                     self.max_file_lines,
                 )
+                self._audit_reflection("promotion_skipped", session_key, reason="target_file_too_long", result=result)
                 return
         self._append_to_bootstrap(file_path, section, content)
         self._append_promotion_audit(result, target_file, content)
+        self._audit_reflection("promotion_committed", session_key, reason="promoted", result=result)
 
         logger.info("Auto-promoted reflection to {}: {}", target_file, result["title"])
 
