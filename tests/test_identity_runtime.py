@@ -79,14 +79,15 @@ def test_identity_roots_isolate_sessions_memory_lists_people_skills_and_scratchp
         encoding="utf-8",
     )
 
-    assert (alice_root / "sessions" / "cli_shared.jsonl").exists()
+    assert (alice_root / "sessions" / "sessions.sqlite3").exists()
+    assert alice.sessions.search_history("alice-only session")
     assert list((alice_root / "memory" / "facts").glob("*.md"))
     assert (alice_root / "lists" / "alice-list.md").exists()
     assert (alice_root / "people" / "profiles" / "alice.md").exists()
     assert (alice_root / "scratchpads" / "cli_shared.md").exists()
     assert any(skill["name"] == "alice-skill" for skill in alice.context.skills.list_skills())
 
-    assert not (bob_root / "sessions" / "cli_shared.jsonl").exists()
+    assert not bob.sessions.search_history("alice-only session")
     assert not list((bob_root / "memory" / "facts").glob("*.md"))
     assert not (bob_root / "lists" / "alice-list.md").exists()
     assert not (bob_root / "people" / "profiles" / "alice.md").exists()

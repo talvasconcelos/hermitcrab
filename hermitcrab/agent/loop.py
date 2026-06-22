@@ -119,7 +119,7 @@ from hermitcrab.bus.queue import MessageBus
 from hermitcrab.config.schema import ExecToolConfig, ModelAliasConfig, NamedModelConfig
 from hermitcrab.providers.base import LLMProvider
 from hermitcrab.providers.registry import normalize_provider_name
-from hermitcrab.session.manager import Session, SessionManager
+from hermitcrab.session.manager import Session, SessionManager, create_session_manager
 from hermitcrab.utils.helpers import resolve_model_alias_config
 
 if TYPE_CHECKING:
@@ -276,7 +276,7 @@ class AgentLoop:
             system_root=system_root,
         )
         self.skill_runtime = SkillRuntimeManager(self.identity_root, self.context.skills)
-        self.sessions = session_manager or SessionManager(self.identity_root)
+        self.sessions = session_manager or create_session_manager(self.identity_root)
         self.journal = JournalStore(self.identity_root)
         self.memory = MemoryStore(self.identity_root)
         self.knowledge = KnowledgeStore(self.identity_root)

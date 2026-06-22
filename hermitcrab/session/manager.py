@@ -9,6 +9,8 @@ from typing import Any
 
 from loguru import logger
 
+from hermitcrab.session.sqlite_store import SQLiteSessionStore
+from hermitcrab.session.storage import MessageRecord, SessionRecord
 from hermitcrab.utils.helpers import ensure_dir, safe_filename
 
 
@@ -144,6 +146,20 @@ class Session:
         self.updated_at = datetime.now()
 
 
+def create_session_manager(workspace: Path, *, import_existing: bool = True) -> "SessionManager":
+    """Create the default beta5 SQLite-backed session manager."""
+    sessions_dir = ensure_dir(workspace / "sessions")
+    sqlite_store = SQLiteSessionStore(sessions_dir / "sessions.sqlite3")
+    if import_existing:
+        try:
+            from hermitcrab.session.migration import migrate_jsonl_sessions_once
+
+            migrate_jsonl_sessions_once(workspace, sqlite_store)
+        except Exception as exc:
+            logger.warning("Failed to migrate existing JSONL sessions into SQLite: {}", exc)
+    return SessionManager(workspace, sqlite_store=sqlite_store)
+
+
 class SessionManager:
     """
     Manages conversation sessions.
@@ -151,10 +167,11 @@ class SessionManager:
     Sessions are stored as JSONL files in the sessions directory.
     """
 
-    def __init__(self, workspace: Path):
+    def __init__(self, workspace: Path, *, sqlite_store: SQLiteSessionStore | None = None):
         self.workspace = workspace
         self.sessions_dir = ensure_dir(self.workspace / "sessions")
         self.archive_dir = ensure_dir(self.sessions_dir / "archive")
+        self.sqlite_store = sqlite_store
         self._cache: dict[str, Session] = {}
 
     def _get_session_path(self, key: str) -> Path:
@@ -198,6 +215,12 @@ class SessionManager:
 
     def _load(self, key: str) -> Session | None:
         """Load a session from disk."""
+        if self.sqlite_store is not None:
+            session = self._load_from_sqlite(key)
+            if session is not None:
+                return session
+            return None
+
         path = self._get_session_path(key)
         if not path.exists():
             return None
@@ -207,6 +230,21 @@ class SessionManager:
         except Exception as e:
             logger.warning("Failed to load session {}: {}", key, e)
             return None
+
+    def _load_from_sqlite(self, key: str) -> Session | None:
+        if self.sqlite_store is None:
+            return None
+        record = self.sqlite_store.get_session(key)
+        if record is None:
+            return None
+        messages = [message.to_mapping() for message in self.sqlite_store.get_messages(key)]
+        return Session(
+            key=record.key,
+            messages=messages,
+            created_at=record.created_at or datetime.now(),
+            updated_at=record.updated_at or datetime.now(),
+            metadata=record.metadata,
+        )
 
     def _load_from_path(self, path: Path, *, key: str) -> Session:
         """Load a session object from a specific JSONL path."""
@@ -249,7 +287,12 @@ class SessionManager:
         )
 
     def save(self, session: Session) -> None:
-        """Save a session to disk."""
+        """Save a session."""
+        self._cache[session.key] = session
+        if self.sqlite_store is not None:
+            self._write_session_to_sqlite(session, archived=False)
+            return
+
         path = self._get_session_path(session.key)
 
         with open(path, "w", encoding="utf-8") as f:
@@ -264,14 +307,78 @@ class SessionManager:
             for msg in session.messages:
                 f.write(json.dumps(msg, ensure_ascii=False) + "\n")
 
-        self._cache[session.key] = session
+    def _write_session_to_sqlite(
+        self,
+        session: Session,
+        *,
+        archived: bool,
+        archive_reason: str | None = None,
+    ) -> None:
+        """Write a session into the SQLite source of truth."""
+        if self.sqlite_store is None:
+            return
+        try:
+            channel, chat_id = self._split_session_key(session.key)
+            self._replace_sqlite_messages(session.key)
+            self.sqlite_store.upsert_session(
+                SessionRecord(
+                    key=session.key,
+                    channel=channel,
+                    chat_id=chat_id,
+                    status="archived" if archived else "active",
+                    created_at=session.created_at,
+                    updated_at=session.updated_at,
+                    archived_at=session.updated_at if archived else None,
+                    archive_reason=archive_reason,
+                    metadata=dict(session.metadata),
+                )
+            )
+            ids: list[int] = []
+            for sequence, message in enumerate(session.messages, start=1):
+                ids.append(
+                    self.sqlite_store.save_message(
+                        MessageRecord.from_mapping(session.key, message, sequence=sequence)
+                    )
+                )
+            logger.debug("Mirrored session {} to SQLite (messages={})", session.key, len(ids))
+        except Exception as exc:
+            logger.warning("Failed to mirror session {} to SQLite: {}", session.key, exc)
+
+    def _replace_sqlite_messages(self, key: str) -> None:
+        store = self.sqlite_store
+        if store is None:
+            return
+        store._require_open()  # noqa: SLF001 - manager owns optional mirror lifecycle
+        conn = store.conn
+        if conn is None:
+            return
+        conn.execute("DELETE FROM messages WHERE session_key = ?", (key,))
+        conn.execute("DELETE FROM tool_calls WHERE session_key = ?", (key,))
+        conn.execute("DELETE FROM tool_results WHERE session_key = ?", (key,))
+        if store.fts_enabled:
+            conn.execute("DELETE FROM messages_fts WHERE rowid NOT IN (SELECT id FROM messages)")
+        conn.commit()
+
+    @staticmethod
+    def _split_session_key(key: str) -> tuple[str, str]:
+        if ":" not in key:
+            return key, ""
+        channel, chat_id = key.split(":", 1)
+        return channel, chat_id
 
     def invalidate(self, key: str) -> None:
         """Remove a session from the in-memory cache."""
         self._cache.pop(key, None)
 
     def archive(self, session: Session, reason: str) -> Path | None:
-        """Archive the current on-disk session and reset in-memory state."""
+        """Archive the current session and reset in-memory state."""
+        if self.sqlite_store is not None:
+            self._write_session_to_sqlite(session, archived=True, archive_reason=reason)
+            self.invalidate(session.key)
+            session.clear()
+            session.metadata.clear()
+            return None
+
         path = self._get_session_path(session.key)
         if not path.exists():
             self.invalidate(session.key)
@@ -303,6 +410,16 @@ class SessionManager:
         inspectable JSONL file, not force the next user message to restate exact
         words from the previous conversation before the agent can continue.
         """
+        if self.sqlite_store is not None:
+            record = self.sqlite_store.get_session(key)
+            if record is None or record.status != "archived" or not record.updated_at:
+                return []
+            now = datetime.now(timezone.utc)
+            if now - record.updated_at.astimezone(timezone.utc) > max_age:
+                return []
+            session = self._load_from_sqlite(key)
+            return session.get_history(max_messages=max_messages) if session else []
+
         now = datetime.now(timezone.utc)
         for path in self._archived_session_paths(key):
             try:
@@ -337,6 +454,25 @@ class SessionManager:
         relevance_max_age: timedelta = timedelta(days=30),
     ) -> list[dict[str, Any]]:
         """Return archived same-chat history that is recent or relevant to the new turn."""
+        if self.sqlite_store is not None:
+            session = self._load_from_sqlite(key)
+            record = self.sqlite_store.get_session(key)
+            if session is None or record is None or record.status != "archived" or not record.updated_at:
+                return []
+            now = datetime.now(timezone.utc)
+            age = now - record.updated_at.astimezone(timezone.utc)
+            if age > relevance_max_age:
+                return []
+            history = session.get_history(max_messages=max_messages)
+            normalized_query = self._normalize_query(query)
+            if age <= recent_max_age and self._query_signals_resume(normalized_query):
+                return history
+            if normalized_query and self._history_matches_query(history, normalized_query):
+                return history
+            if age > recent_max_age and self._query_signals_resume(normalized_query):
+                return history
+            return []
+
         now = datetime.now(timezone.utc)
         normalized_query = self._normalize_query(query)
 
@@ -378,6 +514,13 @@ class SessionManager:
         max_messages: int = 6,
     ) -> list[dict[str, Any]]:
         """Search current and archived sessions for matching conversation history."""
+        if self.sqlite_store is not None:
+            return self._search_sqlite_history(
+                query,
+                max_results=max_results,
+                max_messages=max_messages,
+            )
+
         normalized_query = " ".join(query.lower().split())
         if not normalized_query:
             return []
@@ -425,6 +568,12 @@ class SessionManager:
         max_messages: int = 8,
     ) -> list[dict[str, Any]]:
         """Return recent active/archived session excerpts without keyword matching."""
+        if self.sqlite_store is not None:
+            return self._recent_sqlite_history(
+                max_results=max_results,
+                max_messages=max_messages,
+            )
+
         results: list[dict[str, Any]] = []
         for path in self._all_session_paths():
             try:
@@ -442,6 +591,68 @@ class SessionManager:
                     "updated_at": session.updated_at.isoformat(),
                     "archived": path.parent == self.archive_dir,
                     "path": str(path),
+                    "excerpts": [excerpt],
+                }
+            )
+            if len(results) >= max_results:
+                break
+        return results
+
+    def _search_sqlite_history(
+        self,
+        query: str,
+        *,
+        max_results: int,
+        max_messages: int,
+    ) -> list[dict[str, Any]]:
+        if self.sqlite_store is None:
+            return []
+        matches = self.sqlite_store.search_messages(query, limit=max_results)
+        results: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        for match in matches:
+            if match.session_key in seen:
+                continue
+            seen.add(match.session_key)
+            messages = self.sqlite_store.get_messages(match.session_key)
+            excerpts = self._matching_excerpts(
+                [message.to_mapping() for message in messages],
+                " ".join(query.lower().split()),
+                max_messages=max_messages,
+            )
+            if not excerpts and match.content:
+                excerpts = [f"{match.role}: {_clean_snippet(match.content, max_chars=220)}"]
+            session = self.sqlite_store.get_session(match.session_key)
+            original_key = session.metadata.get("original_session_key") if session else None
+            results.append(
+                {
+                    "session_key": original_key or match.session_key,
+                    "updated_at": session.updated_at.isoformat() if session and session.updated_at else "",
+                    "archived": bool(session and session.status == "archived"),
+                    "path": session.metadata.get("source_path", "sqlite") if session else "sqlite",
+                    "excerpts": excerpts,
+                }
+            )
+            if len(results) >= max_results:
+                break
+        return results
+
+    def _recent_sqlite_history(self, *, max_results: int, max_messages: int) -> list[dict[str, Any]]:
+        if self.sqlite_store is None:
+            return []
+        sessions = self.sqlite_store.list_sessions(limit=max_results)
+        results: list[dict[str, Any]] = []
+        for session in sessions:
+            messages = [message.to_mapping() for message in self.sqlite_store.get_messages(session.key)]
+            excerpt = self._tail_excerpt(messages, max_messages=max_messages)
+            if not excerpt:
+                continue
+            results.append(
+                {
+                    "session_key": session.metadata.get("original_session_key", session.key),
+                    "updated_at": session.updated_at.isoformat() if session.updated_at else "",
+                    "archived": session.status == "archived",
+                    "path": session.metadata.get("source_path", "sqlite"),
                     "excerpts": [excerpt],
                 }
             )

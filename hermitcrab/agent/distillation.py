@@ -12,6 +12,7 @@ Candidate Types:
 - goal: Outcome-oriented objectives
 - task: Actionable items with lifecycle
 - reflection: Subjective observations (append-only)
+- ignored: Explicitly skipped/noise candidates with a reason
 
 Wikilinks:
 - Content SHOULD include wikilinks [[Like This]] to connect related memories
@@ -35,6 +36,7 @@ class CandidateType(str, Enum):
     GOAL = "goal"
     TASK = "task"
     REFLECTION = "reflection"
+    IGNORED = "ignored"
 
 
 class TaskStatus(str, Enum):
@@ -76,6 +78,8 @@ class AtomicCandidate:
     confidence: float = 1.0  # 0.0-1.0, confidence in extraction
     source_session: str = ""  # Session key where extracted from
     tags: list[str] = field(default_factory=list)
+    evidence: str | None = None  # Concrete source text that grounds this candidate
+    skip_reason: str | None = None  # Required for ignored/noise candidates
 
     # Category-specific metadata (optional, depends on type)
     # For TASK:
@@ -122,6 +126,7 @@ class AtomicCandidate:
                 **base_params,
                 "confidence": self.confidence,
                 "source": self.fact_source,
+                "evidence": self.evidence,
             }
         elif self.type == CandidateType.DECISION:
             return {
@@ -129,6 +134,7 @@ class AtomicCandidate:
                 "status": self.decision_status.value if self.decision_status else "active",
                 "rationale": self.decision_rationale,
                 "supersedes": self.decision_supersedes,
+                "evidence": self.evidence,
             }
         elif self.type == CandidateType.GOAL:
             return {
@@ -136,6 +142,7 @@ class AtomicCandidate:
                 "status": self.goal_status.value if self.goal_status else "active",
                 "priority": self.goal_priority,
                 "horizon": self.goal_horizon,
+                "evidence": self.evidence,
             }
         elif self.type == CandidateType.TASK:
             return {
@@ -144,14 +151,21 @@ class AtomicCandidate:
                 "status": self.task_status or TaskStatus.OPEN,
                 "deadline": self.task_deadline,
                 "priority": self.task_priority,
+                "evidence": self.evidence,
             }
         elif self.type == CandidateType.REFLECTION:
             return {
                 **base_params,
                 "context": self.reflection_context,
+                "evidence": self.evidence,
+            }
+        elif self.type == CandidateType.IGNORED:
+            return {
+                **base_params,
+                "skip_reason": self.skip_reason,
             }
 
-        return base_params
+        return {**base_params, "evidence": self.evidence}
 
     def validate(self) -> list[str]:
         """
@@ -169,6 +183,12 @@ class AtomicCandidate:
             errors.append("Content is required")
         if not (0.0 <= self.confidence <= 1.0):
             errors.append("Confidence must be between 0.0 and 1.0")
+
+        if self.type == CandidateType.IGNORED:
+            if not self.skip_reason or not self.skip_reason.strip():
+                errors.append("Skip reason is required for ignored candidates")
+        elif not self.evidence or not self.evidence.strip():
+            errors.append("Evidence is required")
 
         # Type-specific validation
         if self.type == CandidateType.TASK:
@@ -190,6 +210,8 @@ class AtomicCandidate:
             "confidence": self.confidence,
             "source_session": self.source_session,
             "tags": self.tags,
+            "evidence": self.evidence,
+            "skip_reason": self.skip_reason,
             "task_status": self.task_status.value if self.task_status else None,
             "task_assignee": self.task_assignee,
             "task_deadline": self.task_deadline,
@@ -236,6 +258,8 @@ class AtomicCandidate:
             confidence=data.get("confidence", 1.0),
             source_session=data.get("source_session", ""),
             tags=data.get("tags", []),
+            evidence=data.get("evidence"),
+            skip_reason=data.get("skip_reason"),
             task_status=task_status,
             task_assignee=data.get("task_assignee"),
             task_deadline=data.get("task_deadline"),
@@ -264,7 +288,7 @@ DISTILLATION_JSON_SCHEMA = {
                 "properties": {
                     "type": {
                         "type": "string",
-                        "enum": ["fact", "decision", "goal", "task", "reflection"],
+                        "enum": ["fact", "decision", "goal", "task", "reflection", "ignored"],
                         "description": "Candidate type (must match memory categories)",
                     },
                     "title": {
@@ -286,6 +310,14 @@ DISTILLATION_JSON_SCHEMA = {
                         "type": "array",
                         "items": {"type": "string"},
                         "description": "Optional tags for categorization",
+                    },
+                    "evidence": {
+                        "type": "string",
+                        "description": "Concrete source text from the session that grounds this candidate",
+                    },
+                    "skip_reason": {
+                        "type": "string",
+                        "description": "Reason this ignored/noise candidate should not be saved",
                     },
                     # Task-specific fields
                     "task_status": {
@@ -353,7 +385,19 @@ DISTILLATION_JSON_SCHEMA = {
                     {
                         "if": {"properties": {"type": {"const": "task"}}},
                         "then": {
-                            "required": ["task_assignee"],
+                            "required": ["task_assignee", "evidence"],
+                        },
+                    },
+                    {
+                        "if": {"properties": {"type": {"enum": ["fact", "decision", "goal", "reflection"]}}},
+                        "then": {
+                            "required": ["evidence"],
+                        },
+                    },
+                    {
+                        "if": {"properties": {"type": {"const": "ignored"}}},
+                        "then": {
+                            "required": ["skip_reason"],
                         },
                     },
                 ],

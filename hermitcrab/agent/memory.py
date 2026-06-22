@@ -87,6 +87,9 @@ class MemoryItem:
                 "tags": self.tags,
             }
         )
+        if "evidence" in self.metadata:
+            post.metadata["evidence"] = self.metadata["evidence"]
+
         # Add category-specific metadata
         if self.category == MemoryCategory.TASKS:
             post.metadata["status"] = self.metadata.get("status", TaskStatus.OPEN.value)
@@ -255,6 +258,7 @@ class MemoryStore:
         tags: list[str] | None,
         confidence: float | None,
         source: str | None,
+        evidence: str | None = None,
     ) -> MemoryItem:
         """Merge a new fact payload into an existing fact item."""
         normalized_existing_content = self._normalize_text(existing.content)
@@ -285,6 +289,7 @@ class MemoryStore:
             updated_title = title.strip()
 
         merged_source = source or existing.metadata.get("source")
+        merged_evidence = evidence or existing.metadata.get("evidence")
         existing_confidence = existing.metadata.get("confidence")
         if isinstance(existing_confidence, (int, float)) and confidence is not None:
             merged_confidence = max(float(existing_confidence), confidence)
@@ -299,6 +304,7 @@ class MemoryStore:
             tags=merged_tags,
             source=merged_source,
             confidence=merged_confidence,
+            evidence=merged_evidence,
         )
         if updated is None:
             raise ValueError(f"Failed to update existing fact: {existing.id}")
@@ -313,6 +319,7 @@ class MemoryStore:
         tags: list[str] | None,
         confidence: float | None,
         source: str | None,
+        evidence: str | None = None,
     ) -> MemoryItem | None:
         """Return an existing fact to reuse/update when the new payload is redundant."""
         normalized_title = self._normalize_text(title)
@@ -331,6 +338,7 @@ class MemoryStore:
                     tags=tags,
                     confidence=confidence,
                     source=source,
+                    evidence=evidence,
                 )
 
         scored_candidates: list[tuple[float, MemoryItem, set[str], int]] = []
@@ -357,6 +365,7 @@ class MemoryStore:
                     tags=tags,
                     confidence=confidence,
                     source=source,
+                    evidence=evidence,
                 )
             updated.metadata["_write_action"] = "reused_existing"
             return updated
@@ -479,6 +488,8 @@ class MemoryStore:
     ) -> dict[str, Any]:
         """Extract category-specific metadata from frontmatter."""
         extra_meta: dict[str, Any] = {"_file_path": str(file_path)}
+        if "evidence" in meta:
+            extra_meta["evidence"] = meta["evidence"]
 
         # Task metadata
         if category == MemoryCategory.TASKS:
@@ -594,6 +605,7 @@ class MemoryStore:
         tags: list[str] | None = None,
         confidence: float | None = None,
         source: str | None = None,
+        evidence: str | None = None,
     ) -> MemoryItem:
         """
         Write a new fact to memory.
@@ -620,6 +632,7 @@ class MemoryStore:
             tags=tags,
             confidence=confidence,
             source=source,
+            evidence=evidence,
         )
         if existing is not None:
             logger.info("Reused existing fact: {}", existing.title)
@@ -636,6 +649,7 @@ class MemoryStore:
             metadata={
                 "confidence": confidence,
                 "source": source,
+                "evidence": evidence,
             },
         )
 
@@ -653,6 +667,7 @@ class MemoryStore:
         supersedes: str | None = None,
         rationale: str | None = None,
         scope: str | None = None,
+        evidence: str | None = None,
     ) -> MemoryItem:
         """
         Write a new decision to memory.
@@ -694,6 +709,7 @@ class MemoryStore:
                 "supersedes": supersedes,
                 "rationale": rationale,
                 "scope": scope,
+                "evidence": evidence,
             },
         )
 
@@ -709,6 +725,7 @@ class MemoryStore:
         status: str = "active",
         priority: str | None = None,
         horizon: str | None = None,
+        evidence: str | None = None,
     ) -> MemoryItem:
         """
         Write a new goal to memory.
@@ -747,6 +764,7 @@ class MemoryStore:
                 "status": status,
                 "priority": priority,
                 "horizon": horizon,
+                "evidence": evidence,
             },
         )
 
@@ -764,6 +782,7 @@ class MemoryStore:
         deadline: str | None = None,
         priority: str | None = None,
         related_goal: str | None = None,
+        evidence: str | None = None,
     ) -> MemoryItem:
         """
         Write a new task to memory.
@@ -811,6 +830,7 @@ class MemoryStore:
                 "deadline": deadline,
                 "priority": priority,
                 "related_goal": related_goal,
+                "evidence": evidence,
             },
         )
 
@@ -824,6 +844,7 @@ class MemoryStore:
         content: str,
         tags: list[str] | None = None,
         context: str | None = None,
+        evidence: str | None = None,
     ) -> MemoryItem:
         """
         Write a new reflection to memory.
@@ -854,6 +875,7 @@ class MemoryStore:
             tags=tags or [],
             metadata={
                 "context": context,
+                "evidence": evidence,
             },
         )
 
