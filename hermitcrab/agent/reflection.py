@@ -75,8 +75,11 @@ Session digest:
 
 {recent_reflections_section}
 
+{related_memory_section}
+
 Respond with JSON:
 {{
+  "action": "new|reuse|update|ignore|needs_review",
   "title": "Short, descriptive title",
   "observation": "What happened in this session that matters?",
   "impact": "Why does it matter for future behavior?",
@@ -99,6 +102,7 @@ Rules:
 - prioritize user corrections, preferences, workflow expectations, and durable behavior changes
 - do not produce a generic summary of the session
 - avoid duplicating recent reflections
+- use action=reuse/ignore when the learning is already covered, update when the session corrects prior memory, and needs_review when a conflict is plausible
 - only set should_promote=true if the learning is durable enough to belong in persistent context, not just this one session
 - prefer `AGENTS.md` for product/workflow policy, `TOOLS.md` for tool discipline, `SOUL.md` for stable behavior style, and `IDENTITY.md` only for durable self-model constraints
 - user-specific preferences usually stay in memory; only promote them when they clearly belong in durable assistant-wide context
@@ -163,10 +167,12 @@ Rules:
             # 2. Build prompt
             digest_text = self._format_digest(digest)
             recent_section = self._format_recent_reflections(recent)
+            related_memory_section = self._related_memory_for_reflection(digest)
 
             user_prompt = self.USER_PROMPT.format(
                 digest=digest_text,
                 recent_reflections_section=recent_section,
+                related_memory_section=related_memory_section,
             )
 
             # 3. Single LLM call
@@ -206,6 +212,15 @@ Rules:
                 logger.debug("Reflection skipped: {}", reason)
                 self._audit_reflection("skipped", session_key, reason=reason, result=result)
                 return ReflectionOutcome(status="skipped", reason=reason)
+
+            action = self._normalize_action(result.get("action"))
+            if action in {"reuse", "ignore", "update", "needs_review"}:
+                self._audit_reflection("skipped", session_key, reason=action, result=result)
+                return ReflectionOutcome(
+                    status="skipped",
+                    reason=action,
+                    title=result.get("title"),
+                )
 
             # 5. Validate required fields.
             # Evidence is optional in the model contract in practice: if the model
@@ -340,6 +355,36 @@ Rules:
             content_preview = (ref.content or "")[:100].replace("\n", " ")
             lines.append(f"{i}. {ref.title}: {content_preview}...")
         return "\n".join(lines)
+
+    def _related_memory_for_reflection(self, digest: SessionDigest) -> str:
+        """Retrieve related memory before asking the model to propose a reflection."""
+        queries = [
+            *digest.user_corrections,
+            *digest.user_requests,
+            *digest.outcomes,
+            *digest.decisions_made,
+            *digest.open_loops,
+        ]
+        related = self.memory.get_relevant_context_for_queries(
+            [query[:500] for query in queries if str(query).strip()],
+            limit=6,
+            max_chars=2500,
+            max_item_chars=500,
+        )
+        if not related:
+            return "No existing related memory."
+        return (
+            "Existing related memory (check before proposing a new reflection):\n"
+            f"{related}\n\n"
+            "Choose action=reuse or action=ignore if this is already covered.\n"
+            "Choose action=update if this session corrects existing memory.\n"
+            "Choose action=needs_review if there is a possible conflict."
+        )
+
+    @staticmethod
+    def _normalize_action(value: Any) -> str:
+        action = str(value or "new").strip().lower().replace("-", "_")
+        return action if action in {"new", "reuse", "update", "ignore", "needs_review"} else "new"
 
     def _parse_response(self, content: str | None) -> dict:
         """Parse LLM JSON response."""

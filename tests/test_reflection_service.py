@@ -15,6 +15,18 @@ class FakeResponse:
     content: str
 
 
+@dataclass
+class CapturingChat:
+    content: str
+    calls: list[dict] | None = None
+
+    async def __call__(self, **kwargs):
+        if self.calls is None:
+            self.calls = []
+        self.calls.append(kwargs)
+        return FakeResponse(content=self.content)
+
+
 def make_digest() -> SessionDigest:
     return SessionDigest(
         session_key="telegram:tal",
@@ -371,3 +383,74 @@ async def test_reflection_rejects_fallback_session_key_as_evidence(tmp_path):
     assert outcome.status == "skipped"
     assert outcome.reason in {"no_learning_signal", "not_grounded_in_digest"}
     assert service.memory.list_memories("reflections") == []
+
+
+@pytest.mark.asyncio
+async def test_reflection_prompt_includes_related_existing_memory(tmp_path):
+    chat = CapturingChat(
+        content='{"skip": true, "reason": "No new insights"}',
+    )
+    memory = MemoryStore(tmp_path)
+    memory.write_fact(
+        "User response style",
+        "User prefers concise replies unless they ask for detail.",
+        tags=["preference"],
+        evidence="Keep it concise unless I ask for detail.",
+    )
+    service = ReflectionService(
+        memory=memory,
+        chat_callable=chat,
+        model="test-model",
+        auto_promote=False,
+        allowed_targets=["AGENTS.md", "TOOLS.md", "SOUL.md", "IDENTITY.md"],
+        max_file_lines=200,
+    )
+    digest = make_digest()
+    digest.user_corrections = ["Keep it concise unless I ask for detail."]
+    digest.event_lines.append("- User: Keep it concise unless I ask for detail.")
+
+    await service.reflect_on_session(
+        messages=[{"role": "user", "content": "Keep it concise unless I ask for detail."}],
+        session_key="telegram:tal",
+        digest=digest,
+    )
+
+    prompt = chat.calls[0]["messages"][1]["content"]
+    assert "Existing related memory" in prompt
+    assert "User response style" in prompt
+    assert "reuse" in prompt
+    assert "update" in prompt
+    assert "ignore" in prompt
+
+
+@pytest.mark.asyncio
+async def test_reflection_action_reuse_is_audited_and_not_saved(tmp_path):
+    service = make_service(
+        tmp_path,
+        """{
+          "action": "reuse",
+          "title": "Use Shell For Deletions",
+          "observation": "The user repeated an existing lesson.",
+          "impact": "No new memory is needed.",
+          "lesson": "I should reuse the existing shell deletion lesson.",
+          "recommended_behavior": "Reuse the existing guidance.",
+          "scope": "tool_usage",
+          "confidence": 0.9,
+          "evidence": "shell exec is available; use rm with exact paths",
+          "should_promote": false,
+          "promotion_target": "none"
+        }""",
+    )
+
+    outcome = await service.reflect_on_session(
+        messages=[{"role": "user", "content": "shell exec is available; use rm with exact paths"}],
+        session_key="telegram:tal",
+        digest=make_digest(),
+    )
+
+    assert outcome.status == "skipped"
+    assert outcome.reason == "reuse"
+    assert service.memory.list_memories("reflections") == []
+    events = reflection_audit_events(tmp_path)
+    assert events[-1]["event"] == "skipped"
+    assert events[-1]["reason"] == "reuse"
