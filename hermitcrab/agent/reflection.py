@@ -470,6 +470,8 @@ Rules:
 
         if self._looks_like_failure_report(scope, normalized, digest):
             return False, "failure_report"
+        if not self._digest_has_learning_signal(digest):
+            return False, "no_learning_signal"
 
         result["should_promote"] = self._coerce_bool(result.get("should_promote", False))
         result["scope"] = self._normalize_learning_scope(result, digest)
@@ -599,7 +601,7 @@ Rules:
             return digest.user_requests[-1]
         if digest.outcomes:
             return digest.outcomes[-1]
-        return f"Grounded in session {digest.session_key}."
+        return ""
 
     @staticmethod
     def _parse_confidence(value: Any) -> float | None:

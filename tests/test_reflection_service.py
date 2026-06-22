@@ -41,6 +41,28 @@ def make_digest() -> SessionDigest:
     )
 
 
+def make_low_signal_digest() -> SessionDigest:
+    return SessionDigest(
+        session_key="telegram:tal",
+        channel="telegram",
+        chat_id="tal",
+        first_timestamp="2026-01-01T00:00:00Z",
+        last_timestamp="2026-01-01T00:01:00Z",
+        event_lines=["- User: what is the current status?", "- Assistant: The task is running."],
+        user_requests=["what is the current status?"],
+        user_corrections=[],
+        outcomes=["Assistant answered the current status question."],
+        failures=[],
+        wikilinks=[],
+        user_goal="Check current status",
+        artifacts_changed=[],
+        decisions_made=[],
+        open_loops=[],
+        assistant_responses=["The task is running."],
+        signals={"user_turn_count": 1, "followup_user_turn_count": 0},
+    )
+
+
 def make_service(tmp_path, content: str, *, auto_promote: bool = False) -> ReflectionService:
     async def fake_chat_callable(**_kwargs):
         return FakeResponse(content=content)
@@ -286,3 +308,66 @@ async def test_reflection_audits_promotion_skipped_when_not_viable(tmp_path):
         and event["promotion_target"] == "none"
         for event in events
     )
+
+
+@pytest.mark.asyncio
+async def test_reflection_skips_generic_summary_without_learning_signal(tmp_path):
+    service = make_service(
+        tmp_path,
+        """{
+          "title": "Status Discussion Summary",
+          "observation": "The session discussed current status.",
+          "impact": "The assistant answered the user's status question.",
+          "lesson": "I should summarize the user's current request.",
+          "recommended_behavior": "Continue answering current status questions.",
+          "scope": "session_tactic",
+          "confidence": 0.9,
+          "evidence": "what is the current status?",
+          "should_promote": false,
+          "promotion_target": "none"
+        }""",
+    )
+
+    outcome = await service.reflect_on_session(
+        messages=[{"role": "user", "content": "what is the current status?"}],
+        session_key="telegram:tal",
+        digest=make_low_signal_digest(),
+    )
+
+    assert outcome.status == "skipped"
+    assert outcome.reason == "no_learning_signal"
+    assert service.memory.list_memories("reflections") == []
+    assert reflection_audit_events(tmp_path)[-1]["reason"] == "no_learning_signal"
+
+
+@pytest.mark.asyncio
+async def test_reflection_rejects_fallback_session_key_as_evidence(tmp_path):
+    digest = make_low_signal_digest()
+    digest.user_requests.clear()
+    digest.outcomes.clear()
+    digest.event_lines.clear()
+    digest.assistant_responses.clear()
+    service = make_service(
+        tmp_path,
+        """{
+          "title": "Current Status Reply",
+          "observation": "The assistant answered a simple status question.",
+          "impact": "No future behavior change is needed.",
+          "lesson": "I should answer status questions.",
+          "recommended_behavior": "Answer status questions when asked.",
+          "scope": "session_tactic",
+          "confidence": 0.9,
+          "should_promote": false,
+          "promotion_target": "none"
+        }""",
+    )
+
+    outcome = await service.reflect_on_session(
+        messages=[{"role": "user", "content": "status?"}],
+        session_key="telegram:tal",
+        digest=digest,
+    )
+
+    assert outcome.status == "skipped"
+    assert outcome.reason in {"no_learning_signal", "not_grounded_in_digest"}
+    assert service.memory.list_memories("reflections") == []
