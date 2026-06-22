@@ -11,8 +11,10 @@ Output: 0-1 reflection file + optional bootstrap update.
 
 from __future__ import annotations
 
+import json
 import re
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from difflib import SequenceMatcher
 from importlib.resources import files as package_files
 from pathlib import Path
@@ -152,6 +154,7 @@ Rules:
             # Skip empty sessions
             if not messages:
                 logger.debug("Reflection skipped: empty session {}", session_key)
+                self._audit_reflection("skipped", session_key, reason="empty_session")
                 return ReflectionOutcome(status="skipped", reason="empty_session")
 
             # 1. Load recent reflections for dedup context
@@ -201,6 +204,7 @@ Rules:
             if result.get("skip"):
                 reason = str(result.get("reason", "no_insights"))
                 logger.debug("Reflection skipped: {}", reason)
+                self._audit_reflection("skipped", session_key, reason=reason, result=result)
                 return ReflectionOutcome(status="skipped", reason=reason)
 
             # 5. Validate required fields.
@@ -219,11 +223,18 @@ Rules:
 
             if not valid:
                 logger.debug("Reflection rejected by validation (reason={}): {}", reason, result)
+                self._audit_reflection("validation_failed", session_key, reason=reason, result=result)
                 return ReflectionOutcome(status="skipped", reason=reason)
 
             if self._is_duplicate_or_contradictory(result, recent):
                 logger.info(
                     "Reflection skipped after duplicate/contradiction guard: {}", result["title"]
+                )
+                self._audit_reflection(
+                    "duplicate",
+                    session_key,
+                    reason="duplicate_or_contradictory",
+                    result=result,
                 )
                 return ReflectionOutcome(
                     status="skipped",
@@ -235,9 +246,17 @@ Rules:
             item = self._write_reflection(result, session_key)
 
             # 7. Auto-promote if flagged
+            if result.get("_promotion_skip_reason"):
+                self._audit_reflection(
+                    "promotion_skipped",
+                    session_key,
+                    reason=str(result["_promotion_skip_reason"]),
+                    result=result,
+                )
             if self.auto_promote and result.get("should_promote") and result.get("promote_content"):
-                await self._promote(result)
+                await self._promote(result, session_key)
 
+            self._audit_reflection("saved", session_key, reason="saved", result=result)
             logger.info("Reflection complete: {}", result.get("title", "unknown"))
             return ReflectionOutcome(
                 status="saved",
@@ -248,7 +267,33 @@ Rules:
 
         except Exception as e:
             logger.warning("Reflection failed (non-fatal): {}", e)
+            self._audit_reflection("failed", session_key, reason=str(e))
             return ReflectionOutcome(status="failed", reason=str(e))
+
+    def _audit_reflection(
+        self,
+        event: str,
+        session_key: str,
+        *,
+        reason: str,
+        result: dict[str, Any] | None = None,
+    ) -> None:
+        """Append a local JSONL audit event for reflection decisions."""
+        result = result or {}
+        payload = {
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "event": event,
+            "reason": reason,
+            "session_key": session_key,
+            "title": result.get("title"),
+            "scope": result.get("scope"),
+            "evidence": result.get("evidence"),
+            "promotion_target": result.get("promotion_target"),
+        }
+        audit_path = self.memory.memory_dir / "reflection_audit.jsonl"
+        audit_path.parent.mkdir(parents=True, exist_ok=True)
+        with audit_path.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(payload, sort_keys=True) + "\n")
 
     def _format_digest(self, digest: SessionDigest) -> str:
         """Format deterministic digest data for reflection."""
@@ -432,6 +477,7 @@ Rules:
         if result["promotion_target"] not in self.VALID_PROMOTION_TARGETS:
             return False, "invalid_promotion_target"
         if not self._promotion_is_viable(result):
+            result["_promotion_skip_reason"] = "promotion_not_viable"
             result["should_promote"] = False
             result["promotion_target"] = "none"
 
@@ -900,18 +946,21 @@ Rules:
 
         return False
 
-    async def _promote(self, result: dict) -> None:
+    async def _promote(self, result: dict, session_key: str) -> None:
         """Auto-promote reflection to bootstrap file."""
         target_file = self._normalize_promotion_target(result.get("promotion_target", "none"))
         content = self._normalize_promote_content(str(result.get("promote_content", "")))
 
         if not content:
+            self._audit_reflection("promotion_skipped", session_key, reason="empty_promote_content", result=result)
             return
 
         if target_file == "none":
+            self._audit_reflection("promotion_skipped", session_key, reason="no_promotion_target", result=result)
             return
         if target_file not in self.allowed_targets:
             logger.warning("Invalid promote target: {}", target_file)
+            self._audit_reflection("promotion_skipped", session_key, reason="target_not_allowed", result=result)
             return
 
         section_map = {
@@ -929,6 +978,7 @@ Rules:
                 "Skipping bootstrap promotion for {} due to duplicate/conflict in existing bootstrap guidance",
                 result["title"],
             )
+            self._audit_reflection("promotion_skipped", session_key, reason="bootstrap_duplicate_or_conflict", result=result)
             return
         self._ensure_bootstrap_file(file_path)
         if file_path.exists():
@@ -939,9 +989,11 @@ Rules:
                     target_file,
                     self.max_file_lines,
                 )
+                self._audit_reflection("promotion_skipped", session_key, reason="target_file_too_long", result=result)
                 return
         self._append_to_bootstrap(file_path, section, content)
         self._append_promotion_audit(result, target_file, content)
+        self._audit_reflection("promotion_committed", session_key, reason="promoted", result=result)
 
         logger.info("Auto-promoted reflection to {}: {}", target_file, result["title"])
 

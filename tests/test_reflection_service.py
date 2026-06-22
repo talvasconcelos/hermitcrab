@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import json
 
 import pytest
 
@@ -40,7 +41,7 @@ def make_digest() -> SessionDigest:
     )
 
 
-def make_service(tmp_path, content: str) -> ReflectionService:
+def make_service(tmp_path, content: str, *, auto_promote: bool = False) -> ReflectionService:
     async def fake_chat_callable(**_kwargs):
         return FakeResponse(content=content)
 
@@ -48,10 +49,17 @@ def make_service(tmp_path, content: str) -> ReflectionService:
         memory=MemoryStore(tmp_path),
         chat_callable=fake_chat_callable,
         model="test-model",
-        auto_promote=False,
+        auto_promote=auto_promote,
         allowed_targets=["AGENTS.md", "TOOLS.md", "SOUL.md", "IDENTITY.md"],
         max_file_lines=200,
     )
+
+
+def reflection_audit_events(tmp_path) -> list[dict]:
+    audit_path = tmp_path / "memory" / "reflection_audit.jsonl"
+    if not audit_path.exists():
+        return []
+    return [json.loads(line) for line in audit_path.read_text(encoding="utf-8").splitlines()]
 
 
 @pytest.mark.asyncio
@@ -125,3 +133,156 @@ def test_labeled_reflection_response_is_accepted_with_aliases(tmp_path):
     assert valid, reason
     assert parsed["scope"] == "tool_usage"
     assert parsed["confidence"] == 0.85
+
+
+@pytest.mark.asyncio
+async def test_reflection_audits_saved_decision(tmp_path):
+    service = make_service(
+        tmp_path,
+        """{
+          "title": "Use Shell For Deletions",
+          "observation": "The user corrected the agent about shell deletion.",
+          "impact": "This avoids false refusal of simple file operations.",
+          "lesson": "I should use available shell execution for explicit scoped filesystem operations.",
+          "recommended_behavior": "When exec is available and the user gives exact file paths, use explicit rm paths and verify.",
+          "scope": "tool_usage",
+          "confidence": 0.9,
+          "evidence": "shell exec is available; use rm with exact paths",
+          "should_promote": false,
+          "promotion_target": "none",
+          "promote_content": ""
+        }""",
+    )
+
+    outcome = await service.reflect_on_session(
+        messages=[{"role": "user", "content": "shell exec is available; use rm with exact paths"}],
+        session_key="telegram:tal",
+        digest=make_digest(),
+    )
+
+    assert outcome.status == "saved"
+    events = reflection_audit_events(tmp_path)
+    assert events[-1]["event"] == "saved"
+    assert events[-1]["reason"] == "saved"
+    assert events[-1]["session_key"] == "telegram:tal"
+    assert events[-1]["title"] == "Use Shell For Deletions"
+    assert events[-1]["scope"] == "tool_usage"
+    assert events[-1]["evidence"] == "shell exec is available; use rm with exact paths"
+
+
+@pytest.mark.asyncio
+async def test_reflection_audits_validation_failure(tmp_path):
+    service = make_service(
+        tmp_path,
+        """{
+          "title": "Weak",
+          "observation": "The user corrected the agent.",
+          "impact": "It matters.",
+          "lesson": "I should improve.",
+          "recommended_behavior": "Improve.",
+          "scope": "assistant_behavior",
+          "confidence": 0.2,
+          "evidence": "shell exec is available; use rm with exact paths"
+        }""",
+    )
+
+    outcome = await service.reflect_on_session(
+        messages=[{"role": "user", "content": "shell exec is available; use rm with exact paths"}],
+        session_key="telegram:tal",
+        digest=make_digest(),
+    )
+
+    assert outcome.status == "skipped"
+    assert service.memory.list_memories("reflections") == []
+    events = reflection_audit_events(tmp_path)
+    assert events[-1]["event"] == "validation_failed"
+    assert events[-1]["reason"] == "low_or_invalid_confidence"
+
+
+@pytest.mark.asyncio
+async def test_reflection_audits_skip_response(tmp_path):
+    service = make_service(tmp_path, '{"skip": true, "reason": "No new insights"}')
+
+    outcome = await service.reflect_on_session(
+        messages=[{"role": "user", "content": "shell exec is available; use rm with exact paths"}],
+        session_key="telegram:tal",
+        digest=make_digest(),
+    )
+
+    assert outcome.status == "skipped"
+    events = reflection_audit_events(tmp_path)
+    assert events[-1]["event"] == "skipped"
+    assert events[-1]["reason"] == "No new insights"
+
+
+@pytest.mark.asyncio
+async def test_reflection_audits_duplicate(tmp_path):
+    content = """{
+      "title": "Use Shell For Deletions",
+      "observation": "The user corrected the agent about shell deletion.",
+      "impact": "This avoids false refusal of simple file operations.",
+      "lesson": "I should use available shell execution for explicit scoped filesystem operations.",
+      "recommended_behavior": "When exec is available and the user gives exact file paths, use explicit rm paths and verify.",
+      "scope": "tool_usage",
+      "confidence": 0.9,
+      "evidence": "shell exec is available; use rm with exact paths",
+      "should_promote": false,
+      "promotion_target": "none",
+      "promote_content": ""
+    }"""
+    service = make_service(tmp_path, content)
+    digest = make_digest()
+
+    first = await service.reflect_on_session(
+        messages=[{"role": "user", "content": "shell exec is available; use rm with exact paths"}],
+        session_key="telegram:tal",
+        digest=digest,
+    )
+    second = await service.reflect_on_session(
+        messages=[{"role": "user", "content": "shell exec is available; use rm with exact paths"}],
+        session_key="telegram:tal",
+        digest=digest,
+    )
+
+    assert first.status == "saved"
+    assert second.status == "skipped"
+    events = reflection_audit_events(tmp_path)
+    assert events[-1]["event"] == "duplicate"
+    assert events[-1]["reason"] == "duplicate_or_contradictory"
+    assert len(service.memory.list_memories("reflections")) == 1
+
+
+@pytest.mark.asyncio
+async def test_reflection_audits_promotion_skipped_when_not_viable(tmp_path):
+    service = make_service(
+        tmp_path,
+        """{
+          "title": "Use Shell For Deletions",
+          "observation": "The user corrected the agent about shell deletion.",
+          "impact": "This avoids false refusal of simple file operations.",
+          "lesson": "I should use available shell execution for explicit scoped filesystem operations.",
+          "recommended_behavior": "When exec is available and the user gives exact file paths, use explicit rm paths and verify.",
+          "scope": "tool_usage",
+          "confidence": 0.7,
+          "evidence": "shell exec is available; use rm with exact paths",
+          "should_promote": true,
+          "promotion_target": "TOOLS.md",
+          "promote_content": "Use explicit rm paths for scoped deletions."
+        }""",
+        auto_promote=True,
+    )
+
+    outcome = await service.reflect_on_session(
+        messages=[{"role": "user", "content": "shell exec is available; use rm with exact paths"}],
+        session_key="telegram:tal",
+        digest=make_digest(),
+    )
+
+    assert outcome.status == "saved"
+    events = reflection_audit_events(tmp_path)
+    assert any(
+        event["event"] == "promotion_skipped"
+        and event["reason"] == "promotion_not_viable"
+        and event["promotion_target"] == "none"
+        for event in events
+    )
