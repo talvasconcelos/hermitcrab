@@ -177,6 +177,39 @@ Rules:
             return False
 
         changed = False
+        insight_items = self._normalize_insights(payload)
+        if insight_items:
+            conversation_text = self._normalize_line(context)
+            for insight in insight_items:
+                target = insight.get("target", "")
+                bullet = insight.get("bullet", "")
+                evidence = insight.get("evidence", "")
+                insight_confidence = self._parse_confidence(insight.get("confidence"))
+                if target not in self.TARGET_FILES.values():
+                    self._audit_onboarding("validation_failed", reason="invalid_target", insight=insight)
+                    continue
+                if insight_confidence < self.MIN_CONFIDENCE:
+                    self._audit_onboarding("validation_failed", reason="low_confidence", insight=insight)
+                    continue
+                if not evidence:
+                    self._audit_onboarding("validation_failed", reason="missing_evidence", insight=insight)
+                    continue
+                if self._normalize_line(evidence) not in conversation_text:
+                    self._audit_onboarding(
+                        "validation_failed",
+                        reason="evidence_not_in_conversation",
+                        insight=insight,
+                    )
+                    continue
+                path = self.workspace / target
+                if self._merge_section_bullets(path, [bullet]):
+                    self._audit_onboarding("written", reason=insight.get("reason") or "written", insight=insight)
+                    changed = True
+                else:
+                    self._audit_onboarding("duplicate", reason="duplicate", insight=insight)
+            self._update_state_from_payload(payload)
+            return changed
+
         for key, filename in self.TARGET_FILES.items():
             bullets = self._normalize_bullets(payload.get(key))
             if not bullets:
@@ -224,6 +257,64 @@ Rules:
         except (TypeError, ValueError):
             return 0.0
         return numeric if 0.0 <= numeric <= 1.0 else 0.0
+
+    def _normalize_insights(self, payload: dict[str, Any]) -> list[dict[str, str]]:
+        raw_insights = payload.get("insights")
+        if not isinstance(raw_insights, list):
+            return []
+        insights: list[dict[str, str]] = []
+        for item in raw_insights:
+            if not isinstance(item, dict):
+                continue
+            target = str(item.get("target") or "").strip()
+            bullet_list = self._normalize_bullets([item.get("bullet")])
+            bullet = bullet_list[0] if bullet_list else ""
+            insights.append(
+                {
+                    "target": target,
+                    "bullet": bullet,
+                    "evidence": str(item.get("evidence") or "").strip(),
+                    "confidence": item.get("confidence"),
+                    "reason": str(item.get("reason") or "").strip(),
+                }
+            )
+        return insights
+
+    def _audit_onboarding(
+        self,
+        event: str,
+        *,
+        reason: str,
+        insight: dict[str, Any] | None = None,
+    ) -> None:
+        insight = insight or {}
+        payload = {
+            "timestamp": self._now(),
+            "event": event,
+            "reason": reason,
+            "target": insight.get("target"),
+            "bullet": insight.get("bullet"),
+            "evidence": insight.get("evidence"),
+        }
+        audit_path = self.workspace / "onboarding" / "audit.jsonl"
+        audit_path.parent.mkdir(parents=True, exist_ok=True)
+        with audit_path.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(payload, sort_keys=True) + "\n")
+
+    def _update_state_from_payload(self, payload: dict[str, Any]) -> None:
+        state = self.read_state()
+        if isinstance(payload.get("observed_domains"), list):
+            existing = set(state.get("observed_domains") or [])
+            for domain in payload["observed_domains"]:
+                text = str(domain).strip()
+                if text:
+                    existing.add(text)
+            state["observed_domains"] = sorted(existing)
+        if isinstance(payload.get("pending_assumptions"), list):
+            state["pending_assumptions"] = [
+                str(item).strip() for item in payload["pending_assumptions"] if str(item).strip()
+            ]
+        self._write_state(state)
 
     def _normalize_bullets(self, value: Any) -> list[str]:
         if not isinstance(value, list):
