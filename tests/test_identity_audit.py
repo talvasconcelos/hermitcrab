@@ -137,7 +137,7 @@ def test_audit_command_reads_system_audit_log(monkeypatch, tmp_path) -> None:
         '{"event":"tool.policy_denied","identity_name":"owner","ts":"2026-04-29T12:00:00+00:00"}\n',
         encoding="utf-8",
     )
-    monkeypatch.setattr("hermitcrab.cli.commands._load_runtime_config", lambda: config)
+    monkeypatch.setattr("hermitcrab.cli.diagnostic_commands.load_runtime_config", lambda: config)
 
     result = runner.invoke(app, ["audit"])
 
