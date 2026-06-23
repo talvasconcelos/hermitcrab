@@ -6,8 +6,7 @@ import os
 import signal
 import sys
 import time
-from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 import typer
 from rich.console import Console
@@ -47,6 +46,7 @@ from hermitcrab.cli.config_helpers import (
 from hermitcrab.cli.config_helpers import (
     save_runtime_config as _save_runtime_config,
 )
+from hermitcrab.cli.cron_helpers import build_cron_service as _build_cron_service
 from hermitcrab.cli.identity_helpers import (
     bind_nostr_pubkey_to_identity as _bind_nostr_pubkey_to_identity,
 )
@@ -672,26 +672,6 @@ app.add_typer(user_app, name="user")
 app.add_typer(onboarding_app, name="onboarding")
 
 app.add_typer(model_app, name="model")
-
-
-def _build_cron_service(
-    *,
-    identity_root: Path | None = None,
-    identity_name: str | None = None,
-    conflict_finder: Callable[[Any, int], list[Any]] | None = None,
-):
-    """Build the CronService for an identity root."""
-    from hermitcrab.cron.service import CronService
-
-    if identity_root is None or identity_name is None:
-        config = _load_runtime_config()
-        identity_root = identity_root or config.owner_identity_root_path
-        identity_name = identity_name or config.owner_identity_name
-    return CronService(
-        identity_root / "cron" / "jobs.json",
-        identity_name=identity_name,
-        conflict_finder=conflict_finder,
-    )
 
 
 def _build_reminder_store() -> Any:
