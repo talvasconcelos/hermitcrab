@@ -167,7 +167,7 @@ def test_user_add_best_effort_intro_message_does_not_crash(monkeypatch, tmp_path
         calls.append((recipient_pubkey, identity_name))
         return False
 
-    monkeypatch.setattr("hermitcrab.cli.commands._send_nostr_onboarding_intro", fake_intro)
+    monkeypatch.setattr("hermitcrab.cli.user_commands._send_nostr_onboarding_intro", fake_intro)
     result = runner.invoke(app, ["user", "add", "alice"])
 
     assert result.exit_code == 0
