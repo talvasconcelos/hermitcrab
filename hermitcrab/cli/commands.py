@@ -12,24 +12,9 @@ from rich.console import Console
 from hermitcrab import __logo__, __version__
 from hermitcrab.cli import gateway_runtime
 from hermitcrab.cli.agent_loop_factory import build_agent_loop_kwargs as _build_agent_loop_kwargs
-from hermitcrab.cli.bootstrap import (
-    bootstrap_standard_layout,
-)
-from hermitcrab.cli.bootstrap import (
-    build_onboard_next_steps as _build_onboard_next_steps,
-)
 from hermitcrab.cli.channel_commands import channels_app
 from hermitcrab.cli.config_helpers import (
-    api_key_from_env as _api_key_from_env,
-)
-from hermitcrab.cli.config_helpers import (
-    configure_provider as _configure_provider,
-)
-from hermitcrab.cli.config_helpers import (
     load_runtime_config as _load_runtime_config,
-)
-from hermitcrab.cli.config_helpers import (
-    provider_options as _provider_options,
 )
 from hermitcrab.cli.cron_commands import cron_app
 from hermitcrab.cli.cron_helpers import build_cron_service as _build_cron_service
@@ -53,10 +38,10 @@ from hermitcrab.cli.people_commands import people_app
 from hermitcrab.cli.provider_factory import make_provider
 from hermitcrab.cli.provider_login import provider_app
 from hermitcrab.cli.reminder_commands import reminders_app
+from hermitcrab.cli.setup_commands import register_setup_commands
 from hermitcrab.cli.user_commands import user_app
 from hermitcrab.config.schema import (
     Config,
-    NamedModelConfig,
 )
 
 GatewayIdentityRuntimeState = gateway_runtime.GatewayIdentityRuntimeState
@@ -72,6 +57,7 @@ app = typer.Typer(
 )
 
 console = Console()
+register_setup_commands(app)
 
 
 def _print_gateway_runtime_summary(
@@ -114,108 +100,6 @@ def main(
 ):
     """hermitcrab - Personal AI Assistant."""
     pass
-
-
-# ============================================================================
-# Onboard / Setup
-# ============================================================================
-
-
-@app.command()
-def onboard():
-    """Initialize hermitcrab configuration and workspace."""
-    from hermitcrab.config.loader import get_config_path, load_config, save_config
-    from hermitcrab.config.schema import Config
-
-    config_path = get_config_path()
-
-    if config_path.exists():
-        console.print(f"[yellow]Config already exists at {config_path}[/yellow]")
-        console.print("  [bold]y[/bold] = overwrite with defaults (existing values will be lost)")
-        console.print(
-            "  [bold]N[/bold] = refresh config, keeping existing values and adding new fields"
-        )
-        if typer.confirm("Overwrite?"):
-            config = Config()
-            save_config(config)
-            console.print(f"[green]✓[/green] Config reset to defaults at {config_path}")
-        else:
-            config = load_config()
-            save_config(config)
-            console.print(
-                f"[green]✓[/green] Config refreshed at {config_path} (existing values preserved)"
-            )
-    else:
-        config = Config()
-        save_config(config)
-        console.print(f"[green]✓[/green] Created config at {config_path}")
-
-    bootstrap_standard_layout(config, announce=console.print)
-
-    console.print(f"\n{__logo__} hermitcrab is ready!")
-    for line in _build_onboard_next_steps():
-        console.print(line)
-
-
-@app.command()
-def setup(
-    yes: bool = typer.Option(False, "--yes", "-y", help="Run non-interactively with safe defaults"),
-    provider: str | None = typer.Option(None, "--provider", help="Provider to configure, e.g. openrouter or ollama"),
-    model: str | None = typer.Option(None, "--model", help="Default model id or existing named model"),
-    model_name: str = typer.Option("main", "--model-name", help="Name to save the default model under"),
-    api_key_env: str | None = typer.Option(
-        None, "--api-key-env", help="Read provider API key from this environment variable"
-    ),
-    owner_label: str | None = typer.Option(None, "--owner-label", help="Display label for the owner identity"),
-):
-    """Guided admin setup for config, owner identity, and default model."""
-    from hermitcrab.config.loader import get_config_path, load_config, save_config
-
-    config_path = get_config_path()
-    config = load_config() if config_path.exists() else Config(root=str(config_path.parent))
-
-    if not yes:
-        console.print(f"{__logo__} hermitcrab setup\n")
-        console.print("This configures the admin CLI and the owner identity.")
-        console.print(
-            "Other users can be added later and should normally talk through channels like Nostr DMs.\n"
-        )
-
-        if provider is None:
-            provider = typer.prompt(
-                "Provider (ollama/openrouter/custom, blank to keep current)", default=""
-            ) or None
-        if model is None:
-            model = typer.prompt("Default model id or named model (blank to keep current)", default="") or None
-        if owner_label is None:
-            owner_label = typer.prompt("Owner display label (blank to keep current)", default="") or None
-
-    if provider:
-        _configure_provider(config, provider, api_key=_api_key_from_env(api_key_env))
-
-    if model:
-        if model in config.models:
-            config.agents.defaults.model = model
-        else:
-            provider_options = _provider_options(provider)
-            config.models[model_name] = NamedModelConfig(model=model, provider_options=provider_options)
-            config.agents.defaults.model = model_name
-
-    owner = config.identities.registry[config.owner_identity_name]
-    if owner_label:
-        owner.label = owner_label
-
-    validated = Config.model_validate(config.model_dump(by_alias=True))
-    save_config(validated)
-    bootstrap_standard_layout(validated, announce=console.print)
-
-    console.print(f"[green]✓[/green] Setup saved at {config_path}")
-    console.print(f"Owner identity: [cyan]{validated.owner_identity_name}[/cyan]")
-    console.print(f"Default model: [cyan]{validated.agents.defaults.model}[/cyan]")
-    console.print("\nNext steps:")
-    console.print("  1. Run [cyan]hermitcrab doctor[/cyan]")
-    console.print('  2. Try [cyan]hermitcrab agent -m "Hello"[/cyan]')
-    console.print("  3. Add users when needed: [cyan]hermitcrab user add alice --label Alice[/cyan]")
 
 
 def _make_provider(config: Config):

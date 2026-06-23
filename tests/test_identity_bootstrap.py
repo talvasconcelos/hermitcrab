@@ -5,7 +5,8 @@ from __future__ import annotations
 from typer.testing import CliRunner
 
 from hermitcrab.agent.context import ContextBuilder
-from hermitcrab.cli.commands import app, bootstrap_standard_layout
+from hermitcrab.cli.bootstrap import bootstrap_standard_layout
+from hermitcrab.cli.commands import app
 from hermitcrab.cli.diagnostics import build_status_report
 from hermitcrab.config.loader import save_config
 from hermitcrab.config.schema import Config

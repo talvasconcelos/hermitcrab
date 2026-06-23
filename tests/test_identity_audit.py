@@ -11,7 +11,8 @@ from hermitcrab.agent.audit import AuditTrail
 from hermitcrab.agent.loop import AgentLoop
 from hermitcrab.bus.events import InboundMessage
 from hermitcrab.bus.queue import MessageBus
-from hermitcrab.cli.commands import app, bootstrap_standard_layout
+from hermitcrab.cli.bootstrap import bootstrap_standard_layout
+from hermitcrab.cli.commands import app
 from hermitcrab.cli.diagnostics import build_status_report
 from hermitcrab.config.loader import save_config
 from hermitcrab.config.schema import Config
