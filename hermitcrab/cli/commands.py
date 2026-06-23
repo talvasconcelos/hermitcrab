@@ -31,6 +31,7 @@ from hermitcrab.cli.bootstrap import (
 from hermitcrab.cli.bootstrap import (
     ensure_root as _ensure_root,
 )
+from hermitcrab.cli.channel_commands import channels_app
 from hermitcrab.cli.config_helpers import (
     api_key_from_env as _api_key_from_env,
 )
@@ -612,45 +613,7 @@ def agent(
         )
 
 
-# ============================================================================
-# Channel Commands
-# ============================================================================
-
-
-channels_app = typer.Typer(help="Manage channels")
 app.add_typer(channels_app, name="channels")
-
-
-@channels_app.command("status")
-def channels_status():
-    """Show channel status."""
-    config = _load_runtime_config()
-
-    table = Table(title="Channel Status")
-    table.add_column("Channel", style="cyan")
-    table.add_column("Enabled", style="green")
-    table.add_column("Configuration", style="yellow")
-
-    # Telegram
-    tg = config.channels.telegram
-    tg_config = f"token: {tg.token[:10]}..." if tg.token else "[dim]not configured[/dim]"
-    table.add_row("Telegram", "✓" if tg.enabled else "✗", tg_config)
-
-    # Email
-    em = config.channels.email
-    em_config = em.imap_host if em.imap_host else "[dim]not configured[/dim]"
-    table.add_row("Email", "✓" if em.enabled else "✗", em_config)
-
-    # Nostr
-    nostr = config.channels.nostr
-    nostr_config = (
-        f"{nostr.protocol}, {len(nostr.relays)} relay(s)"
-        if nostr.private_key
-        else "[dim]not configured[/dim]"
-    )
-    table.add_row("Nostr", "✓" if nostr.enabled else "✗", nostr_config)
-
-    console.print(table)
 
 
 # ============================================================================
