@@ -58,6 +58,36 @@ def test_user_add_creates_identity_config_and_bootstrap_root(monkeypatch, tmp_pa
     assert "private key is NOT stored in config" in result.stdout
 
 
+def test_onboarding_cli_status_pause_resume_complete(monkeypatch, tmp_path) -> None:
+    _use_config(monkeypatch, tmp_path, Config.model_validate({"root": str(tmp_path)}))
+    add_result = runner.invoke(app, ["user", "add", "alice"])
+    assert add_result.exit_code == 0
+
+    status = runner.invoke(app, ["onboarding", "status", "alice", "--json"])
+    assert status.exit_code == 0
+    payload = json.loads(status.stdout)
+    assert payload["identity"] == "alice"
+    assert payload["status"] == "active"
+    assert payload["enabled"] is True
+
+    pause = runner.invoke(app, ["onboarding", "pause", "alice"])
+    assert pause.exit_code == 0
+    status = runner.invoke(app, ["onboarding", "status", "alice", "--json"])
+    assert json.loads(status.stdout)["status"] == "paused"
+
+    resume = runner.invoke(app, ["onboarding", "resume", "alice"])
+    assert resume.exit_code == 0
+    status = runner.invoke(app, ["onboarding", "status", "alice", "--json"])
+    assert json.loads(status.stdout)["enabled"] is True
+
+    complete = runner.invoke(app, ["onboarding", "complete", "alice"])
+    assert complete.exit_code == 0
+    status = runner.invoke(app, ["onboarding", "status", "alice", "--json"])
+    payload = json.loads(status.stdout)
+    assert payload["status"] == "completed"
+    assert payload["enabled"] is False
+
+
 def test_user_add_accepts_nostr_public_key_only(monkeypatch, tmp_path) -> None:
     from pynostr.key import PrivateKey
 

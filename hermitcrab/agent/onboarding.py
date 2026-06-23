@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import json
 import re
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Awaitable, Callable
 
@@ -10,10 +12,18 @@ import json_repair
 from loguru import logger
 
 
+async def _noop_chat_callable(**_kwargs: Any) -> Any:
+    return None
+
+
 class OnboardingProfileService:
     """Extract durable onboarding insights and sync bootstrap profile files."""
 
     ONBOARDING_FLAG_FILE = ".onboarding_mode"
+    STATE_FILE = Path("onboarding/state.json")
+    ACTIVE_STATUSES = {"active", "ready_to_confirm"}
+    TERMINAL_STATUSES = {"completed", "paused"}
+    VALID_STATUSES = ACTIVE_STATUSES | TERMINAL_STATUSES
     MIN_CONFIDENCE = 0.75
     MAX_CONTEXT_MESSAGES = 12
     MAX_BULLETS_PER_FILE = 6
@@ -58,7 +68,80 @@ Rules:
         self.model = model
 
     def is_enabled(self) -> bool:
-        return (self.workspace / self.ONBOARDING_FLAG_FILE).exists()
+        if not (self.workspace / self.ONBOARDING_FLAG_FILE).exists():
+            return False
+        return self.read_state().get("status") in self.ACTIVE_STATUSES
+
+    @property
+    def state_path(self) -> Path:
+        return self.workspace / self.STATE_FILE
+
+    @staticmethod
+    def _now() -> str:
+        return datetime.now(timezone.utc).isoformat()
+
+    def _default_state(self, status: str = "active") -> dict[str, Any]:
+        now = self._now()
+        return {
+            "status": status,
+            "started_at": now,
+            "last_updated_at": now,
+            "observed_domains": [],
+            "pending_assumptions": [],
+            "confirmed_insights": [],
+            "suggested_use_cases": [],
+        }
+
+    def read_state(self) -> dict[str, Any]:
+        """Read or initialize the inspectable onboarding state artifact."""
+        if not (self.workspace / self.ONBOARDING_FLAG_FILE).exists():
+            return self._default_state("completed")
+        path = self.state_path
+        if not path.exists():
+            state = self._default_state("active")
+            self._write_state(state)
+            return state
+        try:
+            state = json.loads(path.read_text(encoding="utf-8"))
+        except Exception as exc:
+            logger.warning("Onboarding state is corrupt; resetting to active: {}", exc)
+            state = self._default_state("active")
+            self._write_state(state)
+            return state
+        if not isinstance(state, dict) or state.get("status") not in self.VALID_STATUSES:
+            state = self._default_state("active")
+            self._write_state(state)
+            return state
+        return state
+
+    def _write_state(self, state: dict[str, Any]) -> None:
+        state = dict(state)
+        state["last_updated_at"] = self._now()
+        if not state.get("started_at"):
+            state["started_at"] = state["last_updated_at"]
+        self.state_path.parent.mkdir(parents=True, exist_ok=True)
+        self.state_path.write_text(json.dumps(state, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+    def set_status(self, status: str) -> None:
+        if status not in self.VALID_STATUSES:
+            raise ValueError(f"Invalid onboarding status: {status}")
+        state = self.read_state()
+        state["status"] = status
+        self._write_state(state)
+
+    def pause(self) -> None:
+        self.set_status("paused")
+
+    def resume(self) -> None:
+        self.set_status("active")
+
+    def complete(self) -> None:
+        self.set_status("completed")
+
+    @classmethod
+    def is_workspace_onboarding_active(cls, workspace: Path) -> bool:
+        service = cls(workspace, chat_callable=_noop_chat_callable, model="")
+        return service.is_enabled()
 
     async def maybe_sync_from_messages(self, messages: list[dict[str, Any]]) -> bool:
         """Extract onboarding insights and persist bootstrap profile updates."""
@@ -94,6 +177,39 @@ Rules:
             return False
 
         changed = False
+        insight_items = self._normalize_insights(payload)
+        if insight_items:
+            conversation_text = self._normalize_line(context)
+            for insight in insight_items:
+                target = insight.get("target", "")
+                bullet = insight.get("bullet", "")
+                evidence = insight.get("evidence", "")
+                insight_confidence = self._parse_confidence(insight.get("confidence"))
+                if target not in self.TARGET_FILES.values():
+                    self._audit_onboarding("validation_failed", reason="invalid_target", insight=insight)
+                    continue
+                if insight_confidence < self.MIN_CONFIDENCE:
+                    self._audit_onboarding("validation_failed", reason="low_confidence", insight=insight)
+                    continue
+                if not evidence:
+                    self._audit_onboarding("validation_failed", reason="missing_evidence", insight=insight)
+                    continue
+                if self._normalize_line(evidence) not in conversation_text:
+                    self._audit_onboarding(
+                        "validation_failed",
+                        reason="evidence_not_in_conversation",
+                        insight=insight,
+                    )
+                    continue
+                path = self.workspace / target
+                if self._merge_section_bullets(path, [bullet]):
+                    self._audit_onboarding("written", reason=insight.get("reason") or "written", insight=insight)
+                    changed = True
+                else:
+                    self._audit_onboarding("duplicate", reason="duplicate", insight=insight)
+            self._update_state_from_payload(payload)
+            return changed
+
         for key, filename in self.TARGET_FILES.items():
             bullets = self._normalize_bullets(payload.get(key))
             if not bullets:
@@ -141,6 +257,64 @@ Rules:
         except (TypeError, ValueError):
             return 0.0
         return numeric if 0.0 <= numeric <= 1.0 else 0.0
+
+    def _normalize_insights(self, payload: dict[str, Any]) -> list[dict[str, str]]:
+        raw_insights = payload.get("insights")
+        if not isinstance(raw_insights, list):
+            return []
+        insights: list[dict[str, str]] = []
+        for item in raw_insights:
+            if not isinstance(item, dict):
+                continue
+            target = str(item.get("target") or "").strip()
+            bullet_list = self._normalize_bullets([item.get("bullet")])
+            bullet = bullet_list[0] if bullet_list else ""
+            insights.append(
+                {
+                    "target": target,
+                    "bullet": bullet,
+                    "evidence": str(item.get("evidence") or "").strip(),
+                    "confidence": item.get("confidence"),
+                    "reason": str(item.get("reason") or "").strip(),
+                }
+            )
+        return insights
+
+    def _audit_onboarding(
+        self,
+        event: str,
+        *,
+        reason: str,
+        insight: dict[str, Any] | None = None,
+    ) -> None:
+        insight = insight or {}
+        payload = {
+            "timestamp": self._now(),
+            "event": event,
+            "reason": reason,
+            "target": insight.get("target"),
+            "bullet": insight.get("bullet"),
+            "evidence": insight.get("evidence"),
+        }
+        audit_path = self.workspace / "onboarding" / "audit.jsonl"
+        audit_path.parent.mkdir(parents=True, exist_ok=True)
+        with audit_path.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(payload, sort_keys=True) + "\n")
+
+    def _update_state_from_payload(self, payload: dict[str, Any]) -> None:
+        state = self.read_state()
+        if isinstance(payload.get("observed_domains"), list):
+            existing = set(state.get("observed_domains") or [])
+            for domain in payload["observed_domains"]:
+                text = str(domain).strip()
+                if text:
+                    existing.add(text)
+            state["observed_domains"] = sorted(existing)
+        if isinstance(payload.get("pending_assumptions"), list):
+            state["pending_assumptions"] = [
+                str(item).strip() for item in payload["pending_assumptions"] if str(item).strip()
+            ]
+        self._write_state(state)
 
     def _normalize_bullets(self, value: Any) -> list[str]:
         if not isinstance(value, list):
