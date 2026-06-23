@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from hermitcrab.agent.distillation import AtomicCandidate, CandidateType, DecisionStatus
+from hermitcrab.agent.distillation import AtomicCandidate, CandidateType
 from hermitcrab.agent.distillation_background import DistillationManager
 from hermitcrab.agent.memory import MemoryStore
 

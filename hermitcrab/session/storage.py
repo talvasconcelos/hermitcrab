@@ -4,8 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from pathlib import Path
-from typing import Any, Iterable, Mapping, Protocol
+from typing import Any, Mapping
 
 
 def utc_now() -> datetime:
@@ -159,76 +158,10 @@ class SearchResult:
     metadata: dict[str, Any] = field(default_factory=dict)
 
 
-class SessionStorage(Protocol):
-    """Protocol for session storage backends."""
-
-    fts_enabled: bool
-
-    def close(self) -> None:
-        """Release backend resources."""
-
-    def upsert_session(self, session: SessionRecord) -> None:
-        """Create or update a session record."""
-
-    def get_session(self, key: str) -> SessionRecord | None:
-        """Return a session by key, or ``None``."""
-
-    def list_sessions(
-        self,
-        *,
-        identity: str | None = None,
-        channel: str | None = None,
-        chat_id: str | None = None,
-        status: str | None = None,
-        archived: bool | None = None,
-        limit: int | None = None,
-        offset: int = 0,
-    ) -> list[SessionRecord]:
-        """List sessions with optional scope filters."""
-
-    def archive_session(self, key: str, *, reason: str) -> None:
-        """Mark a session archived with a reason."""
-
-    def save_message(self, message: MessageRecord) -> int:
-        """Append a message and return its backend row id."""
-
-    def save_messages(
-        self,
-        session_key: str,
-        messages: Iterable[Mapping[str, Any]],
-        *,
-        start_sequence: int = 1,
-    ) -> list[int]:
-        """Append message mappings and return backend row ids."""
-
-    def get_messages(
-        self,
-        session_key: str,
-        *,
-        limit: int | None = None,
-        offset: int = 0,
-        reverse: bool = False,
-    ) -> list[MessageRecord]:
-        """Return messages for a session."""
-
-    def search_messages(
-        self,
-        query: str,
-        *,
-        identity: str | None = None,
-        channel: str | None = None,
-        chat_id: str | None = None,
-        session_key: str | None = None,
-        limit: int = 50,
-    ) -> list[SearchResult]:
-        """Search message content with optional identity/channel/chat/session scope."""
-
-
 __all__ = [
     "MessageRecord",
     "SearchResult",
     "SessionRecord",
-    "SessionStorage",
     "ensure_utc",
     "isoformat",
     "parse_datetime",

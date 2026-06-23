@@ -12,7 +12,6 @@ from hermitcrab.session.storage import (
     MessageRecord,
     SearchResult,
     SessionRecord,
-    SessionStorage,
 )
 
 __all__ = [
@@ -24,7 +23,6 @@ __all__ = [
     "SessionImportReport",
     "SessionManager",
     "SessionRecord",
-    "SessionStorage",
     "create_session_manager",
     "import_jsonl_sessions",
     "migrate_jsonl_sessions_once",

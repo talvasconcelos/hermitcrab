@@ -4,7 +4,7 @@ import sqlite3
 
 import pytest
 
-from hermitcrab.session import MessageRecord, SQLiteSessionStore, SessionRecord
+from hermitcrab.session import MessageRecord, SessionRecord, SQLiteSessionStore
 
 
 def test_sqlite_store_persists_session_lifecycle_and_messages(tmp_path) -> None:

@@ -13,7 +13,7 @@ from typing import Any
 from loguru import logger
 
 from hermitcrab.session.sqlite_store import SQLiteSessionStore
-from hermitcrab.session.storage import MessageRecord, SessionRecord, parse_datetime
+from hermitcrab.session.storage import SessionRecord, parse_datetime
 
 
 @dataclass(slots=True)
