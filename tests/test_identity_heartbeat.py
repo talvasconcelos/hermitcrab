@@ -8,7 +8,7 @@ from unittest.mock import MagicMock
 import pytest
 
 from hermitcrab.bus.queue import MessageBus
-from hermitcrab.cli.commands import GatewayIdentityRuntimeState
+from hermitcrab.cli.gateway_runtime import GatewayIdentityRuntimeState
 from hermitcrab.config.schema import Config
 from hermitcrab.cron.service import CronService
 from hermitcrab.cron.types import CronSchedule

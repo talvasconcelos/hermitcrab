@@ -13,10 +13,10 @@ from hermitcrab.bus.events import InboundMessage, OutboundMessage
 from hermitcrab.bus.queue import MessageBus
 from hermitcrab.channels.nostr import NostrChannel, _split_message
 from hermitcrab.channels.nostr_nip17 import build_nip17_message
-from hermitcrab.cli.commands import (
+from hermitcrab.cli.gateway_runtime import (
     GatewayIdentityRuntimeState,
-    _resolve_gateway_identity_route,
-    _run_gateway_inbound_router,
+    resolve_gateway_identity_route,
+    run_gateway_inbound_router,
 )
 from hermitcrab.config.schema import Config, NostrConfig
 from hermitcrab.cron.service import CronService
@@ -140,7 +140,7 @@ def test_gateway_route_decision_denies_unresolved_nostr_identity() -> None:
         metadata={"identity_target": "denied", "identity_reason": "not_allowed"},
     )
 
-    route = _resolve_gateway_identity_route(msg, owner_identity_name="owner")
+    route = resolve_gateway_identity_route(msg, owner_identity_name="owner")
 
     assert route.target == "denied"
     assert route.reason == "channel_metadata_denied"
@@ -250,7 +250,7 @@ async def test_gateway_router_does_not_block_other_identities() -> None:
     )
 
     router = asyncio.create_task(
-        _run_gateway_inbound_router(
+        run_gateway_inbound_router(
             bus=bus,
             owner_agent=owner,
             get_or_create_agent=get_or_create_agent,
