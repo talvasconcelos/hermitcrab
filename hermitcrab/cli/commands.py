@@ -10,7 +10,6 @@ from typing import Any
 
 import typer
 from rich.console import Console
-from rich.markdown import Markdown
 from rich.table import Table
 
 from hermitcrab import __logo__, __version__
@@ -75,6 +74,7 @@ from hermitcrab.cli.interactive import (
 from hermitcrab.cli.interactive import (
     run_interactive_mode,
 )
+from hermitcrab.cli.journal_commands import journal_app
 from hermitcrab.cli.model_commands import model_app
 from hermitcrab.cli.onboarding_commands import onboarding_app
 from hermitcrab.cli.provider_factory import make_provider
@@ -1760,149 +1760,8 @@ def _filter_audit_entries(entries: list[dict[str, Any]], event: str) -> list[dic
     return [item for item in entries if str(item.get("event") or "") == event_name]
 
 
-# ============================================================================
-# Journal Commands
-# ============================================================================
-
-journal_app = typer.Typer(help="Manage journal entries")
 app.add_typer(journal_app, name="journal")
 app.add_typer(provider_app, name="provider")
-
-
-@journal_app.command("write")
-def journal_write(
-    content: str = typer.Option(
-        "", "--content", "-c", help="Journal content (optional, prompts if not provided)"
-    ),
-    date: str = typer.Option(
-        "", "--date", "-d", help="Date in YYYY-MM-DD format (defaults to today)"
-    ),
-    tag: list[str] = typer.Option([], "--tag", "-t", help="Tags (can be specified multiple times)"),
-):
-    """Write a journal entry."""
-    from datetime import datetime, timezone
-
-    from hermitcrab.agent.journal import JournalStore
-    config = _load_runtime_config()
-    workspace = config.workspace_path
-    journal = JournalStore(workspace)
-
-    # Parse date if provided
-    entry_date = None
-    if date:
-        try:
-            entry_date = datetime.strptime(date, "%Y-%m-%d").replace(tzinfo=timezone.utc)
-        except ValueError:
-            console.print("[red]Invalid date format. Use YYYY-MM-DD.[/red]")
-            raise typer.Exit(1)
-
-    # Get content from option or prompt
-    if not content:
-        console.print("[cyan]Enter journal content (end with empty line):[/cyan]")
-        lines = []
-        while True:
-            try:
-                line = input()
-                if not line.strip():
-                    break
-                lines.append(line)
-            except EOFError:
-                break
-        content = "\n".join(lines)
-
-    if not content.strip():
-        console.print("[red]Journal content cannot be empty.[/red]")
-        raise typer.Exit(1)
-
-    # Write the entry
-    try:
-        file_path = journal.write_entry(
-            content=content,
-            tags=tag if tag else None,
-            date=entry_date,
-        )
-        console.print(f"[green]✓ Journal entry written:[/green] {file_path}")
-    except Exception as e:
-        console.print(f"[red]Failed to write journal entry: {e}[/red]")
-        raise typer.Exit(1)
-
-
-@journal_app.command("read")
-def journal_read(
-    date: str = typer.Option(
-        "", "--date", "-d", help="Date in YYYY-MM-DD format (defaults to today)"
-    ),
-    body_only: bool = typer.Option(
-        False, "--body", "-b", help="Show body content only (no frontmatter)"
-    ),
-):
-    """Read a journal entry."""
-    from datetime import datetime, timezone
-
-    from hermitcrab.agent.journal import JournalStore
-    config = _load_runtime_config()
-    workspace = config.workspace_path
-    journal = JournalStore(workspace)
-
-    # Parse date if provided
-    entry_date = None
-    if date:
-        try:
-            entry_date = datetime.strptime(date, "%Y-%m-%d").replace(tzinfo=timezone.utc)
-        except ValueError:
-            console.print("[red]Invalid date format. Use YYYY-MM-DD.[/red]")
-            raise typer.Exit(1)
-
-    # Read the entry
-    if body_only:
-        content = journal.read_entry_body(entry_date)
-    else:
-        content = journal.read_entry(entry_date)
-
-    if content is None:
-        target_date = entry_date or datetime.now(timezone.utc)
-        console.print(
-            f"[yellow]No journal entry found for {target_date.strftime('%Y-%m-%d')}[/yellow]"
-        )
-        raise typer.Exit(0)
-
-    # Display with markdown rendering
-    console.print()
-    console.print(Markdown(content))
-
-
-@journal_app.command("list")
-def journal_list(
-    limit: int = typer.Option(10, "--limit", "-l", help="Number of entries to show"),
-):
-    """List recent journal entries."""
-    from datetime import datetime, timezone
-
-    from hermitcrab.agent.journal import JournalStore
-    config = _load_runtime_config()
-    workspace = config.workspace_path
-    journal = JournalStore(workspace)
-
-    entries = journal.list_entries(limit=limit)
-
-    if not entries:
-        console.print("[yellow]No journal entries found.[/yellow]")
-        raise typer.Exit(0)
-
-    console.print(f"\n[bold]Journal Entries[/bold] (showing {len(entries)} of {limit})\n")
-
-    for entry_path in entries:
-        date_str = entry_path.stem  # YYYY-MM-DD
-        metadata = journal.get_entry_metadata(
-            datetime.strptime(date_str, "%Y-%m-%d").replace(tzinfo=timezone.utc)
-        )
-
-        tags_str = ""
-        if metadata and metadata.get("tags"):
-            tags_str = f" [dim]({', '.join(metadata['tags'])})[/dim]"
-
-        console.print(f"  [cyan]{date_str}[/cyan]{tags_str}")
-        console.print(f"    [dim]{entry_path}[/dim]\n")
 
 
 if __name__ == "__main__":
