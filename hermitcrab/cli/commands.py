@@ -40,9 +40,6 @@ from hermitcrab.cli.provider_login import provider_app
 from hermitcrab.cli.reminder_commands import reminders_app
 from hermitcrab.cli.setup_commands import register_setup_commands
 from hermitcrab.cli.user_commands import user_app
-from hermitcrab.config.schema import (
-    Config,
-)
 
 GatewayIdentityRuntimeState = gateway_runtime.GatewayIdentityRuntimeState
 _identity_routing_active = gateway_runtime.identity_routing_active
@@ -102,10 +99,6 @@ def main(
     pass
 
 
-def _make_provider(config: Config):
-    return make_provider(config, console)
-
-
 # ============================================================================
 # Gateway / Server
 # ============================================================================
@@ -143,7 +136,7 @@ def gateway(
     if config.workspace_path != config.admin_workspace_path:
         raise RuntimeError("admin workspace invariant failed: workspace_path must equal admin_workspace_path")
     bus = MessageBus()
-    provider = _make_provider(config)
+    provider = make_provider(config, console)
     session_manager = create_session_manager(config.owner_identity_root_path)
     identity_routing_active = _identity_routing_active(config)
 
@@ -186,7 +179,7 @@ def gateway(
         config=config,
         bus=bus,
         channels=channels,
-        create_provider=lambda: _make_provider(config),
+        create_provider=lambda: make_provider(config, console),
         cron_service_factory=_build_cron_service,
         heartbeat_service_factory=HeartbeatService,
         on_reminder_notify=on_reminder_notify,
@@ -398,7 +391,7 @@ def agent(
     config = _load_runtime_config()
 
     bus = MessageBus()
-    provider = _make_provider(config)
+    provider = make_provider(config, console)
 
     # Create cron service for tool usage (no callback needed for CLI unless running)
     cron = _build_cron_service()
