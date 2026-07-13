@@ -5,7 +5,53 @@ from __future__ import annotations
 from types import SimpleNamespace
 
 from hermitcrab.agent.loop import AgentLoop
-from hermitcrab.agent.turn_runner import TurnRunner
+from hermitcrab.agent.turn_runner import TurnRunner, TurnRunnerConfig
+from hermitcrab.providers.base import LLMResponse, ToolCallRequest
+
+
+class _Context:
+    def add_assistant_message(self, messages, content, tool_calls=None, **kwargs):
+        message = {"role": "assistant", "content": content}
+        if tool_calls:
+            message["tool_calls"] = tool_calls
+        return [*messages, message]
+
+    def add_tool_result(self, messages, tool_call_id, name, result):
+        return [
+            *messages,
+            {"role": "tool", "tool_call_id": tool_call_id, "name": name, "content": result},
+        ]
+
+
+class _Tools:
+    def __init__(self, results):
+        self.results = results
+
+    def get_definitions(self):
+        return [{"type": "function"}]
+
+    def has(self, name):
+        return True
+
+    async def execute(self, name, arguments):
+        return self.results[name]
+
+
+def _runner(responses, tool_results=None):
+    async def chat(**kwargs):
+        return responses.pop(0)
+
+    return TurnRunner(
+        context=_Context(),
+        tools=_Tools(tool_results or {}),
+        config=TurnRunnerConfig(4, 30, 3, 0.0, 100, None),
+        chat_callable=chat,
+        stream_chat_callable=None,
+        get_model_for_job=lambda job: "test",
+        strip_think=lambda content: content,
+        tool_hint=lambda calls: "working",
+        is_empty_response=lambda content: not content or not content.strip(),
+    )
 
 
 def test_collapse_exact_tandem_duplicate_response() -> None:
@@ -85,3 +131,56 @@ def test_progress_heartbeat_message_includes_elapsed_seconds() -> None:
     )
     assert message.startswith("Still working on `read_file`.")
     assert message.endswith("elapsed)")
+
+
+async def test_run_records_tool_results_before_final_answer() -> None:
+    runner = _runner(
+        [
+            LLMResponse(
+                content=None,
+                tool_calls=[
+                    ToolCallRequest("one", "first", {"value": 1}),
+                    ToolCallRequest("two", "second", {"value": 2}),
+                ],
+                finish_reason="tool_calls",
+            ),
+            LLMResponse(content="Done."),
+        ],
+        {"first": "first result", "second": "second result"},
+    )
+
+    result = await runner.run([{"role": "user", "content": "Do the work"}])
+
+    assert result.final_content == "Done."
+    assert result.tools_used == ["first", "second"]
+    assert [message["role"] for message in result.messages] == [
+        "user",
+        "assistant",
+        "tool",
+        "tool",
+        "assistant",
+    ]
+    assert [message["content"] for message in result.messages[2:4]] == [
+        "first result",
+        "second result",
+    ]
+
+
+async def test_run_uses_tool_fallback_after_repeated_empty_post_tool_response() -> None:
+    runner = _runner(
+        [
+            LLMResponse(
+                content=None,
+                tool_calls=[ToolCallRequest("one", "read_file", {"path": "note.md"})],
+                finish_reason="tool_calls",
+            ),
+            LLMResponse(content=None),
+            LLMResponse(content=None),
+        ],
+        {"read_file": "important result"},
+    )
+
+    result = await runner.run([{"role": "user", "content": "Read the note"}])
+
+    assert result.outcome.value == "tool_fallback"
+    assert "important result" in result.final_content

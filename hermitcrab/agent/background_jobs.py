@@ -64,6 +64,9 @@ class BackgroundJobManager:
         """Schedule a background task and keep non-fatal failures isolated."""
         self._tracker.schedule(coro, task_name)
 
+    def has_background_tasks(self) -> bool:
+        return bool(self._background_tasks)
+
     async def shutdown_background_tasks(self) -> None:
         """Cancel and await all tracked background tasks."""
         await self._tracker.shutdown()

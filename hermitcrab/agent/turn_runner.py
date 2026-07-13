@@ -54,6 +54,17 @@ class TurnResult:
     planned_command: str | None = None
 
 
+@dataclass(slots=True)
+class _ToolExecutionResult:
+    messages: list[dict[str, Any]]
+    final_content: str | None
+    outcome: TurnOutcome
+    planned_command: str | None
+    spawned_result: str | None
+    missing_tool_result_text: str | None
+    executed_count: int
+
+
 class TurnRunner:
     """Run one assistant turn from prompt assembly through tool execution."""
 
@@ -736,6 +747,233 @@ class TurnRunner:
             reasoning_content=reasoning_content,
         )
 
+    async def _request_model_response(
+        self,
+        *,
+        messages: list[dict[str, Any]],
+        model: str,
+        started_at: float,
+        on_progress: Callable[..., Awaitable[None]] | None,
+        job_class: Any,
+    ) -> LLMResponse:
+        """Request one model response, falling back when streaming fails."""
+        if self.stream_chat_callable is not None:
+            try:
+                return await self._consume_streaming_response(
+                    messages=messages,
+                    model=model,
+                    started_at=started_at,
+                    on_progress=on_progress,
+                    job_class=job_class,
+                )
+            except TimeoutError:
+                raise
+            except Exception as exc:
+                logger.warning("Provider streaming failed; falling back to non-streaming chat: {}", exc)
+
+        return await self._await_with_progress(
+            self.chat_callable(
+                messages=messages,
+                tools=self.tools.get_definitions(),
+                model=model,
+                temperature=self.config.temperature,
+                max_tokens=self.config.max_tokens,
+                job_class=job_class,
+                reasoning_effort=self.config.reasoning_effort,
+            ),
+            started_at=started_at,
+            on_progress=on_progress,
+            waiting_message="",
+        )
+
+    async def _execute_tool_calls(
+        self,
+        *,
+        messages: list[dict[str, Any]],
+        tool_calls: list[Any],
+        tools_used: list[str],
+        tool_results: list[tuple[str, str]],
+        started_at: float,
+        on_progress: Callable[..., Awaitable[None]] | None,
+    ) -> _ToolExecutionResult:
+        """Execute one sequential tool batch and preserve protocol-valid history."""
+        final_content: str | None = None
+        outcome = TurnOutcome.COMPLETED
+        planned_command: str | None = None
+        spawned_result: str | None = None
+        missing_tool_result_text: str | None = None
+        executed_count = 0
+
+        for tool_call in tool_calls:
+            tools_used.append(tool_call.name)
+            args_str = json.dumps(tool_call.arguments, ensure_ascii=False)
+            logger.info("Tool call: {}({})", tool_call.name, args_str[:200])
+            try:
+                result = await self._await_with_progress(
+                    self.tools.execute(tool_call.name, tool_call.arguments),
+                    started_at=started_at,
+                    on_progress=on_progress,
+                    waiting_message=(
+                        f"Still working on `{tool_call.name}`."
+                        if tool_call.name != "spawn"
+                        else "Still coordinating the delegated task."
+                    ),
+                )
+                logger.info(
+                    "Tool completed: {} -> {} chars",
+                    tool_call.name,
+                    len(result) if isinstance(result, str) else 0,
+                )
+            except TimeoutError:
+                logger.warning(
+                    "Max loop time reached ({}s) while executing {}",
+                    self.config.max_loop_seconds,
+                    tool_call.name,
+                )
+                final_content = (
+                    f"I hit the time limit for this response ({self.config.max_loop_seconds}s) "
+                    "before completing all tool calls. Try a smaller step."
+                )
+                missing_tool_result_text = (
+                    "Tool error: execution stopped because the turn time limit was reached "
+                    "before this tool completed."
+                )
+                break
+            except Exception as exc:
+                logger.error("Tool execution failed: {}: {}", tool_call.name, exc)
+                result = f"Tool error: {type(exc).__name__}: {exc}"
+
+            messages = self.context.add_tool_result(messages, tool_call.id, tool_call.name, result)
+            tool_results.append((tool_call.name, result))
+            executed_count += 1
+            if self._needs_destructive_approval(result):
+                if (
+                    tool_call.name == "exec"
+                    and isinstance(tool_call.arguments, dict)
+                    and isinstance(tool_call.arguments.get("command"), str)
+                ):
+                    planned_command = tool_call.arguments["command"].strip() or None
+                if self.audit_event is not None:
+                    self.audit_event(
+                        "tool.approval_required",
+                        tool_name=tool_call.name,
+                        tool_arguments=(
+                            sorted(tool_call.arguments.keys())
+                            if isinstance(tool_call.arguments, dict)
+                            else []
+                        ),
+                    )
+                final_content = self._build_destructive_approval_request(
+                    tool_call.name,
+                    tool_call.arguments if isinstance(tool_call.arguments, dict) else {},
+                )
+                outcome = TurnOutcome.BLOCKED
+                break
+            if tool_call.name == "spawn" and spawned_result is None:
+                spawned_result = result
+
+        return _ToolExecutionResult(
+            messages=messages,
+            final_content=final_content,
+            outcome=outcome,
+            planned_command=planned_command,
+            spawned_result=spawned_result,
+            missing_tool_result_text=missing_tool_result_text,
+            executed_count=executed_count,
+        )
+
+    def _normalize_or_recover_tool_calls(
+        self,
+        response: LLMResponse,
+        *,
+        iteration: int,
+        job_name: str,
+    ) -> None:
+        """Normalize provider calls and recover valid inline calls when needed."""
+        response.tool_calls = normalize_tool_calls(response.tool_calls)
+        logger.info(
+            "LLM response received (job={}, finish_reason={}, content_chars={}, tool_calls={})",
+            job_name,
+            response.finish_reason,
+            len(response.content or ""),
+            len(response.tool_calls),
+        )
+        if response.usage:
+            logger.info(
+                "LLM usage (job={}, prompt_tokens={}, completion_tokens={}, total_tokens={}, cached_tokens={})",
+                job_name,
+                response.usage.get("prompt_tokens"),
+                response.usage.get("completion_tokens"),
+                response.usage.get("total_tokens"),
+                response.usage.get("cached_tokens"),
+            )
+        if response.has_tool_calls:
+            return
+
+        content, inline_tool_calls = coerce_inline_tool_calls(response.content, self.tools.has)
+        if inline_tool_calls:
+            logger.warning(
+                "Recovered {} inline tool call(s) from assistant text in iteration {}",
+                len(inline_tool_calls),
+                iteration,
+            )
+            response.content = content
+            response.tool_calls = inline_tool_calls
+
+    def _append_assistant_tool_call_turn(
+        self,
+        messages: list[dict[str, Any]],
+        response: LLMResponse,
+        *,
+        iteration: int,
+    ) -> list[dict[str, Any]]:
+        tool_call_dicts = [
+            {
+                "id": tc.id,
+                "type": "function",
+                "function": {
+                    "name": tc.name,
+                    "arguments": json.dumps(tc.arguments, ensure_ascii=False),
+                },
+            }
+            for tc in response.tool_calls
+        ]
+        messages = self.context.add_assistant_message(
+            messages,
+            response.content,
+            tool_call_dicts,
+            reasoning_content=response.reasoning_content,
+        )
+        logger.info(
+            "Assistant tool-call turn appended (iteration={}, tool_names={})",
+            iteration,
+            [tc.name for tc in response.tool_calls],
+        )
+        return messages
+
+    def _build_final_turn_result(
+        self,
+        *,
+        final_content: str | None,
+        tools_used: list[str],
+        messages: list[dict[str, Any]],
+        outcome: TurnOutcome,
+        planned_command: str | None,
+        job_name: str,
+        iteration: int,
+    ) -> TurnResult:
+        if final_content is not None:
+            final_content = self._collapse_exact_tandem_duplicate(final_content)
+        logger.info(
+            "Agent loop finished (job={}, iterations={}, tools_used={}, final_chars={})",
+            job_name,
+            iteration,
+            tools_used,
+            len(final_content or ""),
+        )
+        messages = self._append_final_assistant_message(messages, final_content)
+        return TurnResult(final_content, tools_used, messages, outcome, planned_command)
+
     async def run(
         self,
         initial_messages: list[dict[str, Any]],
@@ -794,51 +1032,13 @@ class TurnRunner:
             )
 
             try:
-                if self.stream_chat_callable is not None:
-                    try:
-                        response = await self._consume_streaming_response(
-                            messages=messages,
-                            model=model,
-                            started_at=started_at,
-                            on_progress=on_progress,
-                            job_class=job_class,
-                        )
-                    except TimeoutError:
-                        raise
-                    except Exception as exc:
-                        logger.warning(
-                            "Provider streaming failed; falling back to non-streaming chat: {}",
-                            exc,
-                        )
-                        response = await self._await_with_progress(
-                            self.chat_callable(
-                                messages=messages,
-                                tools=self.tools.get_definitions(),
-                                model=model,
-                                temperature=self.config.temperature,
-                                max_tokens=self.config.max_tokens,
-                                job_class=job_class,
-                                reasoning_effort=self.config.reasoning_effort,
-                            ),
-                            started_at=started_at,
-                            on_progress=on_progress,
-                            waiting_message="",
-                        )
-                else:
-                    response = await self._await_with_progress(
-                        self.chat_callable(
-                            messages=messages,
-                            tools=self.tools.get_definitions(),
-                            model=model,
-                            temperature=self.config.temperature,
-                            max_tokens=self.config.max_tokens,
-                            job_class=job_class,
-                            reasoning_effort=self.config.reasoning_effort,
-                        ),
-                        started_at=started_at,
-                        on_progress=on_progress,
-                        waiting_message="",
-                    )
+                response = await self._request_model_response(
+                    messages=messages,
+                    model=model,
+                    started_at=started_at,
+                    on_progress=on_progress,
+                    job_class=job_class,
+                )
             except TimeoutError:
                 logger.warning("Max loop time reached ({}s)", self.config.max_loop_seconds)
                 final_content = (
@@ -847,35 +1047,11 @@ class TurnRunner:
                 )
                 outcome = TurnOutcome.TIMEOUT
                 break
-            response.tool_calls = normalize_tool_calls(response.tool_calls)
-            logger.info(
-                "LLM response received (job={}, finish_reason={}, content_chars={}, tool_calls={})",
-                job_name,
-                response.finish_reason,
-                len(response.content or ""),
-                len(response.tool_calls),
+            self._normalize_or_recover_tool_calls(
+                response,
+                iteration=iteration,
+                job_name=job_name,
             )
-            if response.usage:
-                logger.info(
-                    "LLM usage (job={}, prompt_tokens={}, completion_tokens={}, total_tokens={}, cached_tokens={})",
-                    job_name,
-                    response.usage.get("prompt_tokens"),
-                    response.usage.get("completion_tokens"),
-                    response.usage.get("total_tokens"),
-                    response.usage.get("cached_tokens"),
-                )
-            if not response.has_tool_calls:
-                content, inline_tool_calls = coerce_inline_tool_calls(
-                    response.content, self.tools.has
-                )
-                if inline_tool_calls:
-                    logger.warning(
-                        "Recovered {} inline tool call(s) from assistant text in iteration {}",
-                        len(inline_tool_calls),
-                        iteration,
-                    )
-                    response.content = content
-                    response.tool_calls = inline_tool_calls
 
             if response.has_tool_calls:
                 clarification = self._build_ambiguous_list_mutation_clarification(
@@ -912,114 +1088,38 @@ class TurnRunner:
                 if on_progress:
                     await on_progress(self.tool_hint(response.tool_calls), tool_hint=True)
 
-                tool_call_dicts = [
-                    {
-                        "id": tc.id,
-                        "type": "function",
-                        "function": {
-                            "name": tc.name,
-                            "arguments": json.dumps(tc.arguments, ensure_ascii=False),
-                        },
-                    }
-                    for tc in response.tool_calls
-                ]
-                messages = self.context.add_assistant_message(
+                messages = self._append_assistant_tool_call_turn(
                     messages,
-                    response.content,
-                    tool_call_dicts,
-                    reasoning_content=response.reasoning_content,
-                )
-                logger.info(
-                    "Assistant tool-call turn appended (iteration={}, tool_names={})",
-                    iteration,
-                    [tc.name for tc in response.tool_calls],
+                    response,
+                    iteration=iteration,
                 )
 
-                spawned_result: str | None = None
-                missing_tool_result_text: str | None = None
-                executed_count = 0
-                for tool_call in response.tool_calls:
-                    tools_used.append(tool_call.name)
-                    args_str = json.dumps(tool_call.arguments, ensure_ascii=False)
-                    logger.info("Tool call: {}({})", tool_call.name, args_str[:200])
-                    try:
-                        result = await self._await_with_progress(
-                            self.tools.execute(tool_call.name, tool_call.arguments),
-                            started_at=started_at,
-                            on_progress=on_progress,
-                            waiting_message=(
-                                f"Still working on `{tool_call.name}`."
-                                if tool_call.name != "spawn"
-                                else "Still coordinating the delegated task."
-                            ),
-                        )
-                        logger.info(
-                            "Tool completed: {} -> {} chars",
-                            tool_call.name,
-                            len(result) if isinstance(result, str) else 0,
-                        )
-                    except TimeoutError:
-                        logger.warning(
-                            "Max loop time reached ({}s) while executing {}",
-                            self.config.max_loop_seconds,
-                            tool_call.name,
-                        )
-                        final_content = (
-                            f"I hit the time limit for this response ({self.config.max_loop_seconds}s) "
-                            "before completing all tool calls. Try a smaller step."
-                        )
-                        missing_tool_result_text = (
-                            "Tool error: execution stopped because the turn time limit was reached "
-                            "before this tool completed."
-                        )
-                        break
-                    except Exception as exc:
-                        logger.error("Tool execution failed: {}: {}", tool_call.name, exc)
-                        result = f"Tool error: {type(exc).__name__}: {exc}"
-                    messages = self.context.add_tool_result(
-                        messages, tool_call.id, tool_call.name, result
-                    )
-                    tool_results.append((tool_call.name, result))
-                    executed_count += 1
-                    if self._needs_destructive_approval(result):
-                        if (
-                            tool_call.name == "exec"
-                            and isinstance(tool_call.arguments, dict)
-                            and isinstance(tool_call.arguments.get("command"), str)
-                        ):
-                            planned_command = tool_call.arguments["command"].strip() or None
-                        if self.audit_event is not None:
-                            self.audit_event(
-                                "tool.approval_required",
-                                tool_name=tool_call.name,
-                                tool_arguments=(
-                                    sorted(tool_call.arguments.keys())
-                                    if isinstance(tool_call.arguments, dict)
-                                    else []
-                                ),
-                            )
-                        final_content = self._build_destructive_approval_request(
-                            tool_call.name,
-                            tool_call.arguments if isinstance(tool_call.arguments, dict) else {},
-                        )
-                        outcome = TurnOutcome.BLOCKED
-                        break
-                    if tool_call.name == "spawn" and spawned_result is None:
-                        spawned_result = result
+                execution = await self._execute_tool_calls(
+                    messages=messages,
+                    tool_calls=response.tool_calls,
+                    tools_used=tools_used,
+                    tool_results=tool_results,
+                    started_at=started_at,
+                    on_progress=on_progress,
+                )
+                messages = execution.messages
+                planned_command = execution.planned_command
 
-                if spawned_result is not None:
-                    final_content = spawned_result
+                if execution.spawned_result is not None:
+                    final_content = execution.spawned_result
                     outcome = TurnOutcome.DELEGATED
                     logger.info("Returning immediately after spawn to keep main agent responsive")
                     break
-                if final_content is not None:
-                    if executed_count < len(response.tool_calls):
-                        pending_tool_calls = response.tool_calls[executed_count:]
+                if execution.final_content is not None:
+                    final_content = execution.final_content
+                    outcome = execution.outcome
+                    if execution.executed_count < len(response.tool_calls):
+                        pending_tool_calls = response.tool_calls[execution.executed_count :]
                         messages = self._append_missing_tool_results(
                             messages,
                             pending_tool_calls,
                             tool_results=tool_results,
-                            result_text=missing_tool_result_text
+                            result_text=execution.missing_tool_result_text
                             or "Tool error: execution stopped before this tool could run.",
                         )
                     if outcome == TurnOutcome.COMPLETED:
@@ -1209,15 +1309,12 @@ class TurnRunner:
             )
             outcome = TurnOutcome.MAX_ITERATIONS
 
-        if final_content is not None:
-            final_content = self._collapse_exact_tandem_duplicate(final_content)
-
-        logger.info(
-            "Agent loop finished (job={}, iterations={}, tools_used={}, final_chars={})",
-            job_name,
-            iteration,
-            tools_used,
-            len(final_content or ""),
+        return self._build_final_turn_result(
+            final_content=final_content,
+            tools_used=tools_used,
+            messages=messages,
+            outcome=outcome,
+            planned_command=planned_command,
+            job_name=job_name,
+            iteration=iteration,
         )
-        messages = self._append_final_assistant_message(messages, final_content)
-        return TurnResult(final_content, tools_used, messages, outcome, planned_command)

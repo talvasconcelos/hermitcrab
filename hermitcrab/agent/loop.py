@@ -38,14 +38,13 @@ from typing import TYPE_CHECKING, Any, Awaitable, Callable
 from loguru import logger
 
 from hermitcrab.agent.audit import AuditTrail
-from hermitcrab.agent.background_jobs import BackgroundJobManager, SessionDigest
+from hermitcrab.agent.background_jobs import BackgroundJobManager
 from hermitcrab.agent.background_messages import (
     fallback_system_task_summary,
     is_grounded_system_reply,
     summarize_subagent_completion,
 )
 from hermitcrab.agent.context import ContextBuilder
-from hermitcrab.agent.distillation import AtomicCandidate
 from hermitcrab.agent.execution_state import ExecutionPhase, ExecutionStateTracker
 from hermitcrab.agent.journal import JournalStore
 from hermitcrab.agent.knowledge import KnowledgeStore
@@ -336,7 +335,6 @@ class AgentLoop:
             strip_think=self._strip_think,
             reasoning_effort=self._reasoning_effort,
         )
-        self._background_tasks = self._background_jobs._background_tasks
         self._session_lifecycle = SessionLifecycleManager(
             workspace=self.identity_root,
             sessions=self.sessions,
@@ -953,40 +951,6 @@ class AgentLoop:
         ):
             yield event
 
-    def _schedule_background(
-        self,
-        coro: Awaitable,
-        task_name: str,
-    ) -> None:
-        """
-        Schedule a background task (fire-and-forget).
-
-        Background tasks:
-        - Never block the main loop
-        - Failures are logged, never fatal
-        - Tracked for cleanup on shutdown
-
-        Args:
-            coro: Async coroutine to run.
-            task_name: Human-readable name for logging.
-        """
-
-        self._background_jobs.schedule_background(coro, task_name)
-
-    def _check_session_timeout(self, session_key: str) -> bool:
-        """
-        Check if a session has timed out due to inactivity.
-
-        Timeout threshold: self.inactivity_timeout_s
-
-        Args:
-            session_key: Session identifier.
-
-        Returns:
-            True if session timed out, False otherwise.
-        """
-        return self._session_lifecycle.check_session_timeout(session_key)
-
     def _update_session_timer(self, session_key: str) -> None:
         """
         Update the last activity timestamp for a session.
@@ -1001,7 +965,7 @@ class AgentLoop:
     async def process_expired_sessions(self) -> int:
         """Finalize sessions that exceeded the inactivity timeout."""
         return await self._session_lifecycle.process_expired_sessions(
-            schedule_background=self._schedule_background,
+            schedule_background=self._background_jobs.schedule_background,
             run_session_end=self._run_session_end,
         )
 
@@ -1020,17 +984,9 @@ class AgentLoop:
         """Get/create lock for a session key."""
         return self._session_lifecycle.get_session_lock(session_key)
 
-    def _scratchpad_path(self, session_key: str) -> Path:
-        """Get filesystem path for a session's scratchpad."""
-        return self._session_lifecycle.scratchpad_path(session_key)
-
     def _ensure_scratchpad(self, session_key: str) -> Path:
         """Ensure scratchpad file exists for the current session."""
         return self._session_lifecycle.ensure_scratchpad(session_key)
-
-    def _finalize_scratchpad(self, session_key: str, reason: str) -> None:
-        """Archive or clear session scratchpad when a session ends."""
-        self._session_lifecycle.finalize_scratchpad(session_key, reason)
 
     async def _on_session_end(
         self,
@@ -1058,138 +1014,22 @@ class AgentLoop:
             session,
             reason=reason,
             messages_snapshot=messages_snapshot,
-            schedule_background=self._schedule_background,
-            synthesize_journal_from_messages=self._synthesize_journal_from_messages,
+            schedule_background=self._background_jobs.schedule_background,
+            synthesize_journal_from_messages=(
+                lambda messages, session_key: self._background_jobs.synthesize_journal_from_messages(
+                    messages, session_key, JobClass.JOURNAL_SYNTHESIS
+                )
+            ),
             distillation_enabled=self.distillation_enabled,
             distillation_model_available=bool(self._get_model_for_job(JobClass.DISTILLATION)),
-            distill_session_from_messages=self._distill_session_from_messages,
+            distill_session_from_messages=(
+                lambda messages, session_key: self._background_jobs.distill_session_from_messages(
+                    messages, session_key, JobClass.DISTILLATION
+                )
+            ),
             reflection_model_available=bool(self._get_model_for_job(JobClass.REFLECTION)),
-            reflect_on_session_from_messages=self._reflect_on_session_from_messages,
+            reflect_on_session_from_messages=self._background_jobs.reflect_on_session_from_messages,
         )
-
-    async def _synthesize_journal(self, session: Session) -> None:
-        """
-        Synthesize journal entry from session.
-
-        Journal is:
-        - Narrative summary of what happened
-        - Lossy by design
-        - Non-authoritative (never affects memory directly)
-        - Human readable
-
-        Uses weak local LLM if available, escalates only if unavailable.
-        Falls back to deterministic summary if no LLM.
-
-        Args:
-            session: Session to synthesize.
-        """
-        await self._background_jobs.synthesize_journal(session, JobClass.JOURNAL_SYNTHESIS)
-
-    async def _synthesize_journal_from_messages(
-        self,
-        messages: list[dict],
-        session_key: str,
-    ) -> None:
-        """
-        Synthesize journal from message list (for use with session snapshots).
-
-        Wrapper around _synthesize_journal that works with a message list instead of Session.
-
-        Args:
-            messages: List of session messages.
-            session_key: Session identifier.
-        """
-        await self._background_jobs.synthesize_journal_from_messages(
-            messages,
-            session_key,
-            JobClass.JOURNAL_SYNTHESIS,
-        )
-
-    async def _distill_session(self, session: Session) -> None:
-        """
-        Extract atomic candidates from session (fact, task, goal, decision).
-
-        Distillation:
-        - Produces proposals only (not authoritative)
-        - Uses strict JSON schema
-        - Validation and commit happen elsewhere (Tier 0)
-        - Local only, skip if unavailable
-
-        Args:
-            session: Session to distill.
-        """
-        await self._background_jobs.distill_session(session, JobClass.DISTILLATION)
-
-    def _filter_messages_for_distillation(
-        self,
-        messages: list[dict[str, Any]],
-        session_key: str,
-    ) -> list[dict[str, Any]]:
-        """Drop scratchpad-specific tool traces so they aren't distilled."""
-        return self._background_jobs.filter_messages_for_distillation(messages, session_key)
-
-    async def _distill_session_from_messages(
-        self,
-        messages: list[dict],
-        session_key: str,
-    ) -> None:
-        """
-        Distill session from message list (for use with session snapshots).
-
-        Wrapper around _distill_session that works with a message list instead of Session.
-
-        Args:
-            messages: List of session messages.
-            session_key: Session identifier.
-        """
-
-        await self._background_jobs.distill_session_from_messages(
-            messages,
-            session_key,
-            JobClass.DISTILLATION,
-        )
-
-    def _commit_candidate_to_memory(self, candidate: AtomicCandidate) -> None:
-        """
-        Commit a validated candidate to memory (Tier 0 operation).
-
-        This is the authoritative write path. Distillation proposes,
-        but this method decides what actually gets stored.
-
-        Args:
-            candidate: Validated atomic candidate to commit.
-
-        Note:
-            - Failures are logged but don't raise (called from background task)
-            - Each candidate type maps to specific memory.write_*() method
-            - This is Tier 0 logic - deterministic, Python-authoritative
-        """
-        self._background_jobs.commit_candidate_to_memory(candidate)
-
-    async def _reflect_on_session(self, session: Session) -> None:
-        """
-        Reflect on session using the new ReflectionService.
-
-        Single LLM call → 0-1 reflection → auto-promote if pattern.
-
-        Args:
-            session: Session to reflect on.
-        """
-        await self._background_jobs.reflect_on_session(session)
-
-    async def _reflect_on_session_from_messages(
-        self,
-        messages: list[dict],
-        session_key: str,
-    ) -> None:
-        """
-        Reflect on session from message list (for use with session snapshots).
-
-        Args:
-            messages: List of session messages.
-            session_key: Session identifier.
-        """
-        await self._background_jobs.reflect_on_session_from_messages(messages, session_key)
 
     async def _run_agent_loop(
         self,
@@ -1238,7 +1078,7 @@ class AgentLoop:
                 except asyncio.TimeoutError:
                     continue
         finally:
-            await self._shutdown_background_tasks()
+            await self._background_jobs.shutdown_background_tasks()
             await self.close_mcp()
             logger.info("Agent loop stopped")
 
@@ -1286,17 +1126,13 @@ class AgentLoop:
         cancelled_subagents = await self.subagents.cancel_for_origin(channel, chat_id)
         cancelled = cancelled or cancelled_subagents > 0
 
-        if cancel_background and self._background_tasks:
-            await self._shutdown_background_tasks()
+        if cancel_background and self._background_jobs.has_background_tasks():
+            await self._background_jobs.shutdown_background_tasks()
             cancelled = True
 
         if cancelled:
             self.execution_state.clear(session_key)
         return cancelled
-
-    async def _shutdown_background_tasks(self) -> None:
-        """Cancel and await all tracked background tasks."""
-        await self._background_jobs.shutdown_background_tasks()
 
     async def wait_for_background_tasks(self, timeout_s: float = 5.0) -> tuple[int, int]:
         """
@@ -1399,7 +1235,12 @@ class AgentLoop:
                     {"role": "user", "content": msg.content},
                     {"role": "assistant", "content": safe_content},
                 ]
-                self._save_turn(session, all_msgs, 1 + len(history))
+                self._background_jobs.save_turn(
+                    session,
+                    all_msgs,
+                    1 + len(history),
+                    self._update_session_timer,
+                )
                 if "failed" not in safe_content.lower() and "error" not in safe_content.lower():
                     session.metadata.pop("pending_work", None)
                 self.sessions.save(session)
@@ -1422,7 +1263,12 @@ class AgentLoop:
                 messages,
                 job_class=JobClass.INTERACTIVE_RESPONSE,
             )
-            self._save_turn(session, turn_result.messages, 1 + len(history))
+            self._background_jobs.save_turn(
+                session,
+                turn_result.messages,
+                1 + len(history),
+                self._update_session_timer,
+            )
             self.sessions.save(session)
             safe_content = (
                 fallback_system_task_summary(msg.content)
@@ -1617,7 +1463,12 @@ class AgentLoop:
             preview = final_content[:120] + "..." if len(final_content) > 120 else final_content
             logger.info("Response to {}:{}: {}", msg.channel, msg.sender_id, preview)
 
-            self._save_turn(session, turn_result.messages, build_result.save_skip)
+            self._background_jobs.save_turn(
+                session,
+                turn_result.messages,
+                build_result.save_skip,
+                self._update_session_timer,
+            )
             await self._maybe_sync_onboarding_profiles(session)
             self.skill_runtime.update_after_turn(
                 session.metadata,
@@ -2168,38 +2019,6 @@ class AgentLoop:
     def _session_scope(self, session_key: str) -> _SessionScope:
         """Return a scoped active-turn guard for one session."""
         return self._SessionScope(self, session_key)
-
-    def _save_turn(self, session: Session, messages: list[dict], skip: int) -> None:
-        """
-        Save new-turn messages into session, truncating large tool results.
-
-        Also updates the session timer for inactivity timeout tracking.
-
-        Args:
-            session: Session to save.
-            messages: New messages to append.
-            skip: Number of messages to skip from the start.
-        """
-        self._background_jobs.save_turn(session, messages, skip, self._update_session_timer)
-
-    @staticmethod
-    def _build_journal_event_trace(digest: SessionDigest) -> list[str]:
-        """Build a journal-safe event trace with raw tool mechanics filtered out."""
-        return BackgroundJobManager.build_journal_event_trace(digest)
-
-    def _build_session_digest(
-        self, messages: list[dict[str, Any]], session_key: str
-    ) -> SessionDigest:
-        """Build a deterministic digest of a session for weak-model jobs."""
-        return self._background_jobs.build_session_digest(messages, session_key)
-
-    def _format_journal_entry(self, digest: SessionDigest, body: str) -> str:
-        """Wrap a journal body with deterministic per-entry metadata."""
-        return self._background_jobs.format_journal_entry(digest, body)
-
-    def _build_fallback_journal_body(self, digest: SessionDigest) -> str:
-        """Build a deterministic journal narrative when LLM synthesis fails."""
-        return self._background_jobs.build_fallback_journal_body(digest)
 
     async def process_direct(
         self,
