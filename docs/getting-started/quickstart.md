@@ -89,6 +89,15 @@ hermitcrab onboarding complete alice
 
 Use `pause` or `complete` when you no longer want onboarding guidance injected into that identity's prompt.
 
+### Export a session
+
+Export a stored owner-identity conversation as readable Markdown or portable JSONL:
+
+```bash
+hermitcrab session export cli:direct ./session.md
+hermitcrab session export cli:direct ./session.jsonl
+```
+
 ## 5. Try key interactions
 
 ### Ask it to use the terminal

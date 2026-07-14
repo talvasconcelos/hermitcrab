@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import sqlite3
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
@@ -93,6 +94,21 @@ def _bootstrap_ready(config: Config, workspace: Path) -> bool:
         and (config.system_root_path / "TOOLS.md").exists()
         and (workspace / "IDENTITY.md").exists()
     )
+
+
+def _session_database_error(workspace: Path) -> str | None:
+    """Return a readable integrity error for an existing session database."""
+    database = workspace / "sessions" / "sessions.sqlite3"
+    if not database.exists():
+        return None
+    try:
+        with sqlite3.connect(f"file:{database}?mode=ro", uri=True) as connection:
+            result = connection.execute("PRAGMA quick_check").fetchone()
+    except sqlite3.DatabaseError as exc:
+        return f"`{database}` is not a readable SQLite database: {exc}"
+    if result and result[0] != "ok":
+        return f"`{database}` failed SQLite integrity check: {result[0]}"
+    return None
 
 
 def build_status_report(config_path: Path | None = None) -> StatusReport:
@@ -203,6 +219,23 @@ def build_doctor_report(config_path: Path | None = None) -> DoctorReport:
                 title="Bootstrap files look incomplete",
                 detail="The configured identity exists, but required bootstrap files are missing.",
                 remediation="Run `hermitcrab onboard` to restore the default workspace templates.",
+            )
+        )
+
+    config, _ = _load_config_with_error(Path(status.config_path))
+    session_database_error = _session_database_error(config.owner_identity_root_path)
+    if session_database_error:
+        findings.append(
+            DiagnosticFinding(
+                check_id="sessions.database_corrupt",
+                severity="error",
+                title="Session database cannot be read",
+                detail=session_database_error,
+                remediation=(
+                    "Stop HermitCrab, make a backup copy of `sessions/sessions.sqlite3`, then move the "
+                    "corrupt database aside and restart to create a fresh database. Restore or import any "
+                    "needed session export from that backup before deleting it."
+                ),
             )
         )
 

@@ -39,21 +39,30 @@ class OnboardingProfileService:
 Return JSON only with this exact shape:
 {
   "skip": false,
-  "confidence": 0.0,
-  "user_md": ["- ..."],
-  "soul_md": ["- ..."],
-  "identity_md": ["- ..."]
+  "insights": [
+    {
+      "target": "USER.md",
+      "bullet": "- ...",
+      "evidence": "exact supporting text from the conversation",
+      "confidence": 0.0,
+      "reason": "why this is durable"
+    }
+  ],
+  "observed_domains": [],
+  "pending_assumptions": []
 }
 
 Rules:
 - Keep only durable high-signal insights.
-- Prefer concrete facts/preferences/constraints in user_md.
-- Put values, motivations, and behavior patterns in soul_md.
-- Put how the assistant should behave for this user in identity_md.
+- `target` must be one of USER.md, SOUL.md, or IDENTITY.md.
+- Prefer concrete facts/preferences/constraints in USER.md.
+- Put values, motivations, and behavior patterns in SOUL.md.
+- Put how the assistant should behave for this user in IDENTITY.md.
+- Every insight must include exact evidence from the supplied conversation.
 - Do not include temporary details or one-off requests.
 - Use short bullet-ready lines. No markdown headers.
-- If confidence is low or nothing durable, return:
-  {"skip": true, "confidence": 0.0, "user_md": [], "soul_md": [], "identity_md": []}
+- If nothing durable is grounded in the conversation, return:
+  {"skip": true, "insights": [], "observed_domains": [], "pending_assumptions": []}
 """
 
     def __init__(
@@ -168,56 +177,47 @@ Rules:
 
         payload = self._parse_payload(response.content if response else None)
         if not payload:
+            self._audit_onboarding("skipped", reason="parse_failed")
             return False
         if payload.get("skip"):
+            self._audit_onboarding("skipped", reason="no_durable_insight")
             return False
 
-        confidence = self._parse_confidence(payload.get("confidence"))
-        if confidence < self.MIN_CONFIDENCE:
+        insight_items = self._normalize_insights(payload)
+        if not insight_items:
+            self._audit_onboarding("validation_failed", reason="invalid_schema")
             return False
 
         changed = False
-        insight_items = self._normalize_insights(payload)
-        if insight_items:
-            conversation_text = self._normalize_line(context)
-            for insight in insight_items:
-                target = insight.get("target", "")
-                bullet = insight.get("bullet", "")
-                evidence = insight.get("evidence", "")
-                insight_confidence = self._parse_confidence(insight.get("confidence"))
-                if target not in self.TARGET_FILES.values():
-                    self._audit_onboarding("validation_failed", reason="invalid_target", insight=insight)
-                    continue
-                if insight_confidence < self.MIN_CONFIDENCE:
-                    self._audit_onboarding("validation_failed", reason="low_confidence", insight=insight)
-                    continue
-                if not evidence:
-                    self._audit_onboarding("validation_failed", reason="missing_evidence", insight=insight)
-                    continue
-                if self._normalize_line(evidence) not in conversation_text:
-                    self._audit_onboarding(
-                        "validation_failed",
-                        reason="evidence_not_in_conversation",
-                        insight=insight,
-                    )
-                    continue
-                path = self.workspace / target
-                if self._merge_section_bullets(path, [bullet]):
-                    self._audit_onboarding("written", reason=insight.get("reason") or "written", insight=insight)
-                    changed = True
-                else:
-                    self._audit_onboarding("duplicate", reason="duplicate", insight=insight)
-            self._update_state_from_payload(payload)
-            return changed
-
-        for key, filename in self.TARGET_FILES.items():
-            bullets = self._normalize_bullets(payload.get(key))
-            if not bullets:
+        conversation_text = self._normalize_line(context)
+        for insight in insight_items:
+            target = insight.get("target", "")
+            bullet = insight.get("bullet", "")
+            evidence = insight.get("evidence", "")
+            insight_confidence = self._parse_confidence(insight.get("confidence"))
+            if target not in self.TARGET_FILES.values():
+                self._audit_onboarding("validation_failed", reason="invalid_target", insight=insight)
                 continue
-            path = self.workspace / filename
-            if self._merge_section_bullets(path, bullets):
+            if insight_confidence < self.MIN_CONFIDENCE:
+                self._audit_onboarding("validation_failed", reason="low_confidence", insight=insight)
+                continue
+            if not evidence:
+                self._audit_onboarding("validation_failed", reason="missing_evidence", insight=insight)
+                continue
+            if self._normalize_line(evidence) not in conversation_text:
+                self._audit_onboarding(
+                    "validation_failed",
+                    reason="evidence_not_in_conversation",
+                    insight=insight,
+                )
+                continue
+            path = self.workspace / target
+            if self._merge_section_bullets(path, [bullet]):
+                self._audit_onboarding("written", reason=insight.get("reason") or "written", insight=insight)
                 changed = True
-
+            else:
+                self._audit_onboarding("duplicate", reason="duplicate", insight=insight)
+        self._update_state_from_payload(payload)
         return changed
 
     def _build_conversation_context(self, messages: list[dict[str, Any]]) -> str:
