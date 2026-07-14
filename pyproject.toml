@@ -77,6 +77,10 @@ include = [
     "hermitcrab/**/*.sh",
 ]
 
+[tool.hatch.build.force-include]
+"hermitcrab/templates/AGENTS.md" = "hermitcrab/templates/AGENTS.md"
+"hermitcrab/templates/TOOLS.md" = "hermitcrab/templates/TOOLS.md"
+
 [tool.hatch.build.targets.sdist]
 include = [
     "hermitcrab/",
