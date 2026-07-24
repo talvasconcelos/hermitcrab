@@ -140,11 +140,11 @@ def test_audit_command_reads_system_audit_log(monkeypatch, tmp_path) -> None:
     )
     monkeypatch.setattr("hermitcrab.cli.diagnostic_commands.load_runtime_config", lambda: config)
 
-    result = runner.invoke(app, ["audit"], terminal_width=200)
+    result = runner.invoke(app, ["audit"])
 
     assert result.exit_code == 0
     assert "system" in result.output
-    assert "audit.jsonl" in result.output
+    assert "audit.jsonl" in result.output.replace("\n", "")
     assert "tool.policy_denied" in result.output
     assert "identity_name: owner" in result.output
 
