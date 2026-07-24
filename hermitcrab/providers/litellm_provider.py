@@ -600,6 +600,7 @@ class LiteLLMProvider(LLMProvider):
             "api_key",
             "api_base",
             "extra_headers",
+            "provider",
         }
         for key, value in provider_options.items():
             if key not in reserved_option_keys:

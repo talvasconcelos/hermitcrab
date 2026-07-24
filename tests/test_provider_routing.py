@@ -1,6 +1,7 @@
 from hermitcrab.agent.loop import AgentLoop
 from hermitcrab.config.schema import Config
 from hermitcrab.providers.base import LLMProvider, LLMResponse
+from hermitcrab.providers.litellm_provider import LiteLLMProvider
 from hermitcrab.providers.ollama_provider import OllamaProvider
 from hermitcrab.providers.openai_codex_auth import codex_cloudflare_headers
 from hermitcrab.providers.registry import normalize_provider_name
@@ -163,3 +164,28 @@ def test_codex_headers_use_codex_originator() -> None:
 
     assert headers["originator"] == "codex_cli_rs"
     assert headers["User-Agent"].startswith("codex_cli_rs/")
+
+
+def test_named_provider_selector_is_not_sent_to_openrouter() -> None:
+    provider = LiteLLMProvider(
+        default_model="openrouter/nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free",
+        provider_name="openrouter",
+        request_config_resolver=lambda model: {
+            "model": "openrouter/nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free",
+            "provider_name": "openrouter",
+            "api_base": "https://openrouter.ai/api/v1",
+            "provider_options": {"provider": "openrouter"},
+        },
+    )
+
+    kwargs, _ = provider._build_completion_kwargs(
+        messages=[{"role": "user", "content": "hello"}],
+        tools=None,
+        model="main",
+        max_tokens=32,
+        temperature=0.0,
+        reasoning_effort=None,
+    )
+
+    assert kwargs["model"] == "openrouter/nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free"
+    assert "provider" not in kwargs
