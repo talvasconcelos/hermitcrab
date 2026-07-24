@@ -148,6 +148,10 @@ Templates are copied during onboarding. If missing, re-run onboard or create the
 - `TOOLS.md` — tool discipline
 - `HEARTBEAT.md` — heartbeat tasks
 
+### Corrupt session database
+
+Run `hermitcrab doctor`. If it reports that `sessions/sessions.sqlite3` cannot be read, stop HermitCrab and make a backup copy of that file before moving it aside. Restarting creates a fresh session database; keep the backup until any needed records have been recovered or exported.
+
 ## Docker issues
 
 ### Container won't start

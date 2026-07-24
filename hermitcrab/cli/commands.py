@@ -37,6 +37,7 @@ from hermitcrab.cli.people_commands import people_app
 from hermitcrab.cli.provider_factory import make_provider
 from hermitcrab.cli.provider_login import provider_app
 from hermitcrab.cli.reminder_commands import reminders_app
+from hermitcrab.cli.session_commands import session_app
 from hermitcrab.cli.setup_commands import register_setup_commands
 from hermitcrab.cli.user_commands import user_app
 
@@ -299,6 +300,8 @@ app.add_typer(people_app, name="people")
 app.add_typer(user_app, name="user")
 
 app.add_typer(onboarding_app, name="onboarding")
+
+app.add_typer(session_app, name="session")
 
 app.add_typer(model_app, name="model")
 
