@@ -13,7 +13,7 @@ from hermitcrab.bus.events import InboundMessage
 from hermitcrab.bus.queue import MessageBus
 from hermitcrab.cli.bootstrap import bootstrap_standard_layout
 from hermitcrab.cli.commands import app
-from hermitcrab.cli.diagnostics import build_status_report
+from hermitcrab.cli.diagnostics import build_doctor_report, build_status_report
 from hermitcrab.config.loader import save_config
 from hermitcrab.config.schema import Config
 
@@ -144,6 +144,24 @@ def test_audit_command_reads_system_audit_log(monkeypatch, tmp_path) -> None:
 
     assert result.exit_code == 0
     assert "system" in result.output
-    assert "audit.jsonl" in result.output
+    assert "audit.jsonl" in result.output.replace("\n", "")
     assert "tool.policy_denied" in result.output
     assert "identity_name: owner" in result.output
+
+
+def test_doctor_reports_corrupt_session_database_with_recovery_path(tmp_path) -> None:
+    config_path = tmp_path / "config.json"
+    config = Config.model_validate(
+        {"root": str(tmp_path), "providers": {"anthropic": {"apiKey": "test-key"}}}
+    )
+    save_config(config, config_path)
+    bootstrap_standard_layout(config)
+    db_path = config.owner_identity_root_path / "sessions" / "sessions.sqlite3"
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+    db_path.write_text("not a sqlite database", encoding="utf-8")
+
+    report = build_doctor_report(config_path)
+
+    finding = next(item for item in report.findings if item.check_id == "sessions.database_corrupt")
+    assert finding.severity == "error"
+    assert "backup" in finding.remediation.lower()

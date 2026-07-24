@@ -1,6 +1,6 @@
 [project]
 name = "hermitcrab-ai"
-version = "0.1.0b4"
+version = "0.1.0b5"
 description = "A lightweight, memory-first, Nostr-primary personal AI assistant"
 requires-python = ">=3.11"
 readme = "README.md"
@@ -77,6 +77,10 @@ include = [
     "hermitcrab/**/*.sh",
 ]
 
+[tool.hatch.build.force-include]
+"hermitcrab/templates/AGENTS.md" = "hermitcrab/templates/AGENTS.md"
+"hermitcrab/templates/TOOLS.md" = "hermitcrab/templates/TOOLS.md"
+
 [tool.hatch.build.targets.sdist]
 include = [
     "hermitcrab/",
@@ -95,8 +99,3 @@ ignore = ["E501"]
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
-
-[dependency-groups]
-dev = [
-    "desloppify[full]>=0.9.14",
-]

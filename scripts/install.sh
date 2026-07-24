@@ -151,9 +151,25 @@ ensure_venv_support() {
 
 create_venv() {
     mkdir -p "$INSTALL_ROOT" "$BIN_DIR"
+
+    if [[ -d "$INSTALL_ROOT/venv" && ! -x "$INSTALL_ROOT/venv/bin/pip" ]]; then
+        log_warn "Found incomplete virtual environment at $INSTALL_ROOT/venv; recreating it"
+        rm -rf "$INSTALL_ROOT/venv"
+    fi
+
     if [[ ! -x "$INSTALL_ROOT/venv/bin/python" ]]; then
         log_info "Creating virtual environment in $INSTALL_ROOT/venv"
-        "$PYTHON_CMD" -m venv "$INSTALL_ROOT/venv"
+        if ! "$PYTHON_CMD" -m venv "$INSTALL_ROOT/venv"; then
+            if command -v uv >/dev/null 2>&1; then
+                log_warn "python -m venv failed; retrying with uv venv"
+                uv venv --python "$PYTHON_CMD" "$INSTALL_ROOT/venv"
+            else
+                log_error "Could not create the HermitCrab virtual environment."
+                log_info "On Debian/Ubuntu, install venv support with: sudo apt install python3-venv"
+                log_info "For Python 3.12 specifically, use: sudo apt install python3.12-venv"
+                exit 1
+            fi
+        fi
     else
         log_info "Reusing existing virtual environment in $INSTALL_ROOT/venv"
     fi
@@ -161,6 +177,12 @@ create_venv() {
 
 install_package() {
     local pip_cmd="$INSTALL_ROOT/venv/bin/pip"
+    if [[ ! -x "$pip_cmd" ]]; then
+        log_error "Virtual environment exists but pip is missing: $pip_cmd"
+        log_info "Remove $INSTALL_ROOT/venv and rerun the installer after installing python3-venv, or install uv and rerun."
+        exit 1
+    fi
+
     log_info "Upgrading pip in the HermitCrab environment"
     "$pip_cmd" install --upgrade pip
     log_info "Installing $PACKAGE_SPEC"

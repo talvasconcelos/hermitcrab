@@ -188,6 +188,17 @@ class SessionManager:
             reverse=True,
         )
 
+    @staticmethod
+    def _archive_reason_from_path(path: Path, key: str) -> str:
+        safe_key = safe_filename(key.replace(":", "_"))
+        stem = path.stem
+        prefix = f"{safe_key}-"
+        if stem.startswith(prefix):
+            match = re.match(r"(.+)-\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}$", stem[len(prefix) :])
+            if match:
+                return match.group(1)
+        return "archived"
+
     def _all_session_paths(self) -> list[Path]:
         """Return active and archived session files, newest first."""
         paths = list(self.sessions_dir.glob("*.jsonl")) + list(self.archive_dir.glob("*.jsonl"))
@@ -396,6 +407,70 @@ class SessionManager:
         session.clear()
         session.metadata.clear()
         return archive_path
+
+    def export_session(self, key: str, *, format: str = "markdown") -> str:
+        """Export a stored session as readable Markdown or portable JSONL."""
+        normalized_format = format.strip().lower()
+        if normalized_format not in {"markdown", "jsonl"}:
+            raise ValueError(f"unsupported export format: {format}")
+
+        session = self._load(key)
+        archived_path: Path | None = None
+        record: SessionRecord | None = self.sqlite_store.get_session(key) if self.sqlite_store else None
+        if session is None and self.sqlite_store is not None:
+            record = next(
+                (
+                    candidate
+                    for candidate in self.sqlite_store.list_sessions(archived=True)
+                    if candidate.metadata.get("original_session_key") == key
+                ),
+                None,
+            )
+            if record is not None:
+                session = self._load_from_sqlite(record.key)
+        if session is None and self.sqlite_store is None:
+            archived_paths = self._archived_session_paths(key)
+            if archived_paths:
+                archived_path = archived_paths[0]
+                session = self._load_from_path(archived_path, key=key)
+        if session is None:
+            raise KeyError(f"session not found: {key}")
+
+        export_key = key if record and record.metadata.get("original_session_key") == key else session.key
+        status = "archived" if archived_path else "active"
+        archive_reason: str | None = self._archive_reason_from_path(archived_path, key) if archived_path else None
+        archived_at: datetime | None = None
+        if self.sqlite_store is not None:
+            if record is None:
+                raise KeyError(f"session not found: {key}")
+            status = record.status
+            archive_reason = record.archive_reason
+            archived_at = record.archived_at
+
+        if normalized_format == "jsonl":
+            metadata = {
+                "_type": "metadata",
+                "key": export_key,
+                "created_at": session.created_at.isoformat(),
+                "updated_at": session.updated_at.isoformat(),
+                "status": status,
+                "archived_at": archived_at.isoformat() if archived_at else None,
+                "archive_reason": archive_reason,
+                "metadata": session.metadata,
+            }
+            lines = [json.dumps(metadata, ensure_ascii=False)]
+            lines.extend(json.dumps(message, ensure_ascii=False) for message in session.messages)
+            return "\n".join(lines) + "\n"
+
+        lines = [f"# Session: {export_key}", "", f"Status: {status}"]
+        if archive_reason:
+            lines.append(f"Archive reason: {archive_reason}")
+        lines.append("")
+        for message in session.messages:
+            role = str(message.get("role") or "unknown").replace("_", " ").title()
+            content = str(message.get("content") or "")
+            lines.extend((f"## {role}", "", content, ""))
+        return "\n".join(lines).rstrip() + "\n"
 
     def get_recent_archived_history(
         self,

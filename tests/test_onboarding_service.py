@@ -225,3 +225,34 @@ async def test_onboarding_duplicate_insight_is_audited_not_rewritten(tmp_path):
     user_md = (tmp_path / "USER.md").read_text(encoding="utf-8")
     assert user_md.count("User prefers concise replies") == 1
     assert onboarding_audit_events(tmp_path)[-1]["event"] == "duplicate"
+
+
+@pytest.mark.asyncio
+async def test_onboarding_rejects_legacy_payload_without_evidenced_insights(tmp_path):
+    enable_onboarding_workspace(tmp_path)
+    service = make_service_with_content(
+        tmp_path,
+        json.dumps(
+            {
+                "skip": False,
+                "confidence": 0.99,
+                "user_md": ["- User prefers to be called Captain."],
+                "soul_md": [],
+                "identity_md": [],
+            }
+        ),
+    )
+
+    changed = await service.maybe_sync_from_messages(
+        [{"role": "user", "content": "Please summarize this one document."}]
+    )
+
+    assert changed is False
+    assert "Captain" not in (tmp_path / "USER.md").read_text(encoding="utf-8")
+    assert onboarding_audit_events(tmp_path)[-1]["reason"] == "invalid_schema"
+
+
+def test_onboarding_prompt_requires_evidenced_insights():
+    assert '"insights"' in OnboardingProfileService.SYSTEM_PROMPT
+    assert '"evidence"' in OnboardingProfileService.SYSTEM_PROMPT
+    assert '"user_md"' not in OnboardingProfileService.SYSTEM_PROMPT
