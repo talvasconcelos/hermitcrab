@@ -43,10 +43,11 @@ class ExecTool(Tool):
     def description(self) -> str:
         if self.restrict_to_workspace:
             return (
-                "Execute a shell command with best-effort workspace path checks. "
+                "Execute a command directly (no shell) with best-effort workspace path checks. "
+                "Shell syntax (pipes, redirects, variables) requires explicit approval. "
                 "This is not a sandbox and should not be treated as confinement."
             )
-        return "Execute a shell command with full system access; dangerous and not sandboxed."
+        return "Execute a command with full system access; dangerous and not sandboxed."
 
     @property
     def parameters(self) -> dict[str, Any]:
@@ -55,7 +56,7 @@ class ExecTool(Tool):
             "properties": {
                 "command": {
                     "type": "string",
-                    "description": "The shell command to execute"
+                    "description": "The command to execute"
                 },
                 "working_dir": {
                     "type": "string",
@@ -75,16 +76,33 @@ class ExecTool(Tool):
         )
         if guard_error:
             return guard_error
+        uses_shell = self._requires_shell(command)
+        if uses_shell and not destructive_approved:
+            return "Error: Command blocked by safety guard (shell syntax requires explicit approval)"
         if destructive_approved:
             self.clear_destructive_approval()
 
         try:
-            process = await asyncio.create_subprocess_shell(
-                command,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-                cwd=cwd,
-            )
+            if uses_shell:
+                process = await asyncio.create_subprocess_shell(
+                    command,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                    cwd=cwd,
+                )
+            else:
+                try:
+                    argv = shlex.split(command, posix=True)
+                except ValueError:
+                    argv = command.split()
+                if not argv:
+                    return "(no command)"
+                process = await asyncio.create_subprocess_exec(
+                    *argv,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                    cwd=cwd,
+                )
 
             try:
                 stdout, stderr = await asyncio.wait_for(
@@ -194,6 +212,7 @@ class ExecTool(Tool):
         if (
             risk == "destructive"
             and self.restrict_to_workspace
+            and not self._requires_shell(cmd)
             and self._is_workspace_scoped_delete(cmd, workspace_root)
         ):
             risk = "workspace_write"
@@ -245,6 +264,8 @@ class ExecTool(Tool):
     @classmethod
     def _is_workspace_scoped_delete(cls, command: str, workspace_root: Path) -> bool:
         """Allow file deletion as an ordinary workspace write when it stays inside the workspace."""
+        if cls._requires_shell(command):
+            return False
         try:
             tokens = shlex.split(command, posix=True)
         except ValueError:
@@ -318,22 +339,24 @@ class ExecTool(Tool):
         "xargs",
     }
 
-    @staticmethod
-    def _command_words(tokens: list[str]) -> list[str]:
-        """Return the tokens that start a command (index 0 and after control operators)."""
-        words: list[str] = []
-        prev_was_operator = True
-        for token in tokens:
-            if prev_was_operator:
-                words.append(token)
-                prev_was_operator = False
-            elif token in {"&&", "||", ";", "|"}:
-                prev_was_operator = True
-        return words
+    _SHELL_METACHARACTER_RE = re.compile(r"[;&|><$`~*?\[\]{}()!\n]")
+
+    @classmethod
+    def _requires_shell(cls, command: str) -> bool:
+        """Return True when the command uses shell syntax that argv execution cannot express.
+
+        Such syntax is only run through ``create_subprocess_shell`` after the exact command is
+        explicitly approved. Everything else runs via ``create_subprocess_exec`` with a parsed
+        argv, so there is no shell to interpret metacharacters.
+        """
+        return bool(cls._SHELL_METACHARACTER_RE.search(command))
 
     @classmethod
     def _classify_command_risk(cls, command: str) -> CommandRisk:
-        """Classify a shell command by its likely mutation risk."""
+        """Classify a command by its likely mutation risk."""
+        if cls._requires_shell(command):
+            return "destructive"
+
         try:
             tokens = shlex.split(command, posix=True)
         except ValueError:
@@ -343,43 +366,33 @@ class ExecTool(Tool):
             return "read_only"
 
         lowered = command.lower()
-        command_words = cls._command_words(tokens)
+        first = Path(tokens[0]).name.lower()
 
-        if cls._looks_destructive(command_words, lowered):
+        if cls._looks_destructive(first, lowered):
             return "destructive"
-        if cls._has_shell_redirection(lowered):
-            return "workspace_write"
-
-        first = Path(command_words[0]).name.lower() if command_words else ""
         if cls._looks_read_only(first, lowered):
             return "read_only"
         return "workspace_write"
 
     @classmethod
-    def _looks_destructive(cls, command_words: list[str], lowered: str) -> bool:
-        for word in command_words:
-            name = Path(word).name.lower()
-            if name in cls._DESTRUCTIVE_COMMANDS:
+    def _looks_destructive(cls, first: str, lowered: str) -> bool:
+        if first in cls._DESTRUCTIVE_COMMANDS:
+            return True
+        if first in cls._INTERPRETER_COMMANDS:
+            return True
+        if first.startswith(("python", "pypy", "mkfs.")):
+            return True
+        if first == "git":
+            destructive_git_patterns = (
+                "git reset",
+                "git checkout --",
+                "git clean",
+                "git restore",
+                "git revert --no-edit",
+            )
+            if any(pattern in lowered for pattern in destructive_git_patterns):
                 return True
-            if name in cls._INTERPRETER_COMMANDS:
-                return True
-            if name.startswith(("python", "pypy", "mkfs.")):
-                return True
-            if name == "git":
-                destructive_git_patterns = (
-                    "git reset",
-                    "git checkout --",
-                    "git clean",
-                    "git restore",
-                    "git revert --no-edit",
-                )
-                if any(pattern in lowered for pattern in destructive_git_patterns):
-                    return True
         return False
-
-    @staticmethod
-    def _has_shell_redirection(lowered: str) -> bool:
-        return any(operator in lowered for operator in (" > ", " >> "))
 
     @staticmethod
     def _looks_read_only(first: str, lowered: str) -> bool:
