@@ -24,6 +24,29 @@ def _now_ms() -> int:
     return int(time.time() * 1000)
 
 
+def _local_tz() -> Any:
+    """Resolve the local IANA timezone for DST-aware cron scheduling."""
+    try:
+        from zoneinfo import ZoneInfo
+
+        from tzlocal import get_localzone_name
+
+        return ZoneInfo(get_localzone_name())
+    except Exception:
+        # Fall back to the previous fixed-offset behavior rather than failing scheduling.
+        return datetime.now().astimezone().tzinfo
+
+
+def _local_timezone_name() -> str | None:
+    """Return the local IANA timezone name, or None when it cannot be resolved."""
+    try:
+        from tzlocal import get_localzone_name
+
+        return get_localzone_name()
+    except Exception:
+        return None
+
+
 def compute_next_run_ms(schedule: CronSchedule, now_ms: int) -> int | None:
     """Compute next run time in ms."""
     if schedule.kind == "at":
@@ -42,7 +65,7 @@ def compute_next_run_ms(schedule: CronSchedule, now_ms: int) -> int | None:
             from croniter import croniter
             # Use caller-provided reference time for deterministic scheduling
             base_time = now_ms / 1000
-            tz = ZoneInfo(schedule.tz) if schedule.tz else datetime.now().astimezone().tzinfo
+            tz = ZoneInfo(schedule.tz) if schedule.tz else _local_tz()
             base_dt = datetime.fromtimestamp(base_time, tz=tz)
             cron = croniter(schedule.expr, base_dt)
             next_dt = cron.get_next(datetime)
@@ -359,6 +382,12 @@ class CronService:
         """Add a new job."""
         store = self._load_store()
         _validate_schedule_for_add(schedule)
+        # Persist the resolved IANA zone name so scheduling stays deterministic across DST
+        # transitions. An explicit `--tz` (schedule.tz) already set above is left untouched.
+        if schedule.kind == "cron" and not schedule.tz:
+            local_name = _local_timezone_name()
+            if local_name:
+                schedule.tz = local_name
         now = _now_ms()
         next_run_at_ms = compute_next_run_ms(schedule, now)
         if next_run_at_ms is None:
