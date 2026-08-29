@@ -10,7 +10,7 @@ from typing import Any
 from loguru import logger
 
 from hermitcrab.session.sqlite_store import SQLiteSessionStore
-from hermitcrab.session.storage import MessageRecord, SessionRecord
+from hermitcrab.session.storage import MessageRecord, SessionRecord, utc_now
 from hermitcrab.utils.helpers import ensure_dir, safe_filename
 
 
@@ -39,15 +39,15 @@ class Session:
 
     key: str  # channel:chat_id
     messages: list[dict[str, Any]] = field(default_factory=list)
-    created_at: datetime = field(default_factory=datetime.now)
-    updated_at: datetime = field(default_factory=datetime.now)
+    created_at: datetime = field(default_factory=utc_now)
+    updated_at: datetime = field(default_factory=utc_now)
     metadata: dict[str, Any] = field(default_factory=dict)
 
     def add_message(self, role: str, content: str, **kwargs: Any) -> None:
         """Add a message to the session."""
-        msg = {"role": role, "content": content, "timestamp": datetime.now().isoformat(), **kwargs}
+        msg = {"role": role, "content": content, "timestamp": utc_now().isoformat(), **kwargs}
         self.messages.append(msg)
-        self.updated_at = datetime.now()
+        self.updated_at = utc_now()
 
     @staticmethod
     def _leading_segment_end(messages: list[dict[str, Any]]) -> int:
@@ -143,7 +143,7 @@ class Session:
     def clear(self) -> None:
         """Clear all messages and reset session to initial state."""
         self.messages = []
-        self.updated_at = datetime.now()
+        self.updated_at = utc_now()
 
 
 def create_session_manager(workspace: Path, *, import_existing: bool = True) -> "SessionManager":
@@ -252,8 +252,8 @@ class SessionManager:
         return Session(
             key=record.key,
             messages=messages,
-            created_at=record.created_at or datetime.now(),
-            updated_at=record.updated_at or datetime.now(),
+            created_at=record.created_at or utc_now(),
+            updated_at=record.updated_at or utc_now(),
             metadata=record.metadata,
         )
 
@@ -292,8 +292,8 @@ class SessionManager:
         return Session(
             key=session_key,
             messages=messages,
-            created_at=created_at or datetime.now(),
-            updated_at=updated_at or datetime.now(),
+            created_at=created_at or utc_now(),
+            updated_at=updated_at or utc_now(),
             metadata=metadata,
         )
 
@@ -397,7 +397,7 @@ class SessionManager:
             session.metadata.clear()
             return None
 
-        ts = datetime.now().strftime("%Y-%m-%dT%H-%M-%S")
+        ts = utc_now().strftime("%Y-%m-%dT%H-%M-%S")
         archive_name = f"{safe_filename(session.key.replace(':', '_'))}-{reason}-{ts}.jsonl"
         archive_path = self.archive_dir / archive_name
         path.replace(archive_path)
