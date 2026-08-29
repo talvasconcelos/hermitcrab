@@ -85,8 +85,13 @@ def parse_subagent_completion_prompt(content: str) -> dict[str, str] | None:
     if not header_match:
         return None
 
+    # Escalation (and all template fields) must be read only from the deterministic
+    # template section, never from the model-generated ``Result:`` block. Otherwise a
+    # subagent could forge an escalation by repeating the field labels in its output.
+    template_part = content.split("\nResult:", 1)[0]
+
     def _field(label: str) -> str:
-        match = re.search(rf"(?m)^{re.escape(label)}:\s*(.+)$", content)
+        match = re.search(rf"(?m)^{re.escape(label)}:\s*(.+)$", template_part)
         return match.group(1).strip() if match else ""
 
     result_match = re.search(

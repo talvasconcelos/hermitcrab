@@ -77,6 +77,7 @@ from hermitcrab.agent.reminders import ReminderStore
 from hermitcrab.agent.session_lifecycle import SessionLifecycleManager
 from hermitcrab.agent.skill_runtime import SkillRuntimeManager
 from hermitcrab.agent.subagent import SubagentManager
+from hermitcrab.agent.subagent_profiles import SUBAGENT_PROFILES
 from hermitcrab.agent.tools.context import set_turn_context
 from hermitcrab.agent.tools.cron import CronTool
 from hermitcrab.agent.tools.filesystem import EditFileTool, ListDirTool, ReadFileTool, WriteFileTool
@@ -1311,6 +1312,18 @@ class AgentLoop:
             return safe_content, False
 
         if action == "retry_with_profile" and task and target and target != profile:
+            if target not in SUBAGENT_PROFILES:
+                self._audit_event(
+                    "subagent.escalation_invalid_target",
+                    session_key=session_key,
+                    channel=channel,
+                    chat_id=chat_id,
+                    label=label,
+                    requested_profile=profile,
+                    invalid_target=target,
+                    reason=reason,
+                )
+                return safe_content, False
             retry_key = self._subagent_retry_key(label=label, task=task, target=target)
             if retry_key not in self._subagent_retry_history(session):
                 brief = self._build_subagent_brief(task, build_prompt_history(history), session)
