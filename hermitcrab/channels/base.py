@@ -62,26 +62,41 @@ class BaseChannel(ABC):
         """
         Check if a sender is allowed to use this bot.
 
+        Fail-closed: an empty ``allow_from`` list denies everyone. A single
+        ``"*"`` entry opens the channel to everyone.
+
         Args:
             sender_id: The sender's identifier.
 
         Returns:
             True if allowed, False otherwise.
         """
-        allow_list = getattr(self.config, "allow_from", [])
+        allow_list = [str(entry).strip() for entry in (getattr(self.config, "allow_from", None) or [])]
+        allow_list = [entry for entry in allow_list if entry]
 
-        # If no allow list, allow everyone
         if not allow_list:
+            return False
+        if "*" in allow_list:
             return True
 
-        sender_str = str(sender_id)
-        if sender_str in allow_list:
-            return True
-        if "|" in sender_str:
-            for part in sender_str.split("|"):
-                if part and part in allow_list:
-                    return True
-        return False
+        return str(sender_id) in allow_list
+
+    def _log_allowlist_state(self) -> None:
+        """Log a loud startup warning when a channel is open or fully closed."""
+        allow_list = [str(entry).strip() for entry in (getattr(self.config, "allow_from", None) or [])]
+        allow_list = [entry for entry in allow_list if entry]
+
+        if not allow_list:
+            logger.warning(
+                "Channel {} has an empty allowFrom list — all senders are denied (fail-closed). "
+                "Add entries, or '*' to open it.",
+                self.name,
+            )
+        elif "*" in allow_list:
+            logger.warning(
+                "Channel {} allowFrom contains '*' — anyone can control this bot. Restrict it!",
+                self.name,
+            )
 
     async def _handle_message(
         self,

@@ -137,6 +137,7 @@ class TelegramChannel(BaseChannel):
             return
 
         self._running = True
+        self._log_allowlist_state()
 
         # Build the application with larger connection pool to avoid pool-timeout on long runs
         req = HTTPXRequest(
@@ -316,6 +317,36 @@ class TelegramChannel(BaseChannel):
         """Build sender_id with username for allowlist matching."""
         sid = str(user.id)
         return f"{sid}|{user.username}" if user.username else sid
+
+    def is_allowed(self, sender_id: str) -> bool:
+        """
+        Fail-closed Telegram allowlist check.
+
+        Numeric entries match the sender's numeric user id only; non-numeric
+        entries match the username (case-insensitive) or the full ``id|username``
+        string. A username that happens to equal someone else's numeric id can no
+        longer spoof that id.
+        """
+        allow_list = [str(entry).strip() for entry in (self.config.allow_from or [])]
+        allow_list = [entry for entry in allow_list if entry]
+        if not allow_list:
+            return False
+        if "*" in allow_list:
+            return True
+
+        sid = str(sender_id)
+        if sid in allow_list:
+            return True
+
+        numeric_id, _, username = sid.partition("|")
+        username = username.strip()
+        for entry in allow_list:
+            if entry.isdigit():
+                if entry == numeric_id:
+                    return True
+            elif username and entry.lower() == username.lower():
+                return True
+        return False
 
     async def _forward_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Forward slash commands to the bus for unified handling in AgentLoop."""

@@ -220,7 +220,7 @@ class NostrChannel(BaseChannel):
         for pk in pubkeys:
             pk = pk.strip()
             if pk.lower() in ("*", "all"):
-                logger.info("Nostr allowlist set to '*' - open mode")
+                logger.warning("Nostr allowlist set to '*' — anyone can control this bot. Restrict it!")
                 return {"*"}
             try:
                 hex_pk = self._normalize_pubkey_to_hex(pk)

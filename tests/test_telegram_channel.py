@@ -7,6 +7,30 @@ from hermitcrab.channels.telegram import TelegramChannel
 from hermitcrab.config.schema import TelegramConfig
 
 
+def test_telegram_allowlist_is_fail_closed_when_empty() -> None:
+    bus = SimpleNamespace(publish_inbound=AsyncMock())
+    channel = TelegramChannel(TelegramConfig(allow_from=[]), bus)
+
+    assert channel.is_allowed("111|alice") is False
+    assert channel.is_allowed("111") is False
+
+
+def test_telegram_allowlist_wildcard_opens_channel() -> None:
+    bus = SimpleNamespace(publish_inbound=AsyncMock())
+    channel = TelegramChannel(TelegramConfig(allow_from=["*"]), bus)
+
+    assert channel.is_allowed("111|alice") is True
+
+
+def test_telegram_username_cannot_spoof_numeric_allowlist_id() -> None:
+    bus = SimpleNamespace(publish_inbound=AsyncMock())
+    channel = TelegramChannel(TelegramConfig(allow_from=["111"]), bus)
+
+    # A different user whose username equals the whitelisted numeric id must not pass.
+    assert channel.is_allowed("222|111") is False
+    assert channel.is_allowed("111|alice") is True
+
+
 @pytest.mark.asyncio
 async def test_unauthorized_message_skips_media_download_and_transcription() -> None:
     bus = SimpleNamespace(publish_inbound=AsyncMock())
