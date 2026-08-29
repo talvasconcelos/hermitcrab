@@ -58,6 +58,30 @@ def test_destructive_git_still_requires_approval() -> None:
     assert ExecTool._classify_command_risk("git reset --hard HEAD") == "destructive"
 
 
+def test_sudo_requires_destructive_approval() -> None:
+    assert ExecTool._classify_command_risk("sudo rm -rf /") == "destructive"
+
+
+def test_interpreter_wrapper_requires_destructive_approval() -> None:
+    assert ExecTool._classify_command_risk('bash -c "rm -rf /"') == "destructive"
+    assert ExecTool._classify_command_risk('sh -c "cat /etc/passwd"') == "destructive"
+    assert ExecTool._classify_command_risk("python -c 'import os'") == "destructive"
+    assert ExecTool._classify_command_risk("node -e '1'") == "destructive"
+
+
+def test_pipe_into_interpreter_requires_destructive_approval() -> None:
+    assert ExecTool._classify_command_risk("echo c2ggL2V0Yy9wYXNzd2Q= | base64 -d | sh") == "destructive"
+
+
+def test_restricted_shell_blocks_quoted_home_path(tmp_path: Path) -> None:
+    workspace = tmp_path / "identities" / "alice"
+    tool = ExecTool(working_dir=str(workspace), restrict_to_workspace=True)
+
+    result = tool._guard_command('cat "$HOME/.ssh/id_rsa"', str(workspace))
+
+    assert result == "Error: Command blocked by safety guard (home path outside working dir)"
+
+
 def test_restricted_shell_blocks_absolute_sibling_identity_path(tmp_path: Path) -> None:
     workspace = tmp_path / "identities" / "alice"
     sibling = tmp_path / "identities" / "bob" / "memory.md"

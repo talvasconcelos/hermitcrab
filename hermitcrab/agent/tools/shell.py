@@ -207,7 +207,7 @@ class ExecTool(Tool):
         if self.restrict_to_workspace:
             if "..\\" in cmd or "../" in cmd:
                 return "Error: Command blocked by safety guard (path traversal detected)"
-            if re.search(r"(?:^|[\s=:])(?:~|\$\{?HOME\}?)(?:/|$)", cmd):
+            if re.search(r"(?<![A-Za-z0-9_])(?:\$HOME|\$\{HOME\}|~[A-Za-z0-9_-]*)(?:/|$)", cmd):
                 return "Error: Command blocked by safety guard (home path outside working dir)"
             cwd_path = Path(cwd).resolve()
             if cwd_path != workspace_root and workspace_root not in cwd_path.parents:
@@ -271,6 +271,66 @@ class ExecTool(Tool):
                 return False
         return True
 
+    _DESTRUCTIVE_COMMANDS = {
+        "rm",
+        "rmdir",
+        "del",
+        "erase",
+        "format",
+        "mkfs",
+        "diskpart",
+        "shutdown",
+        "reboot",
+        "poweroff",
+        "chmod",
+        "chown",
+        "dd",
+        "sudo",
+    }
+
+    _INTERPRETER_COMMANDS = {
+        "sh",
+        "bash",
+        "zsh",
+        "dash",
+        "ksh",
+        "fish",
+        "csh",
+        "tcsh",
+        "node",
+        "nodejs",
+        "perl",
+        "ruby",
+        "php",
+        "python",
+        "python2",
+        "python3",
+        "pypy",
+        "pypy3",
+        "lua",
+        "tclsh",
+        "expect",
+        "powershell",
+        "pwsh",
+        "env",
+        "eval",
+        "exec",
+        "xargs",
+    }
+
+    @staticmethod
+    def _command_words(tokens: list[str]) -> list[str]:
+        """Return the tokens that start a command (index 0 and after control operators)."""
+        words: list[str] = []
+        prev_was_operator = True
+        for token in tokens:
+            if prev_was_operator:
+                words.append(token)
+                prev_was_operator = False
+            elif token in {"&&", "||", ";", "|"}:
+                prev_was_operator = True
+        return words
+
     @classmethod
     def _classify_command_risk(cls, command: str) -> CommandRisk:
         """Classify a shell command by its likely mutation risk."""
@@ -282,49 +342,39 @@ class ExecTool(Tool):
         if not tokens:
             return "read_only"
 
-        first = Path(tokens[0]).name.lower()
         lowered = command.lower()
+        command_words = cls._command_words(tokens)
 
-        if cls._looks_destructive(first, tokens, lowered):
+        if cls._looks_destructive(command_words, lowered):
             return "destructive"
         if cls._has_shell_redirection(lowered):
             return "workspace_write"
+
+        first = Path(command_words[0]).name.lower() if command_words else ""
         if cls._looks_read_only(first, lowered):
             return "read_only"
         return "workspace_write"
 
-    @staticmethod
-    def _looks_destructive(first: str, tokens: list[str], lowered: str) -> bool:
-        if first in {
-            "rm",
-            "rmdir",
-            "del",
-            "erase",
-            "format",
-            "mkfs",
-            "diskpart",
-            "shutdown",
-            "reboot",
-            "poweroff",
-            "chmod",
-            "chown",
-        }:
-            return True
-
-        if first == "git":
-            destructive_git_patterns = (
-                "git reset",
-                "git checkout --",
-                "git clean",
-                "git restore",
-                "git revert --no-edit",
-            )
-            if any(pattern in lowered for pattern in destructive_git_patterns):
+    @classmethod
+    def _looks_destructive(cls, command_words: list[str], lowered: str) -> bool:
+        for word in command_words:
+            name = Path(word).name.lower()
+            if name in cls._DESTRUCTIVE_COMMANDS:
                 return True
-
-        if len(tokens) >= 2 and first in {"python", "python3"} and tokens[1] == "-c":
-            return True
-
+            if name in cls._INTERPRETER_COMMANDS:
+                return True
+            if name.startswith(("python", "pypy", "mkfs.")):
+                return True
+            if name == "git":
+                destructive_git_patterns = (
+                    "git reset",
+                    "git checkout --",
+                    "git clean",
+                    "git restore",
+                    "git revert --no-edit",
+                )
+                if any(pattern in lowered for pattern in destructive_git_patterns):
+                    return True
         return False
 
     @staticmethod
