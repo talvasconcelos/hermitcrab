@@ -199,9 +199,15 @@ class NostrChannel(BaseChannel):
 
     def _load_private_key(self, key: str | None) -> Any:
         if not key:
-            logger.warning("Nostr private key not provided, generating new keypair")
+            logger.warning("Nostr private key not provided, generating a new ephemeral keypair")
             new_key = self.PrivateKey()
-            logger.warning("Generated new Nostr keypair. Save this nsec key: {}", new_key.bech32())
+            # The nsec must reach the admin (who passes it to a user), but it must
+            # never enter the log stream. Print to stdout instead of logging.
+            print(
+                "\n[hermitcrab] Generated a new Nostr identity keypair.\n"
+                f"[hermitcrab] nsec (share with the user; never log it): {new_key.bech32()}\n"
+                f"[hermitcrab] npub: {new_key.public_key.bech32()}\n"
+            )
             return new_key
 
         key = key.strip()

@@ -125,20 +125,23 @@ def test_user_add_accepts_hex_nostr_public_key(monkeypatch, tmp_path) -> None:
     assert resolution.reason == "identity_binding"
 
 
-def test_user_add_accepts_private_key_for_backwards_compat(monkeypatch, tmp_path) -> None:
+def test_user_add_derives_pubkey_from_env_nsec_without_persisting_key(monkeypatch, tmp_path) -> None:
     from pynostr.key import PrivateKey
 
-    private_key = PrivateKey().bech32()
+    private_key = PrivateKey()
+    monkeypatch.setenv("HERMITCRAB_NSEC", private_key.bech32())
     _use_config(monkeypatch, tmp_path, Config.model_validate({"root": str(tmp_path)}))
 
-    result = runner.invoke(app, ["user", "add", "alice", "--nostr-private-key", private_key])
+    result = runner.invoke(
+        app, ["user", "add", "alice", "--nostr-private-key-env", "HERMITCRAB_NSEC"]
+    )
 
     assert result.exit_code == 0
     config = load_config(tmp_path / "config.json", strict=True)
     identity = config.identities.registry["alice"]
-    assert identity.nostr_private_key
-    assert len(identity.nostr_public_key) == 64
-    assert "Private key accepted for backward compatibility." in result.stdout
+    assert identity.nostr_private_key == ""
+    assert identity.nostr_public_key == private_key.public_key.hex().lower()
+    assert "only the derived npub was stored" in result.stdout
 
 
 def test_user_add_rejects_invalid_nostr_public_or_private_keys(monkeypatch, tmp_path) -> None:
@@ -154,7 +157,10 @@ def test_user_add_rejects_invalid_nostr_public_or_private_keys(monkeypatch, tmp_
     assert nsec_as_pub.exit_code == 1
     assert "pubkey must be npub or 64-char hex" in nsec_as_pub.stdout
 
-    bad_priv = runner.invoke(app, ["user", "add", "bob", "--nostr-private-key", "bad"])
+    monkeypatch.setenv("HERMITCRAB_NSEC", "bad")
+    bad_priv = runner.invoke(
+        app, ["user", "add", "bob", "--nostr-private-key-env", "HERMITCRAB_NSEC"]
+    )
     assert bad_priv.exit_code == 1
     assert "private key must be nsec or 64-char hex" in bad_priv.stdout
 

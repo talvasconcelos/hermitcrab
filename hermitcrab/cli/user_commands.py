@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 
 import typer
 from rich.console import Console
@@ -40,7 +41,12 @@ from hermitcrab.cli.identity_helpers import (
 from hermitcrab.cli.identity_helpers import (
     send_nostr_onboarding_intro as _send_nostr_onboarding_intro,
 )
-from hermitcrab.config.schema import Config, IdentityConfig, generate_nostr_keypair
+from hermitcrab.config.schema import (
+    Config,
+    IdentityConfig,
+    generate_nostr_keypair,
+    nostr_pubkey_from_private_key,
+)
 
 user_app = typer.Typer(help="Manage identity-scoped users")
 console = Console()
@@ -108,10 +114,15 @@ def user_add(
         "--nostr-public-key",
         help="Identity Nostr public key as npub or hex.",
     ),
-    nostr_private_key: str | None = typer.Option(
-        None,
+    use_private_key: bool = typer.Option(
+        False,
         "--nostr-private-key",
-        help="(Backward compatibility) Identity Nostr private key as nsec or hex.",
+        help="Provide the identity nsec interactively via a hidden prompt (not persisted).",
+    ),
+    nostr_private_key_env: str | None = typer.Option(
+        None,
+        "--nostr-private-key-env",
+        help="Read the identity nsec from this environment variable (not persisted).",
     ),
 ):
     """Add a user identity and bootstrap its identity root."""
@@ -120,14 +131,35 @@ def user_add(
         console.print(f"[red]Error: user already exists: {name}[/red]")
         raise typer.Exit(1)
 
-    if nostr_public_key and nostr_private_key:
-        console.print("[red]Error: provide either --nostr-public-key or --nostr-private-key, not both[/red]")
+    if nostr_public_key and (use_private_key or nostr_private_key_env):
+        console.print(
+            "[red]Error: provide either --nostr-public-key or a private key source, not both[/red]"
+        )
         raise typer.Exit(1)
+
+    # Resolve the nsec without ever placing it on argv. The nsec is only used to
+    # derive the npub; the raw key is intentionally NOT persisted (the admin passes
+    # the nsec to the user, and hermitcrab routes by npub alone).
+    private_key_value: str | None = None
+    if nostr_private_key_env:
+        private_key_value = (os.environ.get(nostr_private_key_env) or "").strip()
+        if not private_key_value:
+            console.print(f"[red]Error: env var '{nostr_private_key_env}' is empty or unset[/red]")
+            raise typer.Exit(1)
+    elif use_private_key:
+        private_key_value = typer.prompt(
+            "Identity nsec (nsec/hex)", hide_input=True, confirmation_prompt=True
+        )
 
     generated_private_key: str | None = None
     selected_pubkey = nostr_public_key or ""
-    selected_private_key = nostr_private_key or ""
-    if not selected_pubkey and not selected_private_key:
+    if private_key_value:
+        try:
+            selected_pubkey = nostr_pubkey_from_private_key(private_key_value)
+        except ValueError as exc:
+            console.print(f"[red]Error: {exc}[/red]")
+            raise typer.Exit(1) from exc
+    elif not selected_pubkey:
         generated_private_key, generated_pubkey = generate_nostr_keypair()
         selected_pubkey = generated_pubkey
 
@@ -135,7 +167,7 @@ def user_add(
         config.identities.registry[name] = IdentityConfig(
             label=label,
             nostr_public_key=selected_pubkey,
-            nostr_private_key=selected_private_key,
+            nostr_private_key="",
         )
         identity = config.identities.registry[name]
         _bind_nostr_pubkey_to_identity(config, name, identity.nostr_public_key)
@@ -163,9 +195,9 @@ def user_add(
     if nostr_public_key:
         console.print(f"Nostr pubkey: {identity.nostr_public_key}")
         console.print("User added with provided public key.")
-    elif selected_private_key:
+    elif private_key_value:
         console.print(f"Nostr pubkey: {identity.nostr_public_key}")
-        console.print("Private key accepted for backward compatibility.")
+        console.print("Private key accepted; only the derived npub was stored.")
     else:
         generated_private_nsec = ""
         try:
