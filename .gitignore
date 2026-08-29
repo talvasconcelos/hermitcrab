@@ -21,13 +21,20 @@ poetry.lock
 botpy.log
 old_tests/
 
-# AI agent data
+# AI agent data / internal dev files (never push to GitHub)
 AGENTS.md
 CLAUDE.md
 GEMINI.md
 QWEN.md
 CONSTITUTION.md
 current.md
+.agents/
+.claude/
+
+# Specs / planning notes (internal dev, never push)
+spec/
+specs/
+*.spec.md
 
 CODEX_AUDIT
 .opencode/
@@ -38,4 +45,3 @@ CODEX_AUDIT
 smoke_test/
 tmp/smoke/
 .gitnexus
-.claude/
