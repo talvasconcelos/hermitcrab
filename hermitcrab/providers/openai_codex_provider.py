@@ -5,10 +5,10 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import os
 from typing import Any, AsyncGenerator
 
 import httpx
-from loguru import logger
 
 from hermitcrab.providers.base import LLMProvider, LLMResponse, ToolCallRequest
 from hermitcrab.providers.openai_codex_auth import (
@@ -68,7 +68,7 @@ class OpenAICodexProvider(LLMProvider):
 
         try:
             try:
-                content, tool_calls, finish_reason, usage = await _request_codex_with_cert_retry(
+                content, tool_calls, finish_reason, usage = await _request_codex(
                     url,
                     headers,
                     body,
@@ -78,7 +78,7 @@ class OpenAICodexProvider(LLMProvider):
                     raise
                 creds = await asyncio.to_thread(resolve_codex_runtime_credentials, force_refresh=True)
                 headers = _build_headers(creds["api_key"])
-                content, tool_calls, finish_reason, usage = await _request_codex_with_cert_retry(
+                content, tool_calls, finish_reason, usage = await _request_codex(
                     url,
                     headers,
                     body,
@@ -120,32 +120,28 @@ def _build_headers(token: str) -> dict[str, str]:
     }
 
 
+def _codex_tls_verify() -> bool | str:
+    """Resolve the TLS verification setting for Codex requests.
+
+    TLS verification is never disabled. Operators who need a custom CA
+    (e.g. a corporate MITM proxy) can point ``HERMITCRAB_CODEX_CA_BUNDLE``
+    at a CA bundle instead of downgrading to ``verify=False``.
+    """
+    ca_bundle = os.environ.get("HERMITCRAB_CODEX_CA_BUNDLE", "").strip()
+    return ca_bundle or True
+
+
 async def _request_codex(
     url: str,
     headers: dict[str, str],
     body: dict[str, Any],
-    verify: bool,
 ) -> tuple[str, list[ToolCallRequest], str, dict[str, int]]:
-    async with httpx.AsyncClient(timeout=60.0, verify=verify) as client:
+    async with httpx.AsyncClient(timeout=60.0, verify=_codex_tls_verify()) as client:
         async with client.stream("POST", url, headers=headers, json=body) as response:
             if response.status_code != 200:
                 text = await response.aread()
                 raise RuntimeError(_friendly_error(response.status_code, text.decode("utf-8", "ignore")))
             return await _consume_sse(response)
-
-
-async def _request_codex_with_cert_retry(
-    url: str,
-    headers: dict[str, str],
-    body: dict[str, Any],
-) -> tuple[str, list[ToolCallRequest], str, dict[str, int]]:
-    try:
-        return await _request_codex(url, headers, body, verify=True)
-    except Exception as e:
-        if "CERTIFICATE_VERIFY_FAILED" not in str(e):
-            raise
-        logger.warning("SSL certificate verification failed for Codex API; retrying with verify=False")
-        return await _request_codex(url, headers, body, verify=False)
 
 
 def _convert_tools(tools: list[dict[str, Any]]) -> list[dict[str, Any]]:
