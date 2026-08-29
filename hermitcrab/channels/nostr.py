@@ -730,9 +730,6 @@ class NostrChannel(BaseChannel):
         try:
             event_id = event.get("id", "")
             event_kind = event.get("kind")
-            event_pubkey = event.get("pubkey", "")
-            event_tags = event.get("tags", [])
-            event_content = event.get("content", "")
             event_created_at = event.get("created_at", 0)
 
             if event_id and event_id in self._seen_event_ids:
@@ -753,10 +750,7 @@ class NostrChannel(BaseChannel):
                 )
             else:
                 sender_pubkey, content, message_created_at = self._handle_nip04_event(
-                    event_pubkey=event_pubkey,
-                    event_tags=event_tags,
-                    event_content=event_content,
-                    event_created_at=event_created_at,
+                    event=event,
                     event_id=event_id,
                 )
                 metadata = {
@@ -842,12 +836,15 @@ class NostrChannel(BaseChannel):
 
     def _handle_nip04_event(
         self,
-        event_pubkey: str,
-        event_tags: list[Any],
-        event_content: str,
-        event_created_at: int,
+        *,
+        event: dict[str, Any],
         event_id: str,
     ) -> tuple[str | None, str | None, int]:
+        event_pubkey = event.get("pubkey", "")
+        event_tags = event.get("tags", [])
+        event_content = event.get("content", "")
+        event_created_at = event.get("created_at", 0)
+
         if not self._event_targets_us(event_tags):
             return None, None, event_created_at
 
@@ -858,6 +855,19 @@ class NostrChannel(BaseChannel):
             return None, None, event_created_at
 
         if not self._is_sender_allowed(sender_pubkey):
+            return None, None, event_created_at
+
+        # Verify the event signature before decrypting: a forged sender pubkey would
+        # otherwise pass the allowlist and spoof the session identity.
+        if not event.get("sig"):
+            logger.warning("NIP-04 event missing signature: {}", event_id[:8])
+            return None, None, event_created_at
+        try:
+            if not self.Event.from_dict(event).verify():
+                logger.warning("NIP-04 event failed signature verification: {}", event_id[:8])
+                return None, None, event_created_at
+        except Exception as e:
+            logger.warning("NIP-04 event signature verification error: {}", e)
             return None, None, event_created_at
 
         try:
