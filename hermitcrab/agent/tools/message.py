@@ -3,7 +3,11 @@
 from typing import Any, Awaitable, Callable
 
 from hermitcrab.agent.tools.base import Tool
-from hermitcrab.agent.tools.context import get_turn_context
+from hermitcrab.agent.tools.context import (
+    get_sent_in_turn,
+    get_turn_context,
+    set_sent_in_turn,
+)
 from hermitcrab.bus.events import OutboundMessage
 
 
@@ -21,7 +25,6 @@ class MessageTool(Tool):
         self._default_channel = default_channel
         self._default_chat_id = default_chat_id
         self._default_message_id = default_message_id
-        self._sent_in_turn: bool = False
 
     def set_context(self, channel: str, chat_id: str, message_id: str | None = None) -> None:
         """Set the current message context."""
@@ -35,12 +38,12 @@ class MessageTool(Tool):
 
     def start_turn(self) -> None:
         """Reset per-turn send tracking."""
-        self._sent_in_turn = False
+        set_sent_in_turn(False)
 
     @property
     def has_sent_in_turn(self) -> bool:
         """Check if a message was sent in the current turn."""
-        return self._sent_in_turn
+        return get_sent_in_turn()
 
     @property
     def name(self) -> str:
@@ -108,7 +111,7 @@ class MessageTool(Tool):
 
         try:
             await self._send_callback(msg)
-            self._sent_in_turn = True
+            set_sent_in_turn(True)
             media_info = f" with {len(media)} attachments" if media else ""
             return f"Message sent to {channel}:{chat_id}{media_info}"
         except Exception as e:

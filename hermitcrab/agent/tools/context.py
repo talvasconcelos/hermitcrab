@@ -53,3 +53,30 @@ def set_turn_context(
             delivery_chat_id=delivery_chat_id,
         )
     )
+
+
+# Mutable per-turn state that must not leak between concurrent gateway turns.
+_sent_in_turn: ContextVar[bool] = ContextVar("hermitcrab_sent_in_turn", default=False)
+_approved_destructive_command: ContextVar[str | None] = ContextVar(
+    "hermitcrab_approved_destructive_command", default=None
+)
+
+
+def get_sent_in_turn() -> bool:
+    """Return whether a message was sent in the current turn."""
+    return _sent_in_turn.get()
+
+
+def set_sent_in_turn(value: bool) -> None:
+    """Set the per-turn sent flag."""
+    _sent_in_turn.set(value)
+
+
+def get_approved_destructive_command() -> str | None:
+    """Return the current turn's one-shot destructive command approval (or None)."""
+    return _approved_destructive_command.get()
+
+
+def set_approved_destructive_command(value: str | None) -> None:
+    """Set or clear the current turn's one-shot destructive command approval."""
+    _approved_destructive_command.set(value)

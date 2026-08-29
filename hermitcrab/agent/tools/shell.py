@@ -8,6 +8,10 @@ from pathlib import Path
 from typing import Any, Literal
 
 from hermitcrab.agent.tools.base import Tool
+from hermitcrab.agent.tools.context import (
+    get_approved_destructive_command,
+    set_approved_destructive_command,
+)
 
 CommandRisk = Literal["read_only", "workspace_write", "destructive"]
 
@@ -33,7 +37,6 @@ class ExecTool(Tool):
         ]
         self.allow_patterns = allow_patterns or []
         self.restrict_to_workspace = restrict_to_workspace
-        self._approved_destructive_command: str | None = None
 
     @property
     def name(self) -> str:
@@ -176,18 +179,18 @@ class ExecTool(Tool):
 
     def allow_destructive_command(self, command: str) -> None:
         """Allow one exact destructive command to run on the next execute call."""
-        self._approved_destructive_command = self._normalize_command(command)
+        set_approved_destructive_command(self._normalize_command(command))
 
     def clear_destructive_approval(self) -> None:
         """Clear any one-shot destructive command approval."""
-        self._approved_destructive_command = None
+        set_approved_destructive_command(None)
 
     @classmethod
     def _normalize_command(cls, command: str) -> str:
         return " ".join(command.strip().split())
 
     def _is_approved_destructive_command(self, command: str) -> bool:
-        approved = self._approved_destructive_command
+        approved = get_approved_destructive_command()
         if not approved:
             return False
         return approved == self._normalize_command(command)
