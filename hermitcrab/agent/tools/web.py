@@ -66,29 +66,59 @@ def _is_unsafe_ip(ip_str: str) -> bool:
     return any(ip in network for network in _BLOCKED_NETWORKS)
 
 
-def _blocked_host_reason(host: str) -> str | None:
-    """Return a reason string when a host resolves (or is) a non-public address."""
-    host = (host or "").strip()
-    if not host:
-        return "missing host"
-    # IPv6 literals arrive bracket-wrapped from urlparse().hostname in some cases.
+def _resolve_ips(host: str) -> list[str]:
+    """Resolve a host to a de-duplicated list of IP address strings."""
     if host.startswith("[") and host.endswith("]"):
         host = host[1:-1]
-    try:
-        ip = ipaddress.ip_address(host)
-        return "resolves to a private or reserved IP address" if _is_unsafe_ip(str(ip)) else None
-    except ValueError:
-        pass
-    try:
-        infos = socket.getaddrinfo(host, None)
-    except socket.gaierror:
-        return "host could not be resolved"
-    if not infos:
-        return "host could not be resolved"
+    infos = socket.getaddrinfo(host, None)
+    ips: list[str] = []
     for info in infos:
-        if _is_unsafe_ip(str(info[4][0])):
-            return "resolves to a private or reserved IP address"
-    return None
+        ip = str(info[4][0])
+        if ip not in ips:
+            ips.append(ip)
+    return ips
+
+
+def _pin_url(url: str) -> tuple[str, str, str]:
+    """Resolve a URL's host once and pin the connection to a validated public IP.
+
+    Returns ``(pinned_url, original_host, error)``. The caller must send the original host via
+    the ``Host`` header and ``sni_hostname`` so a DNS-rebinding host cannot return a public IP
+    for validation and a private/link-local IP for the actual connection.
+    """
+    p = urlparse(url)
+    if p.scheme not in ("http", "https"):
+        return "", "", f"Only http/https allowed, got '{p.scheme or 'none'}'"
+    host = p.hostname
+    if not host:
+        return "", "", "Missing domain"
+    if host.startswith("[") and host.endswith("]"):
+        host = host[1:-1]
+
+    # A single resolution that validates the exact addresses we are about to pin to.
+    try:
+        ip_literal = ipaddress.ip_address(host)
+        ips = [str(ip_literal)]
+    except ValueError:
+        try:
+            ips = _resolve_ips(host)
+        except socket.gaierror:
+            return "", host, "host could not be resolved"
+    if not ips:
+        return "", host, "host could not be resolved"
+    for ip in ips:
+        if _is_unsafe_ip(ip):
+            return "", host, "resolves to a private or reserved IP address"
+
+    try:
+        port = p.port
+    except ValueError:
+        return "", host, "invalid port in URL"
+
+    ip = ips[0]
+    ip_host = f"[{ip}]" if ":" in ip else ip
+    netloc = f"{ip_host}:{port}" if port else ip_host
+    return p._replace(netloc=netloc).geturl(), host, ""
 
 
 def _search_with_ddgs(query: str, count: int) -> list[dict[str, str]]:
@@ -122,18 +152,10 @@ def _normalize(text: str) -> str:
 
 def _validate_url(url: str) -> tuple[bool, str]:
     """Validate URL: http(s) only, with a publicly-routable host (SSRF guard)."""
-    try:
-        p = urlparse(url)
-        if p.scheme not in ('http', 'https'):
-            return False, f"Only http/https allowed, got '{p.scheme or 'none'}'"
-        if not p.hostname:
-            return False, "Missing domain"
-        reason = _blocked_host_reason(p.hostname)
-        if reason:
-            return False, f"Host is not publicly fetchable: {reason}"
-        return True, ""
-    except Exception as e:
-        return False, str(e)
+    _, _, error = _pin_url(url)
+    if error:
+        return False, error
+    return True, ""
 
 
 def _sanitize_web_content(text: str) -> str:
@@ -320,10 +342,6 @@ class WebFetchTool(Tool):
         def _failure(error: str) -> dict[str, Any]:
             return {"ok": False, "error": error, "url": url, "final_url": url, "title": "", "text": ""}
 
-        is_valid, error_msg = _validate_url(url)
-        if not is_valid:
-            return _failure(f"URL validation failed: {error_msg}")
-
         current_url = url
         final_url = url
         status: int | None = None
@@ -333,11 +351,15 @@ class WebFetchTool(Tool):
         try:
             async with httpx.AsyncClient(follow_redirects=False, timeout=30.0) as client:
                 for _ in range(MAX_REDIRECTS + 1):
-                    is_valid, error_msg = _validate_url(current_url)
-                    if not is_valid:
+                    pinned_url, host, error_msg = _pin_url(current_url)
+                    if error_msg:
                         return _failure(f"URL validation failed: {error_msg}")
 
-                    async with client.stream("GET", current_url, headers={"User-Agent": USER_AGENT}) as response:
+                    headers = {"User-Agent": USER_AGENT, "Host": host}
+                    extensions = {"sni_hostname": host}
+                    async with client.stream(
+                        "GET", pinned_url, headers=headers, extensions=extensions
+                    ) as response:
                         if response.status_code in (301, 302, 303, 307, 308):
                             location = response.headers.get("location")
                             if not location:
@@ -351,7 +373,7 @@ class WebFetchTool(Tool):
 
                         status = response.status_code
                         content_type = response.headers.get("content-type", "")
-                        final_url = str(response.url)
+                        final_url = current_url
                         async for chunk in response.aiter_bytes():
                             body += chunk
                             if len(body) > MAX_DOWNLOAD_BYTES:
