@@ -53,3 +53,37 @@ def test_nip04_event_with_forged_pubkey_is_rejected() -> None:
 
     assert sender_pubkey is None
     assert content is None
+
+
+def test_nip04_event_with_altered_id_is_rejected() -> None:
+    sender_priv = PrivateKey()
+    channel_priv = PrivateKey()
+    channel = NostrChannel(
+        NostrConfig(private_key=channel_priv.hex(), protocol="nip04", allowed_pubkeys=["*"]),
+        MessageBus(),
+    )
+
+    event = _signed_nip04_event(sender_priv, channel.our_pubkey_hex, "replay with altered id")
+    event["id"] = "0" * 64
+
+    sender_pubkey, content, _ = channel._handle_nip04_event(event=event, event_id=event["id"])
+
+    assert sender_pubkey is None
+    assert content is None
+
+
+def test_nip04_event_with_missing_id_is_rejected() -> None:
+    sender_priv = PrivateKey()
+    channel_priv = PrivateKey()
+    channel = NostrChannel(
+        NostrConfig(private_key=channel_priv.hex(), protocol="nip04", allowed_pubkeys=["*"]),
+        MessageBus(),
+    )
+
+    event = _signed_nip04_event(sender_priv, channel.our_pubkey_hex, "missing id")
+    event.pop("id")
+
+    sender_pubkey, content, _ = channel._handle_nip04_event(event=event, event_id="")
+
+    assert sender_pubkey is None
+    assert content is None

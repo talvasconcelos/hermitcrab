@@ -869,8 +869,14 @@ class NostrChannel(BaseChannel):
             logger.warning("NIP-04 event missing signature: {}", event_id[:8])
             return None, None, event_created_at
         try:
-            if not self.Event.from_dict(event).verify():
+            signed_event = self.Event.from_dict(event)
+            if not signed_event.verify():
                 logger.warning("NIP-04 event failed signature verification: {}", event_id[:8])
+                return None, None, event_created_at
+            # Reject a relayed id that doesn't match the canonical recomputed id; otherwise a
+            # captured valid DM can be replayed with altered ids to defeat deduplication.
+            if str(event.get("id") or "").lower() != signed_event.id.lower():
+                logger.warning("NIP-04 event id does not match computed id: {}", event_id[:8])
                 return None, None, event_created_at
         except Exception as e:
             logger.warning("NIP-04 event signature verification error: {}", e)
