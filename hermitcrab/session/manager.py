@@ -854,11 +854,23 @@ class SessionManager:
 
     def list_sessions(self) -> list[dict[str, Any]]:
         """
-        List all sessions.
+        List all active sessions.
 
         Returns:
             List of session info dicts.
         """
+        if self.sqlite_store is not None:
+            sessions = [
+                {
+                    "key": record.key,
+                    "created_at": record.created_at.isoformat() if record.created_at else None,
+                    "updated_at": record.updated_at.isoformat() if record.updated_at else None,
+                    "path": None,
+                }
+                for record in self.sqlite_store.list_sessions(archived=False)
+            ]
+            return sorted(sessions, key=lambda x: x.get("updated_at") or "", reverse=True)
+
         sessions = []
 
         for path in self.sessions_dir.glob("*.jsonl"):

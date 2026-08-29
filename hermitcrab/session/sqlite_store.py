@@ -24,9 +24,11 @@ class SQLiteSessionStore:
     def __init__(self, path: str | Path, *, require_fts5: bool = False) -> None:
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        self.conn: sqlite3.Connection | None = sqlite3.connect(self.path)
+        self.conn: sqlite3.Connection | None = sqlite3.connect(self.path, check_same_thread=False)
         self.conn.row_factory = sqlite3.Row
         self.conn.execute("PRAGMA foreign_keys = ON")
+        self.conn.execute("PRAGMA journal_mode = WAL")
+        self.conn.execute("PRAGMA busy_timeout = 5000")
         self.fts_enabled = False
         self.fts_error: str | None = None
         self._create_schema()

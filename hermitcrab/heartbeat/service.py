@@ -69,7 +69,7 @@ class HeartbeatService:
         self.model = model
         self.on_execute = on_execute
         self.on_notify = on_notify
-        self.interval_s = interval_s
+        self.interval_s = max(1, interval_s)
         self.enabled = enabled
         self._running = False
         self._task: asyncio.Task | None = None

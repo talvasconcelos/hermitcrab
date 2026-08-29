@@ -38,6 +38,18 @@ def test_session_manager_sqlite_save_is_idempotent(tmp_path) -> None:
     assert [message.content for message in messages] == ["first"]
 
 
+def test_session_manager_list_sessions_reads_sqlite(tmp_path) -> None:
+    with SQLiteSessionStore(tmp_path / "sessions.sqlite3") as store:
+        manager = SessionManager(tmp_path, sqlite_store=store)
+        session = manager.get_or_create("telegram:tal")
+        session.add_message("user", "hello")
+        manager.save(session)
+
+        listed = manager.list_sessions()
+
+    assert [item["key"] for item in listed] == ["telegram:tal"]
+
+
 def test_session_manager_marks_sqlite_session_archived(tmp_path) -> None:
     with SQLiteSessionStore(tmp_path / "sessions.sqlite3") as store:
         manager = SessionManager(tmp_path, sqlite_store=store)

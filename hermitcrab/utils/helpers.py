@@ -23,12 +23,16 @@ def get_data_path() -> Path:
 
 
 def safe_filename(name: str) -> str:
-    """Convert a string to a safe filename."""
-    # Replace unsafe characters
+    """Convert a string to a safe filename.
+
+    Rejects ``.``/``..``/empty and strips leading dots so callers cannot craft a
+    hidden file or a path-traversal component.
+    """
     unsafe = '<>:"/\\|?*'
     for char in unsafe:
         name = name.replace(char, "_")
-    return name.strip()
+    name = name.strip().lstrip(".")
+    return name or "_"
 
 
 def journal_day_wikilink(value: datetime | date | str) -> str:
