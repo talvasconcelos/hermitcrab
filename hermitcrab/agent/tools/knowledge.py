@@ -212,7 +212,7 @@ class KnowledgeIngestURLTool(Tool):
         self, url: str, category: str = "articles", tags: list[str] | None = None, **kwargs: Any
     ) -> str:
         try:
-            item = self.knowledge.ingest_from_url(
+            item = await self.knowledge.ingest_from_url(
                 url=url,
                 category=category,
                 tags=tags,

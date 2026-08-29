@@ -502,7 +502,7 @@ class KnowledgeStore:
             logger.error(f"Failed to ingest knowledge item: {e}")
             return None
 
-    def ingest_from_url(
+    async def ingest_from_url(
         self,
         url: str,
         category: str = "articles",
@@ -527,20 +527,19 @@ class KnowledgeStore:
         # Import here to avoid circular dependency
         from hermitcrab.agent.tools.web import WebFetchTool
 
-        # Fetch and extract content
+        # Fetch and extract content (SSRF-validated, bounded download).
         tool = WebFetchTool()
-        result = tool._fetch_url(url)
+        result = await tool.fetch(url, max_chars=tool.max_chars)
 
-        if not result or "error" in result:
-            logger.error(f"Failed to fetch URL: {result}")
+        if not result.get("ok"):
+            logger.error("Failed to fetch URL {}: {}", url, result.get("error"))
             return None
 
-        # Extract title and content from result
-        title = result.get("title", url)
-        content = result.get("content", result.get("text", ""))
+        title = result.get("title") or url
+        content = result.get("text") or ""
 
         if not content:
-            logger.error("No content extracted from URL")
+            logger.error("No content extracted from URL {}", url)
             return None
 
         return self.ingest(
