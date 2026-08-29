@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import re
+import uuid
 
 from loguru import logger
 from telegram import BotCommand, ReplyParameters, Update
@@ -418,9 +419,10 @@ class TelegramChannel(BaseChannel):
                 from pathlib import Path
 
                 media_dir = Path.home() / ".hermitcrab" / "media"
-                media_dir.mkdir(parents=True, exist_ok=True)
+                media_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
 
-                file_path = media_dir / f"{media_file.file_id[:16]}{ext}"
+                # UUID-based names avoid 16-char file_id prefix collisions.
+                file_path = media_dir / f"{uuid.uuid4().hex}{ext}"
                 await file.download_to_drive(str(file_path))
 
                 media_paths.append(str(file_path))
@@ -432,7 +434,7 @@ class TelegramChannel(BaseChannel):
                     transcriber = GroqTranscriptionProvider(api_key=self.groq_api_key)
                     transcription = await transcriber.transcribe(file_path)
                     if transcription:
-                        logger.info("Transcribed {}: {}...", media_type, transcription[:50])
+                        logger.info("Transcribed {} ({} chars)", media_type, len(transcription))
                         content_parts.append(f"[transcription: {transcription}]")
                     else:
                         content_parts.append(f"[{media_type}: {file_path}]")

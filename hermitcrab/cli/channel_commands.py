@@ -23,7 +23,7 @@ def channels_status():
     table.add_column("Configuration", style="yellow")
 
     tg = config.channels.telegram
-    tg_config = f"token: {tg.token[:10]}..." if tg.token else "[dim]not configured[/dim]"
+    tg_config = "token: configured" if tg.token else "[dim]not configured[/dim]"
     table.add_row("Telegram", "✓" if tg.enabled else "✗", tg_config)
 
     em = config.channels.email
