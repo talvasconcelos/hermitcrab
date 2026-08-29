@@ -4,6 +4,7 @@ from typing import Any
 
 from hermitcrab.agent.knowledge import KnowledgeStore
 from hermitcrab.agent.tools.base import Tool
+from hermitcrab.agent.tools.web import SECURITY_WARNING, _sanitize_web_content
 
 
 class KnowledgeSearchTool(Tool):
@@ -74,9 +75,14 @@ class KnowledgeSearchTool(Tool):
                 output_lines.append("")
                 output_lines.append(f"Match reasons: {', '.join(result.match_reasons)}")
                 output_lines.append("")
-                # Include truncated content snippet
-                snippet = result.item.content[:500]
-                if len(result.item.content) > 500:
+                # Include truncated content snippet. URL-derived items are untrusted:
+                # sanitize and warn at the retrieval boundary, matching web_fetch.
+                content = result.item.content
+                if result.item.metadata.get("untrusted"):
+                    output_lines.append(SECURITY_WARNING)
+                    content = _sanitize_web_content(content)
+                snippet = content[:500]
+                if len(content) > 500:
                     snippet += "..."
                 output_lines.append(snippet)
                 output_lines.append("")

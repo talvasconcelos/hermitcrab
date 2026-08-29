@@ -425,6 +425,7 @@ class KnowledgeStore:
         source: str = "",
         tags: list[str] | None = None,
         generate_summary: bool = False,
+        untrusted: bool = False,
     ) -> KnowledgeItem | None:
         """
         Ingest new content into the knowledge base.
@@ -442,6 +443,8 @@ class KnowledgeStore:
             source: Optional source URL or reference.
             tags: Optional tags.
             generate_summary: If True, attempt to generate summary (requires LLM).
+            untrusted: Mark content as untrusted (e.g. fetched from a URL) so retrieval
+                sanitizes it and warns the model.
 
         Returns:
             Created KnowledgeItem or None on failure.
@@ -484,6 +487,8 @@ class KnowledgeStore:
             metadata["source"] = source
         if tags:
             metadata["tags"] = tags
+        if untrusted:
+            metadata["untrusted"] = True
 
         # Write file
         try:
@@ -549,6 +554,7 @@ class KnowledgeStore:
             item_type="article",
             source=url,
             tags=tags,
+            untrusted=True,
         )
 
     def get_stats(self) -> dict[str, Any]:
