@@ -448,7 +448,13 @@ class TelegramChannel(BaseChannel):
 
         content = "\n".join(content_parts) if content_parts else "[empty message]"
 
-        logger.debug("Telegram message from {}: {}...", sender_id, content[:50])
+        # Log metadata only: inbound content (including voice transcriptions) is never logged.
+        logger.debug(
+            "Telegram message from {} ({} chars, {} media)",
+            sender_id,
+            len(content),
+            len(media_paths),
+        )
 
         # Start typing indicator before processing
         self._start_typing(str_chat_id)

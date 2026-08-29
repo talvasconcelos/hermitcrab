@@ -1,7 +1,9 @@
+import io
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from loguru import logger
 
 from hermitcrab.channels.telegram import TelegramChannel
 from hermitcrab.config.schema import TelegramConfig
@@ -91,4 +93,49 @@ async def test_authorized_message_starts_typing_and_publishes() -> None:
 
     channel._start_typing.assert_called_once_with("123")
     channel._stop_typing.assert_not_called()
+    bus.publish_inbound.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_voice_transcription_content_is_not_logged(monkeypatch) -> None:
+    bus = SimpleNamespace(publish_inbound=AsyncMock())
+    channel = TelegramChannel(TelegramConfig(allow_from=["111"]), bus)
+    file_obj = SimpleNamespace(download_to_drive=AsyncMock())
+    channel._app = SimpleNamespace(bot=SimpleNamespace(get_file=AsyncMock(return_value=file_obj)))
+    channel._start_typing = MagicMock()
+    channel._stop_typing = MagicMock()
+
+    class FakeTranscriber:
+        def __init__(self, api_key: str = "") -> None:
+            pass
+
+        async def transcribe(self, path) -> str:
+            return "SUPER SECRET VOICE CONTENT"
+
+    monkeypatch.setattr(
+        "hermitcrab.providers.transcription.GroqTranscriptionProvider", FakeTranscriber
+    )
+
+    message = SimpleNamespace(
+        chat_id=123,
+        text=None,
+        caption=None,
+        photo=None,
+        voice=SimpleNamespace(file_id="voice_file", mime_type="audio/ogg"),
+        audio=None,
+        document=None,
+        message_id=3,
+        chat=SimpleNamespace(type="private"),
+    )
+    user = SimpleNamespace(id=111, username="tal", first_name="Tal")
+    update = SimpleNamespace(message=message, effective_user=user)
+
+    buf = io.StringIO()
+    handler_id = logger.add(buf, level="DEBUG")
+    try:
+        await channel._on_message(update, None)
+    finally:
+        logger.remove(handler_id)
+
+    assert "SUPER SECRET VOICE CONTENT" not in buf.getvalue()
     bus.publish_inbound.assert_called_once()
