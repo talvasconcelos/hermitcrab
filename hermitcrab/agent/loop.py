@@ -77,6 +77,7 @@ from hermitcrab.agent.reminders import ReminderStore
 from hermitcrab.agent.session_lifecycle import SessionLifecycleManager
 from hermitcrab.agent.skill_runtime import SkillRuntimeManager
 from hermitcrab.agent.subagent import SubagentManager
+from hermitcrab.agent.tools.context import set_turn_context
 from hermitcrab.agent.tools.cron import CronTool
 from hermitcrab.agent.tools.filesystem import EditFileTool, ListDirTool, ReadFileTool, WriteFileTool
 from hermitcrab.agent.tools.knowledge import (
@@ -436,6 +437,15 @@ class AgentLoop:
         spawn_brief: str | None = None,
     ) -> None:
         """Update context for all tools that need routing info."""
+        delivery_channel, delivery_chat_id = self._resolve_reminder_delivery_target(channel, chat_id)
+        set_turn_context(
+            channel=channel,
+            chat_id=chat_id,
+            message_id=message_id,
+            brief=spawn_brief,
+            delivery_channel=delivery_channel,
+            delivery_chat_id=delivery_chat_id,
+        )
         if message_tool := self.tools.get("message"):
             if isinstance(message_tool, MessageTool):
                 message_tool.set_context(channel, chat_id, message_id)
@@ -449,10 +459,6 @@ class AgentLoop:
                 cron_tool.set_context(channel, chat_id)
         if reminder_tool := self.tools.get("reminder"):
             if isinstance(reminder_tool, ReminderTool):
-                delivery_channel, delivery_chat_id = self._resolve_reminder_delivery_target(
-                    channel,
-                    chat_id,
-                )
                 reminder_tool.set_context(
                     channel,
                     chat_id,

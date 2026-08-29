@@ -3,6 +3,7 @@
 from typing import TYPE_CHECKING, Any
 
 from hermitcrab.agent.tools.base import Tool
+from hermitcrab.agent.tools.context import get_turn_context
 
 if TYPE_CHECKING:
     from hermitcrab.agent.subagent import SubagentManager
@@ -75,12 +76,16 @@ class SpawnTool(Tool):
         **kwargs: Any,
     ) -> str:
         """Spawn a subagent to execute the given task."""
+        ctx = get_turn_context()
+        origin_channel = ctx.channel or self._origin_channel
+        origin_chat_id = ctx.chat_id or self._origin_chat_id
+        brief = ctx.brief if ctx.brief is not None else self._brief
         return await self._manager.spawn(
             task=task,
             label=label,
             model=model,
             profile=profile,
-            origin_channel=self._origin_channel,
-            origin_chat_id=self._origin_chat_id,
-            brief=self._brief,
+            origin_channel=origin_channel,
+            origin_chat_id=origin_chat_id,
+            brief=brief,
         )

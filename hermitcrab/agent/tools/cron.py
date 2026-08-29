@@ -3,6 +3,7 @@
 from typing import Any
 
 from hermitcrab.agent.tools.base import Tool
+from hermitcrab.agent.tools.context import get_turn_context
 from hermitcrab.cron.service import CronService
 from hermitcrab.cron.types import CronSchedule
 
@@ -100,7 +101,10 @@ class CronTool(Tool):
     ) -> str:
         if not message:
             return "Error: message is required for add"
-        if not self._channel or not self._chat_id:
+        ctx = get_turn_context()
+        channel = ctx.channel or self._channel
+        chat_id = ctx.chat_id or self._chat_id
+        if not channel or not chat_id:
             return "Error: no session context (channel/chat_id)"
         if tz and not cron_expr:
             return "Error: tz can only be used with cron_expr"
@@ -132,8 +136,8 @@ class CronTool(Tool):
                 schedule=schedule,
                 message=message,
                 deliver=True,
-                channel=self._channel,
-                to=self._chat_id,
+                channel=channel,
+                to=chat_id,
                 delete_after_run=delete_after,
             )
         except ValueError as exc:

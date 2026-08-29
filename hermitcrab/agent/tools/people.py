@@ -7,6 +7,7 @@ from typing import Any
 from hermitcrab.agent.people import PeopleStore
 from hermitcrab.agent.reminders import ReminderStore
 from hermitcrab.agent.tools.base import Tool
+from hermitcrab.agent.tools.context import get_turn_context
 
 
 class PersonProfileTool(Tool):
@@ -314,7 +315,10 @@ class PersonProfileTool(Tool):
         if action == "follow_up":
             if self.reminders is None:
                 return "Error: reminder support is not available"
-            if not self._channel or not self._chat_id:
+            ctx = get_turn_context()
+            channel = ctx.channel or self._channel
+            chat_id = ctx.chat_id or self._chat_id
+            if not channel or not chat_id:
                 return "Error: no session context (channel/chat_id)"
             lookup = query.strip() or name.strip()
             if not lookup:
@@ -342,8 +346,8 @@ class PersonProfileTool(Tool):
                     title=reminder_title,
                     message=reminder_message,
                     schedule_kind=schedule_kind,
-                    channel=self._channel,
-                    chat_id=self._chat_id,
+                    channel=channel,
+                    chat_id=chat_id,
                     at=at or None,
                     event_at=event_at or None,
                     remind_offset_minutes=remind_offset_minutes,

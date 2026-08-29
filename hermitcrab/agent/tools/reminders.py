@@ -6,6 +6,7 @@ from typing import Any
 
 from hermitcrab.agent.reminders import ReminderStore
 from hermitcrab.agent.tools.base import Tool
+from hermitcrab.agent.tools.context import get_turn_context
 
 
 class ReminderTool(Tool):
@@ -182,7 +183,12 @@ class ReminderTool(Tool):
         cron_expr: str,
         tz: str,
     ) -> str:
-        if not self._channel or not self._chat_id:
+        ctx = get_turn_context()
+        channel = ctx.channel or self._channel
+        chat_id = ctx.chat_id or self._chat_id
+        delivery_channel = ctx.delivery_channel or self._delivery_channel or channel
+        delivery_chat_id = ctx.delivery_chat_id or self._delivery_chat_id or chat_id
+        if not channel or not chat_id:
             return "Error: no session context (channel/chat_id)"
         if not title.strip():
             return "Error: title is required"
@@ -195,8 +201,8 @@ class ReminderTool(Tool):
                 title=title.strip(),
                 message=message.strip(),
                 schedule_kind=schedule_kind,
-                channel=self._delivery_channel or self._channel,
-                chat_id=self._delivery_chat_id or self._chat_id,
+                channel=delivery_channel,
+                chat_id=delivery_chat_id,
                 at=at or None,
                 event_at=event_at or None,
                 remind_offset_minutes=remind_offset_minutes,

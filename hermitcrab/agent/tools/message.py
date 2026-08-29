@@ -3,6 +3,7 @@
 from typing import Any, Awaitable, Callable
 
 from hermitcrab.agent.tools.base import Tool
+from hermitcrab.agent.tools.context import get_turn_context
 from hermitcrab.bus.events import OutboundMessage
 
 
@@ -84,9 +85,10 @@ class MessageTool(Tool):
         media: list[str] | None = None,
         **kwargs: Any
     ) -> str:
-        channel = channel or self._default_channel
-        chat_id = chat_id or self._default_chat_id
-        message_id = message_id or self._default_message_id
+        ctx = get_turn_context()
+        channel = channel or ctx.channel or self._default_channel
+        chat_id = chat_id or ctx.chat_id or self._default_chat_id
+        message_id = message_id or ctx.message_id or self._default_message_id
 
         if not channel or not chat_id:
             return "Error: No target channel/chat specified"
