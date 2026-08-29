@@ -57,16 +57,7 @@ class ChannelManager:
             except ImportError as e:
                 logger.warning("Telegram channel not available: {}", e)
 
-        # Email channel
-        if self.config.channels.email.enabled:
-            try:
-                from hermitcrab.channels.email import EmailChannel
-                self.channels["email"] = EmailChannel(
-                    self.config.channels.email, self.bus
-                )
-                logger.info("Email channel enabled")
-            except ImportError as e:
-                logger.warning("Email channel not available: {}", e)
+        # Email channel was decommissioned; only its inert config tombstone remains.
 
         # Nostr channel
         if self.config.channels.nostr.enabled:

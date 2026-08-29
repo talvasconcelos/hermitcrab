@@ -26,7 +26,7 @@ Back up `~/.hermitcrab/` and you have the config, system guidance, identities, m
 - Remembers things in **plain, human-readable Markdown files** (Obsidian compatible, git-friendly)  
 - Can **distill** conversations into facts, tasks, decisions, goals, and reflections when that optional background pass is enabled  
 - **Reflects** on itself - spots patterns, mistakes, contradictions, and suggests improvements  
-- Talks via **Nostr** (primary), Telegram, email, or plain CLI - your choice  
+- Talks via **Nostr** (primary), Telegram, or plain CLI - your choice  
 - Stays tiny, fast, and cheap - no 100k+ line monolith
 - Aims to stay powerful for operators while still being approachable for normal household use
 
@@ -253,7 +253,6 @@ Distillation is conservative and optional by design. Explicit memory writes rema
 
 - **Nostr** (default / primary) - encrypted DMs via NIP-04 or modern NIP-17  
 - **Telegram** - classic bot  
-- **Email** - IMAP/SMTP  
 - **CLI** - quick local chats
 
 The gateway can route channel traffic to isolated identities. CLI and `config.json` remain
@@ -313,7 +312,7 @@ HermitCrab is intentionally kept lean enough to read, debug, and adapt without i
 ```
 hermitcrab/
 ├── agent/         # loop, tools, memory handling
-├── channels/      # Nostr, Telegram, email, CLI
+├── channels/      # Nostr, Telegram, CLI
 ├── providers/     # LLM abstraction (litellm + fallbacks)
 ├── config/        # typed config loading
 ├── cli/           # typer-based interface

@@ -495,7 +495,7 @@ class AgentLoop:
 
         enabled_external_channels: set[str] = set()
         if self.channels_config is not None:
-            for name in ("telegram", "email", "nostr"):
+            for name in ("telegram", "nostr"):
                 cfg = getattr(self.channels_config, name, None)
                 if getattr(cfg, "enabled", False):
                     enabled_external_channels.add(name)

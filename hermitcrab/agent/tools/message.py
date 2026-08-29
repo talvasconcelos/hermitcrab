@@ -64,7 +64,7 @@ class MessageTool(Tool):
                 },
                 "channel": {
                     "type": "string",
-                    "description": "Optional: target channel (cli, telegram, email, nostr)"
+                    "description": "Optional: target channel (cli, telegram, nostr)"
                 },
                 "chat_id": {
                     "type": "string",

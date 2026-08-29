@@ -23,7 +23,6 @@ FORBIDDEN_PREFIXES: dict[str, tuple[str, ...]] = {
     "hermitcrab.agent.tools": (
         "hermitcrab.channels.telegram",
         "hermitcrab.channels.nostr",
-        "hermitcrab.channels.email",
         "hermitcrab.cli",
     ),
 }
