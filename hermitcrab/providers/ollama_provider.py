@@ -346,6 +346,7 @@ class OllamaProvider(LLMProvider):
             fallback = True
 
         provider_options = dict(request_config.get("provider_options") or {})
+        provider_options.pop("provider", None)  # routing hint, not an Ollama option
         option_max_tokens = provider_options.pop("max_tokens", None)
         if option_max_tokens is not None and "num_predict" not in provider_options:
             provider_options["num_predict"] = option_max_tokens

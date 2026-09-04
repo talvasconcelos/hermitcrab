@@ -85,6 +85,9 @@ def make_provider(config: Config, console: Any):
         request_provider = config.get_provider(request_model)
         request_provider_name = config.get_provider_name(request_model)
         request_api_base = config.get_api_base(request_model)
+        provider_options = dict(resolved_request.provider_options or {})
+        if request_provider_name == "ollama":
+            provider_options.setdefault("num_ctx", config.agents.defaults.context_window)
         return {
             "model": resolved_request.model or request_model,
             "api_key": request_provider.api_key if request_provider else None,
@@ -95,7 +98,7 @@ def make_provider(config: Config, console: Any):
                 configured_headers=request_provider.extra_headers if request_provider else None,
             ),
             "provider_name": request_provider_name,
-            "provider_options": resolved_request.provider_options or {},
+            "provider_options": provider_options,
             "reasoning_effort": resolved_request.reasoning_effort,
         }
 

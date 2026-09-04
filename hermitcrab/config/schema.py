@@ -286,6 +286,13 @@ class AgentDefaults(Base):
     memory_context_max_chars: int = 10000
     memory_context_max_items_per_category: int = 20
     memory_context_max_item_chars: int = 500
+    context_window: int = 32768  # Requested model context window (num_ctx for Ollama)
+
+    @model_validator(mode="after")
+    def validate_context_window(self) -> "AgentDefaults":
+        """Clamp the context window to a usable lower bound."""
+        self.context_window = max(1024, self.context_window)
+        return self
 
 
 class SystemConfig(Base):
