@@ -286,12 +286,13 @@ class AgentDefaults(Base):
     memory_context_max_chars: int = 10000
     memory_context_max_items_per_category: int = 20
     memory_context_max_item_chars: int = 500
-    context_window: int = 32768  # Requested model context window (num_ctx for Ollama)
+    context_window: int | None = None  # Requested context window; None = derive from model
 
     @model_validator(mode="after")
     def validate_context_window(self) -> "AgentDefaults":
-        """Clamp the context window to a usable lower bound."""
-        self.context_window = max(1024, self.context_window)
+        """Clamp an explicit context window to a usable lower bound."""
+        if self.context_window is not None:
+            self.context_window = max(1024, self.context_window)
         return self
 
 
@@ -572,6 +573,37 @@ class NostrIdentityResolution:
     reason: str | None = None
 
 
+# Approximate context windows for common local model families, used only as a
+# fallback when resolving an auto context window. Live probing (e.g. Ollama
+# /api/show) is the precise source; this table keeps resolution synchronous.
+_MODEL_CONTEXT_FALLBACK: dict[str, int] = {
+    "qwen": 262_144,
+    "gemma": 262_144,
+    "llama": 131_072,
+    "deepseek": 131_072,
+    "kimi": 131_072,
+    "glm": 131_072,
+    "minimax": 131_072,
+    "nemotron": 131_072,
+    "granite": 131_072,
+    "mistral": 32_768,
+    "phi": 16_384,
+    "claude": 200_000,
+    "gpt": 400_000,
+}
+DEFAULT_CONTEXT_WINDOW = 32_768
+CONTEXT_BUFFER_RATIO = 0.8
+
+
+def _model_context_length(model_name: str | None) -> int:
+    """Best-effort context length for a model id, longest family key first."""
+    lowered = (model_name or "").lower()
+    for key in sorted(_MODEL_CONTEXT_FALLBACK, key=len, reverse=True):
+        if key in lowered:
+            return _MODEL_CONTEXT_FALLBACK[key]
+    return DEFAULT_CONTEXT_WINDOW
+
+
 class Config(BaseSettings):
     """Root configuration for hermitcrab."""
 
@@ -804,6 +836,23 @@ class Config(BaseSettings):
             )
 
         return ResolvedModelConfig(model=ref)
+
+    def resolve_context_window(self, model: str | None = None) -> int:
+        """Resolve the effective context window for a model reference.
+
+        Priority: per-model ``providerOptions.num_ctx``, then an explicit
+        ``agents.defaults.context_window`` (hardware override), then the model's
+        known context length with a 20% buffer so the generated reply and tool
+        schemas never crowd the window.
+        """
+        resolved = self.resolve_model_config(model)
+        per_model_num_ctx = (resolved.provider_options or {}).get("num_ctx")
+        if isinstance(per_model_num_ctx, int):
+            return max(1024, per_model_num_ctx)
+        if self.agents.defaults.context_window is not None:
+            return self.agents.defaults.context_window
+        detected = _model_context_length(resolved.model or model)
+        return max(1024, int(detected * CONTEXT_BUFFER_RATIO))
 
     def _match_provider(
         self, model: str | None = None

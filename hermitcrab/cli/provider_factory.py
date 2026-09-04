@@ -87,7 +87,7 @@ def make_provider(config: Config, console: Any):
         request_api_base = config.get_api_base(request_model)
         provider_options = dict(resolved_request.provider_options or {})
         if request_provider_name == "ollama":
-            provider_options.setdefault("num_ctx", config.agents.defaults.context_window)
+            provider_options.setdefault("num_ctx", config.resolve_context_window(request_model))
         return {
             "model": resolved_request.model or request_model,
             "api_key": request_provider.api_key if request_provider else None,

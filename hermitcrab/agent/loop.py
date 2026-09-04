@@ -216,6 +216,7 @@ class AgentLoop:
         memory_context_max_chars: int = 12000,
         memory_context_max_items_per_category: int = 25,
         memory_context_max_item_chars: int = 600,
+        prompt_token_budget: int = 6000,
         system_root: Path | None = None,
         identity_name: str = "owner",
         identity_root: Path | None = None,
@@ -276,6 +277,7 @@ class AgentLoop:
             model_aliases=self.model_aliases,
             named_models=self.named_models,
             system_root=system_root,
+            prompt_token_budget=prompt_token_budget,
         )
         self.skill_runtime = SkillRuntimeManager(self.identity_root, self.context.skills)
         self.sessions = session_manager or create_session_manager(self.identity_root)

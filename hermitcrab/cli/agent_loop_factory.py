@@ -115,6 +115,12 @@ def build_agent_loop_kwargs(
     """Build the shared AgentLoop configuration used by CLI entrypoints."""
     target_identity_name = identity_name or config.owner_identity_name
     target_identity_root = identity_root or workspace or config.workspace_path
+    # Budget the system-prompt + memory + history surface against the effective
+    # context window, reserving headroom for tool schemas and the generated reply
+    # (both are sent outside this surface). Keeps history retention proportional
+    # to the window instead of a fixed 6000-token planning budget.
+    context_window = config.resolve_context_window()
+    prompt_token_budget = max(6000, context_window - 6000 - config.agents.defaults.max_tokens)
     return {
         "provider": provider,
         "workspace": target_identity_root,
@@ -148,5 +154,6 @@ def build_agent_loop_kwargs(
         "memory_context_max_chars": config.agents.defaults.memory_context_max_chars,
         "memory_context_max_items_per_category": config.agents.defaults.memory_context_max_items_per_category,
         "memory_context_max_item_chars": config.agents.defaults.memory_context_max_item_chars,
+        "prompt_token_budget": prompt_token_budget,
         "reflection_config": _build_reflection_config(config),
     }
