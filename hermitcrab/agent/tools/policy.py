@@ -23,6 +23,7 @@ class ToolMetadata:
     permission_level: ToolPermissionLevel = ToolPermissionLevel.READ_ONLY
     available_to_subagents: bool = True
     tags: tuple[str, ...] = ()
+    deferrable: bool = False  # Full schema withheld until activated via tool_search
 
 
 @dataclass(frozen=True, slots=True)
@@ -71,9 +72,11 @@ _DEFAULT_TOOL_METADATA: dict[str, ToolMetadata] = {
     "knowledge_stats": ToolMetadata(ToolPermissionLevel.READ_ONLY, False, ("knowledge", "read")),
     "list_show": ToolMetadata(ToolPermissionLevel.READ_ONLY, False, ("lists", "read")),
     "person_profile": ToolMetadata(
-        ToolPermissionLevel.WORKSPACE_WRITE, False, ("people", "write")
+        ToolPermissionLevel.WORKSPACE_WRITE, False, ("people", "write"), deferrable=True
     ),
-    "reminder": ToolMetadata(ToolPermissionLevel.WORKSPACE_WRITE, False, ("reminders", "write")),
+    "reminder": ToolMetadata(
+        ToolPermissionLevel.WORKSPACE_WRITE, False, ("reminders", "write"), deferrable=True
+    ),
     "write_file": ToolMetadata(ToolPermissionLevel.WORKSPACE_WRITE, True, ("filesystem", "write")),
     "edit_file": ToolMetadata(ToolPermissionLevel.WORKSPACE_WRITE, True, ("filesystem", "write")),
     "write_fact": ToolMetadata(ToolPermissionLevel.WORKSPACE_WRITE, False, ("memory", "write")),
@@ -87,7 +90,7 @@ _DEFAULT_TOOL_METADATA: dict[str, ToolMetadata] = {
         ToolPermissionLevel.WORKSPACE_WRITE, False, ("knowledge", "write")
     ),
     "knowledge_ingest_url": ToolMetadata(
-        ToolPermissionLevel.NETWORK, False, ("knowledge", "write", "network")
+        ToolPermissionLevel.NETWORK, False, ("knowledge", "write", "network"), deferrable=True
     ),
     "list_add_items": ToolMetadata(ToolPermissionLevel.WORKSPACE_WRITE, False, ("lists", "write")),
     "list_set_item_status": ToolMetadata(
@@ -100,16 +103,17 @@ _DEFAULT_TOOL_METADATA: dict[str, ToolMetadata] = {
     "web_search": ToolMetadata(ToolPermissionLevel.NETWORK, True, ("web", "network")),
     "web_fetch": ToolMetadata(ToolPermissionLevel.NETWORK, True, ("web", "network")),
     "exec": ToolMetadata(ToolPermissionLevel.DANGEROUS_EXEC, True, ("shell", "exec")),
-    "message": ToolMetadata(ToolPermissionLevel.COORDINATOR, False, ("coordination",)),
-    "spawn": ToolMetadata(ToolPermissionLevel.COORDINATOR, False, ("coordination",)),
-    "cron": ToolMetadata(ToolPermissionLevel.COORDINATOR, False, ("coordination",)),
+    "message": ToolMetadata(ToolPermissionLevel.COORDINATOR, False, ("coordination",), deferrable=True),
+    "spawn": ToolMetadata(ToolPermissionLevel.COORDINATOR, False, ("coordination",), deferrable=True),
+    "cron": ToolMetadata(ToolPermissionLevel.COORDINATOR, False, ("coordination",), deferrable=True),
+    "tool_search": ToolMetadata(ToolPermissionLevel.READ_ONLY, True, ("coordination",)),
 }
 
 
 def get_default_tool_metadata(tool_name: str) -> ToolMetadata:
     """Return default metadata for a tool name."""
     if tool_name.startswith("mcp_"):
-        return ToolMetadata(ToolPermissionLevel.NETWORK, False, ("mcp", "network"))
+        return ToolMetadata(ToolPermissionLevel.NETWORK, False, ("mcp", "network"), deferrable=True)
     return _DEFAULT_TOOL_METADATA.get(
         tool_name,
         ToolMetadata(ToolPermissionLevel.READ_ONLY, False),

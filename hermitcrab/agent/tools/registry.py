@@ -46,6 +46,7 @@ class ToolRegistry:
         self._default_policy = default_policy
         self._audit_event = audit_event
         self._last_policy_hint: PolicyDenialHint | None = None
+        self._activated_deferred: set[str] = set()
 
     def register(self, tool: Tool, metadata: ToolMetadata | None = None) -> None:
         """Register a tool and its metadata."""
@@ -79,13 +80,66 @@ class ToolRegistry:
         return names
 
     def get_definitions(self, policy: ToolPermissionPolicy | None = None) -> list[dict[str, Any]]:
-        """Get tool definitions in OpenAI format, filtered by policy when provided."""
+        """Get tool definitions in OpenAI format, filtered by policy when provided.
+
+        Deferrable tools expose their full schema only after ``activate`` (via
+        ``tool_search``), so their cost is paid only once actually needed.
+        """
         effective_policy = policy or self._default_policy
         definitions: list[dict[str, Any]] = []
         for name, entry in self._tools.items():
+            if entry.metadata.deferrable and name not in self._activated_deferred:
+                continue
             if self._check_policy(name, entry.metadata, effective_policy) is None:
                 definitions.append(entry.tool.to_schema())
         return definitions
+
+    def deferred_entries(
+        self, policy: ToolPermissionPolicy | None = None
+    ) -> list[RegisteredTool]:
+        """Return deferrable tools allowed by policy, regardless of activation."""
+        effective_policy = policy or self._default_policy
+        entries: list[RegisteredTool] = []
+        for name, entry in self._tools.items():
+            if not entry.metadata.deferrable:
+                continue
+            if self._check_policy(name, entry.metadata, effective_policy) is None:
+                entries.append(entry)
+        return entries
+
+    def unactivated_deferred(
+        self, policy: ToolPermissionPolicy | None = None
+    ) -> list[RegisteredTool]:
+        """Return deferrable tools whose full schema is not yet exposed."""
+        return [
+            entry
+            for entry in self.deferred_entries(policy)
+            if entry.tool.name not in self._activated_deferred
+        ]
+
+    def activate(self, name: str) -> None:
+        """Expose a deferrable tool's schema for the rest of the conversation."""
+        self._activated_deferred.add(name)
+
+    def search_deferred(
+        self,
+        query: str,
+        limit: int = 5,
+        policy: ToolPermissionPolicy | None = None,
+    ) -> list[RegisteredTool]:
+        """Keyword-search unactivated deferrable tools, best matches first."""
+        terms = [term for term in str(query).lower().split() if term.strip()]
+        entries = self.unactivated_deferred(policy)
+        if not terms:
+            return entries[: max(1, limit)]
+        scored: list[tuple[int, str, RegisteredTool]] = []
+        for entry in entries:
+            haystack = f"{entry.tool.name} {entry.tool.description}".lower()
+            score = sum(1 for term in terms if term in haystack)
+            if score > 0:
+                scored.append((score, entry.tool.name, entry))
+        scored.sort(key=lambda item: (-item[0], item[1]))
+        return [entry for _, _, entry in scored[: max(1, limit)]]
 
     async def execute(
         self,

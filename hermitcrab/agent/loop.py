@@ -113,6 +113,7 @@ from hermitcrab.agent.tools.reminders import ReminderTool
 from hermitcrab.agent.tools.session_search import SessionSearchTool
 from hermitcrab.agent.tools.shell import ExecTool
 from hermitcrab.agent.tools.spawn import SpawnTool
+from hermitcrab.agent.tools.tool_search import ToolSearchTool
 from hermitcrab.agent.tools.web import WebFetchTool, WebSearchTool
 from hermitcrab.agent.turn_runner import TurnOutcome, TurnResult, TurnRunner, TurnRunnerConfig
 from hermitcrab.bus.events import InboundMessage, OutboundMessage
@@ -407,6 +408,7 @@ class AgentLoop:
             self.tools.register(CronTool(self.cron_service))
         if self.reminders is not None:
             self.tools.register(ReminderTool(self.reminders))
+        self.tools.register(ToolSearchTool(self.tools))
 
     async def _connect_mcp(self) -> None:
         """Connect to configured MCP servers (one-time, lazy)."""

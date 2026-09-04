@@ -21,10 +21,8 @@ class ShowListTool(Tool):
     @property
     def description(self) -> str:
         return (
-            "Show a generic user list stored in the first-class lists surface, such as groceries, car parts, gift ideas, "
-            "packing lists, school supplies, or errands. These are stored as updateable checklists. "
-            "Use for requests like 'what's still needed', "
-            "'show my list', or 'I'm at the supermarket, what do I need?'."
+            "Show an updateable checklist (groceries, gift ideas, packing lists, etc.). "
+            "Use for 'show my list' or 'what do I still need?'."
         )
 
     @property
@@ -90,8 +88,8 @@ class AddListItemsTool(Tool):
     @property
     def description(self) -> str:
         return (
-            "Add items to a generic checklist in the first-class lists surface. Creates the checklist if it does not exist yet. "
-            "Use for groceries, gift ideas, BBQ supplies, car parts, packing lists, and similar updateable lists."
+            "Add items to a checklist, creating it if it does not exist yet. "
+            "Use for updateable lists like groceries or gift ideas."
         )
 
     @property
