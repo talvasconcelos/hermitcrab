@@ -22,6 +22,15 @@ from hermitcrab.providers.base import (
 
 _OLLAMA_ALLOWED_ROLES = frozenset({"system", "user", "assistant", "tool"})
 
+# Ollama's `think` accepts a boolean (false disables thinking) or a string
+# level for thinking-capable models. Map the HermitCrab reasoning-effort enum.
+_THINK_BY_REASONING_EFFORT = {
+    "none": False,
+    "low": "low",
+    "medium": "medium",
+    "high": "high",
+}
+
 
 def _extract_image_data(url: str) -> str | None:
     if not url.startswith("data:image/") or "," not in url:
@@ -354,6 +363,10 @@ class OllamaProvider(LLMProvider):
         }
         if tools:
             body["tools"] = _convert_tools(tools)
+
+        think_setting = _THINK_BY_REASONING_EFFORT.get(effective_reasoning_effort)
+        if think_setting is not None:
+            body["think"] = think_setting
 
         headers = {
             "Content-Type": "application/json",
