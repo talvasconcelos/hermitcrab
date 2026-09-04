@@ -145,7 +145,7 @@ Then restart the gateway.
 
 ### Will upgrading preserve my data automatically?
 
-Beta releases may introduce breaking filesystem or config changes. Back up `~/.hermitcrab/`, read the migration notes for the release, then run `hermitcrab onboard` and copy data intentionally.
+Releases may introduce breaking filesystem or config changes. Back up `~/.hermitcrab/`, read the migration notes for the release, then run `hermitcrab onboard` and copy data intentionally.
 
 ### How do I know what changed?
 

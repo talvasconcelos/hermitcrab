@@ -5,8 +5,6 @@
 [![Python ≥3.11](https://img.shields.io/badge/python-≥3.11-blue)](https://python.org)
 [![MIT License](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 
-> Current release line: beta
-
 HermitCrab is usable, local-first, and already good for real daily workflows, with identity-scoped memory, modern Nostr routing, clearer operator diagnostics, and stronger permission/audit surfaces.
 
 ### What is HermitCrab, really?

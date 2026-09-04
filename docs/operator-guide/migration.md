@@ -1,7 +1,7 @@
 # Manual Migration
 
 HermitCrab's standard layout is `~/.hermitcrab/system/` plus
-`~/.hermitcrab/identities/<name>/`. Older beta installs used `workspace/` and sometimes
+`~/.hermitcrab/identities/<name>/`. Older installs used `workspace/` and sometimes
 `workspaces/<name>/`.
 
 There is no automatic in-place migration. The clean path is:

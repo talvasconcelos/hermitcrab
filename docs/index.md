@@ -40,7 +40,7 @@ Move your HermitCrab root anywhere — your agent picks up exactly where it left
 | [Gateway operations](operator-guide/gateway-operations.md) | Run and manage the long-running gateway service |
 | [Workspace model](operator-guide/workspace-model.md) | System and identity filesystem architecture |
 | [Backups and recovery](operator-guide/backups-and-recovery.md) | Protect and restore workspace data |
-| [Manual migration](operator-guide/migration.md) | Move data from older beta layouts |
+| [Manual migration](operator-guide/migration.md) | Move data from older layouts |
 | [Observability and audit](operator-guide/observability-audit.md) | Monitor health and inspect decisions |
 | [Incident playbook](operator-guide/incident-playbook.md) | Step-by-step recovery when things go wrong |
 

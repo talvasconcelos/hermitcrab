@@ -135,6 +135,5 @@ See `project/` for current planning direction.
 ## Getting help
 
 - Read `AGENTS.md` for repository guidance
-- Read `project/BETA3_ROADMAP.md` for current roadmap planning
 - Check existing issues and PRs on GitHub
 - Ask in project channels

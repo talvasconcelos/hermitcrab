@@ -2,6 +2,36 @@
 
 All notable changes to HermitCrab.
 
+## [0.1.0b5] — 2026-09-04
+
+### Added
+
+- **SQLite-backed session storage** — sessions now live in `sessions.sqlite3` with automatic one-time migration from legacy JSONL files (imported, backed up under `jsonl-migrated-backup/`, then marked complete). Faster listing, search, and export.
+- **Onboarding state gate** — new identities run a guided onboarding mode; `hermitcrab onboarding` (status/pause/resume/complete) manages it. Existing identities are unaffected.
+- **Configurable context window** — `agents.defaults.contextWindow` for an explicit override, or auto-derived from the model's known context length with a 20% buffer (fallback 32k). Per-model override via `providerOptions.num_ctx` or `model add --context-window`.
+- **Deferred tool schemas** — rarely-needed tools (reminders, people, subagents, message, cron, URL ingest, MCP) are withheld behind a `tool_search` discovery tool, cutting per-turn tool-schema tokens ~30% while keeping every capability reachable.
+- **Grounded reflection/distillation** — reflection and distillation decisions now require supporting evidence; low-value reflections are rejected.
+- **CLI** — `model add --context-window` and a "Context" column in `model list`.
+
+### Changed
+
+- **Email channel decommissioned** — operational email code removed; an inert config tombstone keeps old configs parseable.
+- **Ollama reasoning effort honored** — `reasoningEffort` now maps to Ollama's `think` parameter (previously ignored by the native provider).
+- **DST-safe cron** — schedules resolve and persist the local IANA timezone (`tzlocal`).
+- **CLI refactor** — commands split into focused modules; no user-facing behavior change.
+- **Hardened fresh installation** and bootstrap edge cases.
+
+### Fixed
+
+- **Shell**: argv-based execution; shell metacharacters require a separately-approved shell mode (closes an operator bypass).
+- **Web**: SSRF blocked (private/reserved IPs), redirects re-validated, and DNS rebinding closed by pinning to one validated address.
+- **Knowledge**: URL-derived items are marked untrusted and sanitized with a warning at retrieval.
+- **Nostr**: NIP-04 signatures verified before decrypt; relayed id must match the canonical id; nsec is never logged (npub only).
+- **Telegram**: fail-closed allowlists; inbound logs carry metadata only (never transcription content); UUID media names.
+- **Codex**: never downgrades TLS verification.
+- **Sessions**: WAL + busy-timeout, a single UTC clock, and hardened filenames/heartbeat bounds.
+- **Agent**: per-turn contextvars for send-tracking, destructive approval, and tool routing; subagent escalation validated against its profile.
+
 ## [0.1.0b4] — 2026-06-14
 
 ### Added
