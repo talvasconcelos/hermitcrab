@@ -153,7 +153,7 @@ def build_pending_work_hint(pending: PendingWork, current_request: str) -> str:
         lines.append(f"Last failure: {snippet(pending.last_failure, max_chars=240)}")
     if pending.planned_command and looks_like_confirmation(current_request):
         lines.append(
-            "If you retry the previously approved destructive command, use this exact command: "
+            "If you retry the previously approved command, use this exact command: "
             f"`{pending.planned_command}`"
         )
     lines.append(f"Current user message: {snippet(current_request, max_chars=180)}")
@@ -180,8 +180,11 @@ def should_resume_pending_work(pending: PendingWork, text: str | None) -> bool:
     """Decide whether coordinator-owned pending work should be re-injected."""
     if not isinstance(text, str) or not text.strip():
         return False
-    if "approval" in pending.last_failure.lower() and looks_like_confirmation(text):
-        return True
+    if "approval" in pending.last_failure.lower():
+        # An approval request only resumes when the user explicitly approves. A
+        # question, refusal, or new instruction is answered normally instead of
+        # re-running the blocked command, which otherwise loops forever.
+        return looks_like_confirmation(text)
     if has_structured_payload(text):
         return False
     if not relates_to_pending_work(pending, text):

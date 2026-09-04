@@ -133,6 +133,43 @@ def test_progress_heartbeat_message_includes_elapsed_seconds() -> None:
     assert message.endswith("elapsed)")
 
 
+def test_exec_approval_reason_distinguishes_destructive_from_shell_syntax() -> None:
+    assert (
+        TurnRunner._exec_approval_reason(
+            "Error: Command blocked by safety guard (destructive command requires explicit approval)"
+        )
+        == "destructive"
+    )
+    assert (
+        TurnRunner._exec_approval_reason(
+            "Error: Command blocked by safety guard (shell syntax requires explicit approval)"
+        )
+        == "shell_syntax"
+    )
+    assert TurnRunner._exec_approval_reason("ok") is None
+    assert TurnRunner._exec_approval_reason(None) is None
+
+
+def test_build_exec_approval_request_messages_shell_syntax_accurately() -> None:
+    shell_msg = TurnRunner._build_exec_approval_request(
+        "exec",
+        {"command": "which nak; nak --version 2>/dev/null"},
+        reason="shell_syntax",
+    )
+
+    assert "shell syntax" in shell_msg
+    assert "destructively" not in shell_msg
+    assert "which nak; nak --version 2>/dev/null" in shell_msg
+
+    destructive_msg = TurnRunner._build_exec_approval_request(
+        "exec",
+        {"command": "rm draft.md"},
+        reason="destructive",
+    )
+
+    assert "deleting" in destructive_msg
+
+
 async def test_run_records_tool_results_before_final_answer() -> None:
     runner = _runner(
         [

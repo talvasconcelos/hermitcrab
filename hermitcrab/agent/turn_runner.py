@@ -359,24 +359,40 @@ class TurnRunner:
         return None
 
     @staticmethod
-    def _needs_destructive_approval(result: str | None) -> bool:
-        return (
-            isinstance(result, str)
-            and "destructive command requires explicit approval" in result.lower()
-        )
+    def _exec_approval_reason(result: str | None) -> str | None:
+        """Return why an exec result needs approval, or None when it does not."""
+        if not isinstance(result, str):
+            return None
+        lowered = result.lower()
+        if "destructive command requires explicit approval" in lowered:
+            return "destructive"
+        if "shell syntax requires explicit approval" in lowered:
+            return "shell_syntax"
+        return None
 
     @staticmethod
-    def _build_destructive_approval_request(tool_name: str, arguments: dict[str, Any]) -> str | None:
-        """Turn blocked destructive actions into an explicit user confirmation request."""
+    def _build_exec_approval_request(
+        tool_name: str,
+        arguments: dict[str, Any],
+        *,
+        reason: str,
+    ) -> str | None:
+        """Turn a blocked exec action into an accurate user confirmation request."""
         if tool_name != "exec":
             return None
         command = arguments.get("command")
         if not isinstance(command, str) or not command.strip():
             return "I can do that, but it is a destructive action and I need your approval first. Reply yes to continue."
+        planned = f"Planned command:\n`{command.strip()}`\n\nReply with `yes` if you want me to run it."
+        if reason == "shell_syntax":
+            return (
+                "I can do that, but this command uses shell syntax (pipes, redirects, or operators), "
+                "which I need explicit approval to run through a shell.\n\n"
+                f"{planned}"
+            )
         return (
             "I can do that, but deleting or otherwise destructively changing files needs your approval first.\n\n"
-            f"Planned command:\n`{command.strip()}`\n\n"
-            "Reply with `yes` if you want me to run it."
+            f"{planned}"
         )
 
     @staticmethod
@@ -846,7 +862,8 @@ class TurnRunner:
             messages = self.context.add_tool_result(messages, tool_call.id, tool_call.name, result)
             tool_results.append((tool_call.name, result))
             executed_count += 1
-            if self._needs_destructive_approval(result):
+            approval_reason = self._exec_approval_reason(result)
+            if approval_reason:
                 if (
                     tool_call.name == "exec"
                     and isinstance(tool_call.arguments, dict)
@@ -863,9 +880,10 @@ class TurnRunner:
                             else []
                         ),
                     )
-                final_content = self._build_destructive_approval_request(
+                final_content = self._build_exec_approval_request(
                     tool_call.name,
                     tool_call.arguments if isinstance(tool_call.arguments, dict) else {},
+                    reason=approval_reason,
                 )
                 outcome = TurnOutcome.BLOCKED
                 break
