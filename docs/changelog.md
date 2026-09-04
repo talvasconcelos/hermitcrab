@@ -2,6 +2,12 @@
 
 All notable changes to HermitCrab.
 
+## [0.1.0b5.post1] — 2026-09-04
+
+### Fixed
+
+- **OpenRouter**: added the missing `fastapi` + `orjson` dependencies and raised the `litellm` floor to `>=1.92.0`, fixing empty replies and "kept acknowledging" when using OpenRouter models.
+
 ## [0.1.0b5] — 2026-09-04
 
 ### Added
