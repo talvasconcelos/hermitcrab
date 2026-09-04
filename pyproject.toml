@@ -23,7 +23,7 @@ classifiers = [
 
 dependencies = [
     "typer>=0.20.0,<1.0.0",
-    "litellm>=1.81.5,<2.0.0",
+    "litellm>=1.92.0,<2.0.0",
     # litellm's OpenRouter chat path imports these (declared only in its
     # 'proxy' extra), so they must be installed for OpenRouter to work.
     "fastapi>=0.136.3,<1.0",
