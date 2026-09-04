@@ -356,10 +356,14 @@ class ExecTool(Tool):
 
     @classmethod
     def _classify_command_risk(cls, command: str) -> CommandRisk:
-        """Classify a command by its likely mutation risk."""
-        if cls._requires_shell(command):
-            return "destructive"
+        """Classify a command by its likely mutation risk.
 
+        Shell syntax (pipes, redirects, operators) is a *separate* approval gate handled
+        in ``execute``; it does not by itself make a command destructive. A read-only
+        chain such as ``which nak; nak --version 2>/dev/null`` stays read-only, while a
+        chain that hides a destructive payload (``echo ok|sh``, ``git status;rm victim``)
+        remains destructive.
+        """
         try:
             tokens = shlex.split(command, posix=True)
         except ValueError:
@@ -371,11 +375,87 @@ class ExecTool(Tool):
         lowered = command.lower()
         first = Path(tokens[0]).name.lower()
 
+        if cls._requires_shell(command) and cls._shell_syntax_looks_destructive(command):
+            return "destructive"
         if cls._looks_destructive(first, lowered):
             return "destructive"
         if cls._looks_read_only(first, lowered):
             return "read_only"
         return "workspace_write"
+
+    @classmethod
+    def _shell_syntax_looks_destructive(cls, command: str) -> bool:
+        """Detect destructive content hidden behind shell operators/redirections.
+
+        Enforcement does not depend on this helper: any shell-syntax command still
+        requires explicit approval before running. This only upgrades a shell command to
+        ``destructive`` when it actually mutates state, so a read-only chain is reported
+        accurately instead of as a destructive action.
+        """
+        for segment in cls._shell_command_segments(command):
+            try:
+                tokens = shlex.split(segment, posix=True)
+            except ValueError:
+                tokens = segment.split()
+            if not tokens:
+                continue
+            first = Path(tokens[0]).name.lower()
+            if cls._looks_destructive(first, segment.lower()):
+                return True
+        return cls._shell_output_redirect_writes_file(command)
+
+    @classmethod
+    def _shell_command_segments(cls, command: str) -> list[str]:
+        """Split a shell command on operators while respecting quotes and escapes."""
+        segments: list[str] = []
+        current: list[str] = []
+        i = 0
+        quote: str | None = None
+        while i < len(command):
+            ch = command[i]
+            if quote is not None:
+                current.append(ch)
+                if ch == quote:
+                    quote = None
+                i += 1
+                continue
+            if ch in ("'", '"'):
+                quote = ch
+                current.append(ch)
+                i += 1
+                continue
+            if ch == "\\":
+                current.append(ch)
+                if i + 1 < len(command):
+                    current.append(command[i + 1])
+                    i += 2
+                else:
+                    i += 1
+                continue
+            if command.startswith("&&", i) or command.startswith("||", i):
+                segments.append("".join(current))
+                current = []
+                i += 2
+                continue
+            if ch in ";|&\n":
+                segments.append("".join(current))
+                current = []
+                i += 1
+                continue
+            current.append(ch)
+            i += 1
+        segments.append("".join(current))
+        return [segment.strip() for segment in segments if segment.strip()]
+
+    @classmethod
+    def _shell_output_redirect_writes_file(cls, command: str) -> bool:
+        """Return True when a redirect writes to a real file rather than a sink/fd."""
+        for match in re.finditer(r"\d*>>?\s*([^\s;|&<]+)", command):
+            target = match.group(1)
+            if target.startswith(("/dev/null", "/dev/stderr", "/dev/stdout", "&")):
+                continue
+            return True
+        return False
 
     @classmethod
     def _looks_destructive(cls, first: str, lowered: str) -> bool:

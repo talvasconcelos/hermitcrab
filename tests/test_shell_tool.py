@@ -21,6 +21,12 @@ def test_shell_metacharacter_chains_require_approval() -> None:
     assert ExecTool._classify_command_risk("echo eA==|base64 -d|sh") == "destructive"
 
 
+def test_read_only_shell_chains_are_not_classified_destructive() -> None:
+    assert ExecTool._classify_command_risk("which nak; nak --version 2>/dev/null") == "read_only"
+    assert ExecTool._classify_command_risk("ls -la ~/.hermitcrab/ 2>/dev/null") == "read_only"
+    assert ExecTool._classify_command_risk("grep -rl nsec ~/.hermitcrab/ | head -20") == "read_only"
+
+
 def test_mv_is_workspace_write_not_destructive() -> None:
     assert ExecTool._classify_command_risk("mv draft.md final.md") == "workspace_write"
 
@@ -87,9 +93,9 @@ def test_restricted_shell_blocks_quoted_home_path(tmp_path: Path) -> None:
     workspace = tmp_path / "identities" / "alice"
     tool = ExecTool(working_dir=str(workspace), restrict_to_workspace=True)
 
-    # `$` is shell syntax → requires approval, even inside quotes.
+    # `$HOME` reads outside the workspace, so containment blocks it directly.
     assert tool._guard_command('cat "$HOME/.ssh/id_rsa"', str(workspace)) == (
-        "Error: Command blocked by safety guard (destructive command requires explicit approval)"
+        "Error: Command blocked by safety guard (home path outside working dir)"
     )
     # Approval does not bypass workspace containment.
     assert tool._guard_command(
@@ -111,12 +117,12 @@ def test_restricted_shell_blocks_home_expansion_paths(tmp_path: Path) -> None:
     workspace = tmp_path / "identities" / "alice"
     tool = ExecTool(working_dir=str(workspace), restrict_to_workspace=True)
 
-    # `~` and `$HOME` are shell syntax → require approval without bypassing containment.
+    # `~` and `$HOME` read outside the workspace, so containment blocks them directly.
     assert tool._guard_command("cat ~/bob/memory.md", str(workspace)) == (
-        "Error: Command blocked by safety guard (destructive command requires explicit approval)"
+        "Error: Command blocked by safety guard (home path outside working dir)"
     )
     assert tool._guard_command("cat $HOME/bob/memory.md", str(workspace)) == (
-        "Error: Command blocked by safety guard (destructive command requires explicit approval)"
+        "Error: Command blocked by safety guard (home path outside working dir)"
     )
     assert tool._guard_command("cat ~/bob/memory.md", str(workspace), destructive_approved=True) == (
         "Error: Command blocked by safety guard (home path outside working dir)"
@@ -137,6 +143,16 @@ async def test_execute_blocks_shell_syntax_without_approval() -> None:
     result = await tool.execute("echo ok; echo bad")
 
     assert "requires explicit approval" in result
+
+
+@pytest.mark.asyncio
+async def test_execute_read_only_shell_chain_requires_shell_not_destructive_approval() -> None:
+    tool = ExecTool()
+
+    result = await tool.execute("which nak; nak --version 2>/dev/null")
+
+    assert "shell syntax requires explicit approval" in result
+    assert "destructive" not in result
 
 
 @pytest.mark.asyncio
