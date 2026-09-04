@@ -30,6 +30,7 @@ def model_list(as_json: bool = typer.Option(False, "--json", help="Print models 
             "name": name,
             "model": model.model,
             "reasoning_effort": model.reasoning_effort,
+            "num_ctx": model.provider_options.get("num_ctx"),
             "default": name == config.agents.defaults.model,
         }
         for name, model in sorted(config.models.items())
@@ -41,6 +42,7 @@ def model_list(as_json: bool = typer.Option(False, "--json", help="Print models 
                 "name": "(default)",
                 "model": config.agents.defaults.model,
                 "reasoning_effort": None,
+                "num_ctx": None,
                 "default": True,
             },
         )
@@ -53,12 +55,14 @@ def model_list(as_json: bool = typer.Option(False, "--json", help="Print models 
     table.add_column("Name", style="cyan")
     table.add_column("Model")
     table.add_column("Reasoning")
+    table.add_column("Context")
     table.add_column("Default")
     for row in rows:
         table.add_row(
             row["name"],
             row["model"],
             row["reasoning_effort"] or "-",
+            str(row["num_ctx"]) if row["num_ctx"] else "-",
             "yes" if row["default"] else "",
         )
     console.print(table)
@@ -75,6 +79,9 @@ def model_add(
     reasoning_effort: str | None = typer.Option(
         None, "--reasoning-effort", help="none, low, medium, or high"
     ),
+    context_window: int | None = typer.Option(
+        None, "--context-window", help="Context window (num_ctx) for local models, e.g. 32768"
+    ),
 ):
     """Add or update a named model."""
     config = load_runtime_config()
@@ -84,6 +91,11 @@ def model_add(
     if reasoning_effort not in {None, "none", "low", "medium", "high"}:
         console.print("[red]Error: --reasoning-effort must be none, low, medium, or high[/red]")
         raise typer.Exit(1)
+    if context_window is not None:
+        if context_window < 1024:
+            console.print("[red]Error: --context-window must be at least 1024[/red]")
+            raise typer.Exit(1)
+        options["num_ctx"] = context_window
     config.models[name] = NamedModelConfig(
         model=model_id,
         reasoning_effort=reasoning_effort,
