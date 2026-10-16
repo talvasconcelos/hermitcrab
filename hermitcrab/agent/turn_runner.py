@@ -14,7 +14,12 @@ from loguru import logger
 
 from hermitcrab.agent.context import ContextBuilder
 from hermitcrab.agent.message_preparation import is_placeholder_assistant_reply
-from hermitcrab.agent.pending_work import has_structured_payload, is_short_follow_up
+from hermitcrab.agent.pending_work import (
+    has_structured_payload,
+    is_runtime_context_message,
+    is_short_follow_up,
+    looks_like_confirmation,
+)
 from hermitcrab.agent.tool_call_recovery import coerce_inline_tool_calls, normalize_tool_calls
 from hermitcrab.agent.tools.policy import ToolPermissionLevel
 from hermitcrab.agent.tools.registry import ToolRegistry
@@ -261,11 +266,17 @@ class TurnRunner:
     def _derive_action_request_text(
         messages: list[dict[str, Any]], current_request: str | None
     ) -> str | None:
-        """Resolve the strongest recent actionable request for this turn."""
+        """Resolve the strongest recent actionable request for this turn.
+
+        Only an approval-style follow-up ("yes, do it") is resolved against earlier turns.
+        Resolving *any* short request was the bug: the injected Runtime Context message is a
+        `user` message with a structured payload, so it became the request text on every turn
+        and the incomplete-response guards discarded correct short replies.
+        """
         if isinstance(current_request, str) and has_structured_payload(current_request):
             return current_request
 
-        if not (isinstance(current_request, str) and is_short_follow_up(current_request)):
+        if not (isinstance(current_request, str) and looks_like_confirmation(current_request)):
             return current_request
 
         seen_current = False
@@ -273,7 +284,7 @@ class TurnRunner:
             if msg.get("role") != "user":
                 continue
             content = msg.get("content")
-            if not isinstance(content, str):
+            if not isinstance(content, str) or is_runtime_context_message(content):
                 continue
             if not seen_current and content == current_request:
                 seen_current = True
@@ -442,6 +453,7 @@ class TurnRunner:
         tools_used: list[str],
     ) -> bool:
         """Detect structurally incomplete non-tool replies without an extra model call."""
+
         if tools_used:
             return False
         if not self.tools.get_definitions():

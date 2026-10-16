@@ -13,6 +13,7 @@ from loguru import logger
 
 from hermitcrab.agent.memory import MemoryStore
 from hermitcrab.agent.onboarding import OnboardingProfileService
+from hermitcrab.agent.pending_work import RUNTIME_CONTEXT_HEADER
 from hermitcrab.agent.skills import SkillsLoader
 from hermitcrab.config.schema import ModelAliasConfig, NamedModelConfig
 from hermitcrab.utils.helpers import estimate_message_tokens, estimate_text_tokens, safe_filename
@@ -528,7 +529,7 @@ Use subagents for complex, time-consuming, or specialized tasks. For substantial
         """Build volatile per-turn context outside the stable system prompt prefix."""
         now = datetime.now().strftime("%Y-%m-%d %H:%M (%A)")
         tz = _time.strftime("%Z") or "UTC"
-        lines = ["## Runtime Context", f"Current time: {now} ({tz})"]
+        lines = [RUNTIME_CONTEXT_HEADER, f"Current time: {now} ({tz})"]
         if channel and chat_id:
             lines.extend((f"Channel: {channel}", f"Chat ID: {chat_id}"))
         if scratchpad_path:

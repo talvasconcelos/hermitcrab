@@ -8,6 +8,9 @@ from datetime import datetime, timezone
 from typing import Any
 
 
+RUNTIME_CONTEXT_HEADER = "## Runtime Context"
+
+
 def _utcnow_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
@@ -41,6 +44,11 @@ def has_structured_payload(text: str | None) -> bool:
     return False
 
 
+def is_runtime_context_message(content: str | None) -> bool:
+    """True for the injected per-turn context block — it is not user input."""
+    return normalize_text(content).startswith(RUNTIME_CONTEXT_HEADER)
+
+
 def is_short_follow_up(text: str | None) -> bool:
     raw = (text or "").strip()
     return bool(raw) and len(raw) <= 120 and not has_structured_payload(raw)
@@ -48,7 +56,7 @@ def is_short_follow_up(text: str | None) -> bool:
 
 def looks_like_confirmation(text: str | None) -> bool:
     """Detect short follow-ups that are likely approval/confirmation replies."""
-    normalized = normalize_text(text).lower()
+    normalized = re.sub(r"[^a-z0-9 ]+", "", normalize_text(text).lower())
     return normalized in {
         "yes",
         "yes please",
