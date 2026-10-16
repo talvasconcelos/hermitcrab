@@ -1,8 +1,10 @@
 """CLI commands for hermitcrab."""
 
 import asyncio
+import logging
 import os
 import signal
+import sys
 from typing import Any
 
 import typer
@@ -185,6 +187,45 @@ def _run_nostr_mode(
 # ============================================================================
 
 
+class _InterceptStdlibLogging(logging.Handler):
+    """Route stdlib logging (LiteLLM, httpx, ...) through loguru so it reaches our sinks.
+
+    LiteLLM's provider warnings go through ``logging``, not loguru — without this bridge they
+    print to the console and never reach the log file, which is exactly where a failed call
+    needs to leave evidence.
+    """
+
+    def emit(self, record: logging.LogRecord) -> None:
+        from loguru import logger
+
+        try:
+            level = logger.level(record.levelname).name
+        except ValueError:
+            level = record.levelno
+        # ponytail: loguru's documented depth for a stdlib bridge; only affects the file:line shown.
+        logger.opt(depth=6, exception=record.exc_info).log(level, record.getMessage())
+
+
+def _configure_runtime_logging(config, logs: bool) -> None:
+    """Send warnings/errors to a file, and the console only when --logs is passed.
+
+    The console used to be silenced with ``logger.disable("hermitcrab")``, which discards
+    records before any handler — so a failed run left nothing on disk to inspect either.
+    """
+    from loguru import logger
+
+    logger.remove()
+    logger.add(sys.stderr, level="DEBUG" if logs else "CRITICAL")
+    log_path = config.system_root_path / "logs" / "hermitcrab.log"
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    logger.add(log_path, level="WARNING", rotation="5 MB", retention=3)
+    logging.basicConfig(handlers=[_InterceptStdlibLogging()], level=logging.INFO, force=True)
+    # LiteLLM attaches its own stderr handler, so its warnings ignored --logs; let the bridge
+    # above route them to our sinks instead.
+    for name in ("LiteLLM", "litellm"):
+        logging.getLogger(name).handlers = []
+
+
 @app.command()
 def agent(
     message: str = typer.Option(None, "--message", "-m", help="Message to send to the agent"),
@@ -206,8 +247,6 @@ def agent(
 
     Use --nostr-pubkey to listen for Nostr DMs, or run without flags for interactive CLI mode.
     """
-    from loguru import logger
-
     from hermitcrab.agent.loop import AgentLoop
     from hermitcrab.bus.queue import MessageBus
     from hermitcrab.session.timeout_service import SessionTimeoutService
@@ -220,10 +259,7 @@ def agent(
     # Create cron service for tool usage (no callback needed for CLI unless running)
     cron = _build_cron_service()
 
-    if logs:
-        logger.enable("hermitcrab")
-    else:
-        logger.disable("hermitcrab")
+    _configure_runtime_logging(config, logs)
 
     agent_loop = AgentLoop(
         bus=bus,
