@@ -854,6 +854,24 @@ class Config(BaseSettings):
         detected = _model_context_length(resolved.model or model)
         return max(1024, int(detected * CONTEXT_BUFFER_RATIO))
 
+    def provider_is_configured(self, name: str) -> bool:
+        """Whether a provider can actually serve a request.
+
+        One source of truth for model resolution and diagnostics: local providers need an
+        endpoint (their own or the spec default), everything else needs an API key. OAuth
+        providers authenticate out of band, so explicit selection is enough here — `doctor`
+        additionally checks live credentials.
+        """
+        spec = find_by_name(name)
+        provider_config = getattr(self.providers, name, None)
+        if spec is None or provider_config is None:
+            return False
+        if spec.is_oauth:
+            return True
+        if spec.is_local:
+            return bool(provider_config.api_base or spec.default_api_base)
+        return bool(provider_config.api_key)
+
     def _match_provider(
         self, model: str | None = None
     ) -> tuple["ProviderConfig | None", str | None]:
@@ -869,7 +887,7 @@ class Config(BaseSettings):
             p = getattr(self.providers, explicit_provider, None)
             if spec is None or p is None:
                 return None, None
-            if spec.is_oauth or spec.is_local or p.api_key:
+            if self.provider_is_configured(explicit_provider):
                 return p, explicit_provider
             return None, None
 
@@ -887,23 +905,25 @@ class Config(BaseSettings):
         for spec in PROVIDERS:
             p = getattr(self.providers, spec.name, None)
             if p and model_prefix and normalized_prefix == spec.name:
-                if spec.is_oauth or spec.is_local or p.api_key:
+                if self.provider_is_configured(spec.name):
                     return p, spec.name
 
         # Match by keyword (order follows PROVIDERS registry)
         for spec in PROVIDERS:
             p = getattr(self.providers, spec.name, None)
             if p and any(_kw_matches(kw) for kw in spec.keywords):
-                if spec.is_oauth or spec.is_local or p.api_key:
+                if self.provider_is_configured(spec.name):
                     return p, spec.name
 
         # Fallback: gateways first, then others (follows registry order)
-        # OAuth providers are NOT valid fallbacks — they require explicit model selection
+        # OAuth providers are NOT valid fallbacks — they require explicit model selection.
+        # A provider only counts here if the user actually configured it (key or endpoint):
+        # a spec-default local endpoint (ollama, vllm) must not swallow arbitrary model names.
         for spec in PROVIDERS:
             if spec.is_oauth:
                 continue
             p = getattr(self.providers, spec.name, None)
-            if p and (p.api_key or spec.is_local):
+            if p and (p.api_key or (spec.is_local and p.api_base)):
                 return p, spec.name
         return None, None
 

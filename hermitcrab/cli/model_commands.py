@@ -109,6 +109,13 @@ def model_add(
 def model_set_default(name_or_model_id: str = typer.Argument(..., help="Named model or raw model id")):
     """Set the default model used by the owner/solo assistant."""
     config = load_runtime_config()
+    if name_or_model_id not in config.models and config.get_provider_name(name_or_model_id) is None:
+        console.print(
+            f"[red]Error: no such model, and no configured provider for "
+            f"'{name_or_model_id}'.[/red]\n"
+            "Add it first, e.g. `hermitcrab model add <name> <model> --provider <provider>`."
+        )
+        raise typer.Exit(1)
     config.agents.defaults.model = name_or_model_id
     save_runtime_config(config)
     console.print(f"[green]✓[/green] Default model set to '{name_or_model_id}'")
