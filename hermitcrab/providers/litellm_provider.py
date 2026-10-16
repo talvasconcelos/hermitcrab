@@ -621,6 +621,13 @@ class LiteLLMProvider(LLMProvider):
         if tools:
             kwargs["tools"] = tools
             kwargs["tool_choice"] = "auto"
+            # LiteLLM 1.92 imports its MCP/proxy bridge whenever `tools` is set, and that
+            # module does `from fastapi import ...` at import time — fastapi is declared only
+            # under LiteLLM's `proxy` extra, so a plain install fails every tool-calling
+            # request with "APIConnectionError: No module named 'fastapi'". We pull MCP tools
+            # in through our own client (agent/tools/mcp.py), so LiteLLM's bridge is unused
+            # and can be skipped. Drop this flag when upstream stops importing fastapi here.
+            kwargs["_skip_mcp_handler"] = True
 
         effective_reasoning_effort = reasoning_effort or request_config.get("reasoning_effort")
         if effective_reasoning_effort:
