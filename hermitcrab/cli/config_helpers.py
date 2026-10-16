@@ -8,6 +8,12 @@ import typer
 from rich.console import Console
 
 from hermitcrab.config.schema import Config
+from hermitcrab.providers.registry import (
+    PROVIDERS,
+    ProviderSpec,
+    find_by_name,
+    normalize_provider_name,
+)
 
 console = Console()
 
@@ -38,18 +44,56 @@ def save_runtime_config(config: Config) -> None:
     save_config(validated)
 
 
+def resolve_provider_spec(provider: str) -> ProviderSpec:
+    """Resolve CLI provider input to a registry spec — the single source of truth.
+
+    Accepts the canonical config name (``deepseek``, ``openai_codex``) and registry
+    keywords (``codex``, ``openai-codex``, ``claude``), so the CLI never needs its own
+    allowlist.
+    """
+    candidate = normalize_provider_name(provider)
+    spec = find_by_name(candidate)
+    if spec is not None:
+        return spec
+
+    lowered = str(provider or "").strip().lower()
+    for candidate_spec in PROVIDERS:
+        for keyword in candidate_spec.keywords:
+            if lowered == keyword or normalize_provider_name(keyword) == candidate:
+                return candidate_spec
+
+    supported = ", ".join(candidate_spec.name for candidate_spec in PROVIDERS)
+    console.print(f"[red]Error: unknown provider: {provider}[/red]")
+    console.print(f"Supported providers: {supported}")
+    raise typer.Exit(1)
+
+
 def configure_provider(config: Config, provider: str, *, api_key: str | None = None) -> None:
-    """Apply a provider choice to config without forcing manual JSON edits."""
-    provider_key = provider.strip().lower().replace("-", "_")
-    if provider_key == "openrouter":
-        config.providers.openrouter.api_key = api_key or config.providers.openrouter.api_key
-    elif provider_key == "ollama":
-        config.providers.ollama.api_base = config.providers.ollama.api_base or "http://localhost:11434"
-    elif provider_key == "custom":
-        config.providers.custom.api_key = api_key or config.providers.custom.api_key
-    else:
-        console.print(f"[red]Error: unsupported provider for setup/model UX: {provider}[/red]")
-        raise typer.Exit(1)
+    """Apply a provider choice to config without forcing manual JSON edits.
+
+    The shape comes from the registry spec: OAuth providers authenticate through
+    ``hermitcrab provider login``, local providers need an endpoint, the rest take an
+    API key.
+    """
+    spec = resolve_provider_spec(provider)
+    target = getattr(config.providers, spec.name)
+
+    if spec.is_oauth:
+        console.print(
+            f"[yellow]{spec.label} authenticates with OAuth, not an API key.[/yellow]\n"
+            f"Run [cyan]hermitcrab provider login {spec.name}[/cyan], then add the model."
+        )
+        return
+
+    if spec.is_local:
+        target.api_base = target.api_base or spec.default_api_base
+        return
+
+    target.api_key = api_key or target.api_key
+    # Only gateway specs carry a usable default base; standard providers keep api_base
+    # unset so they never pollute the global LiteLLM config.
+    if spec.is_gateway and spec.default_api_base and not target.api_base:
+        target.api_base = spec.default_api_base
 
 
 def api_key_from_env(env_name: str | None) -> str | None:
@@ -64,11 +108,7 @@ def api_key_from_env(env_name: str | None) -> str | None:
 
 
 def provider_options(provider: str | None) -> dict[str, str]:
-    """Persist the admin-selected provider with a named model."""
+    """Persist the admin-selected provider with a named model, canonically named."""
     if not provider:
         return {}
-    provider_key = provider.strip().lower().replace("-", "_")
-    if provider_key not in {"openrouter", "ollama", "custom"}:
-        console.print(f"[red]Error: unsupported provider for setup/model UX: {provider}[/red]")
-        raise typer.Exit(1)
-    return {"provider": provider_key}
+    return {"provider": resolve_provider_spec(provider).name}
