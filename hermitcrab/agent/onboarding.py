@@ -27,6 +27,9 @@ class OnboardingProfileService:
     MIN_CONFIDENCE = 0.75
     MAX_CONTEXT_MESSAGES = 12
     MAX_BULLETS_PER_FILE = 6
+    # Reasoning models bill their thinking against max_tokens: a tight cap returns an empty
+    # body with finish_reason="length", which reads identical to "nothing durable here".
+    EXTRACTION_MAX_TOKENS = 4096
     SECTION_TITLE = "## Onboarding Insights"
     TARGET_FILES = {
         "user_md": "USER.md",
@@ -169,15 +172,27 @@ Rules:
                 ],
                 model=self.model,
                 temperature=0.0,
-                max_tokens=500,
+                max_tokens=self.EXTRACTION_MAX_TOKENS,
             )
         except Exception as exc:
-            logger.debug("Onboarding profile extraction failed: {}", exc)
+            logger.warning("Onboarding profile extraction failed: {}", exc)
+            self._audit_onboarding("failed", reason=type(exc).__name__)
             return False
 
         payload = self._parse_payload(response.content if response else None)
+        if response is not None and getattr(response, "finish_reason", None) == "error":
+            # Providers hand back failures as content ("Error calling LLM: ..."), so a parse
+            # failure here would blame the payload instead of the provider.
+            logger.warning(
+                "Onboarding extraction provider error: {}", (response.content or "")[:200]
+            )
+            self._audit_onboarding("failed", reason="provider_error")
+            return False
         if not payload:
-            self._audit_onboarding("skipped", reason="parse_failed")
+            reason = "parse_failed"
+            if not (response and response.content):
+                reason = f"empty_response:{getattr(response, 'finish_reason', 'unknown')}"
+            self._audit_onboarding("skipped", reason=reason)
             return False
         if payload.get("skip"):
             self._audit_onboarding("skipped", reason="no_durable_insight")

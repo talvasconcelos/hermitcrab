@@ -331,7 +331,7 @@ class DistillationManager:
                     messages=[{"role": "user", "content": prompt}],
                     model=model,
                     temperature=0.1,
-                    max_tokens=2048,
+                    max_tokens=4096,  # reasoning counts against max_tokens
                     job_class=distillation_job_class,
                     reasoning_effort=self.reasoning_effort,
                 )

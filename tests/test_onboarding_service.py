@@ -256,3 +256,81 @@ def test_onboarding_prompt_requires_evidenced_insights():
     assert '"insights"' in OnboardingProfileService.SYSTEM_PROMPT
     assert '"evidence"' in OnboardingProfileService.SYSTEM_PROMPT
     assert '"user_md"' not in OnboardingProfileService.SYSTEM_PROMPT
+
+
+def make_service_with_callable(tmp_path, chat_callable):
+    return OnboardingProfileService(
+        tmp_path,
+        chat_callable=chat_callable,
+        model="test-model",
+    )
+
+
+@pytest.mark.asyncio
+async def test_onboarding_audits_empty_completion_as_truncation(tmp_path):
+    """An empty body means the budget was consumed, not that the payload was malformed."""
+    enable_onboarding_workspace(tmp_path)
+
+    async def empty_chat(**_kwargs):
+        return FakeResponse(content="")
+
+    service = make_service_with_callable(tmp_path, empty_chat)
+    changed = await service.maybe_sync_from_messages([{"role": "user", "content": "hi"}])
+
+    assert changed is False
+    assert onboarding_audit_events(tmp_path)[-1]["reason"] == "empty_response:unknown"
+
+
+@pytest.mark.asyncio
+async def test_onboarding_audits_provider_failure(tmp_path):
+    enable_onboarding_workspace(tmp_path)
+
+    async def failing_chat(**_kwargs):
+        raise RuntimeError("provider exploded")
+
+    service = make_service_with_callable(tmp_path, failing_chat)
+    changed = await service.maybe_sync_from_messages([{"role": "user", "content": "hi"}])
+
+    assert changed is False
+    events = onboarding_audit_events(tmp_path)
+    assert events[-1]["event"] == "failed"
+    assert events[-1]["reason"] == "RuntimeError"
+
+
+@pytest.mark.asyncio
+async def test_onboarding_audits_provider_error_response(tmp_path):
+    """Providers return failures as content; the audit must blame the provider, not the parser."""
+    enable_onboarding_workspace(tmp_path)
+
+    class ErrorResponse:
+        content = "Error calling LLM: litellm.BadRequestError: nope"
+        finish_reason = "error"
+
+    async def error_chat(**_kwargs):
+        return ErrorResponse()
+
+    service = make_service_with_callable(tmp_path, error_chat)
+    changed = await service.maybe_sync_from_messages([{"role": "user", "content": "hi"}])
+
+    assert changed is False
+    events = onboarding_audit_events(tmp_path)
+    assert events[-1]["event"] == "failed"
+    assert events[-1]["reason"] == "provider_error"
+
+
+@pytest.mark.asyncio
+async def test_onboarding_extraction_budget_leaves_room_for_reasoning(tmp_path):
+    """A 384-512 token cap is eaten whole by reasoning tokens, returning no content at all."""
+    enable_onboarding_workspace(tmp_path)
+    captured: dict = {}
+
+    async def capturing_chat(**kwargs):
+        captured.update(kwargs)
+        return FakeResponse(
+            content='{"skip": true, "insights": [], "observed_domains": [], "pending_assumptions": []}'
+        )
+
+    service = make_service_with_callable(tmp_path, capturing_chat)
+    await service.maybe_sync_from_messages([{"role": "user", "content": "hi"}])
+
+    assert captured["max_tokens"] >= 2048

@@ -183,7 +183,8 @@ Rules:
                 ],
                 model=self.model,
                 temperature=0.1,
-                max_tokens=512,
+                # Reasoning is billed against max_tokens; a small cap returns an empty body.
+                max_tokens=4096,
             )
 
             # 4. Parse response
@@ -203,7 +204,7 @@ Rules:
                     ],
                     model=self.model,
                     temperature=0.0,
-                    max_tokens=384,
+                    max_tokens=4096,
                 )
                 result = self._parse_response(repaired.content)
 

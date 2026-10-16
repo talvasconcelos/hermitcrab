@@ -56,7 +56,7 @@ class JournalBackgroundManager:
                         ],
                         model=model,
                         temperature=0.05,
-                        max_tokens=384,
+                        max_tokens=4096,  # reasoning counts against max_tokens
                         job_class=journal_job_class,
                         reasoning_effort=self.reasoning_effort,
                     )
@@ -80,7 +80,7 @@ class JournalBackgroundManager:
                         ],
                         model=model,
                         temperature=0.0,
-                        max_tokens=384,
+                        max_tokens=4096,  # reasoning counts against max_tokens
                         job_class=journal_job_class,
                         reasoning_effort=self.reasoning_effort,
                     )
