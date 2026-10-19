@@ -5,8 +5,8 @@ from __future__ import annotations
 from types import SimpleNamespace
 
 from hermitcrab.agent.loop import AgentLoop
-from hermitcrab.agent.turn_runner import TurnRunner, TurnRunnerConfig
-from hermitcrab.providers.base import LLMResponse, ToolCallRequest
+from hermitcrab.agent.turn_runner import TurnOutcome, TurnRunner, TurnRunnerConfig
+from hermitcrab.providers.base import LLMResponse, ProviderError, ToolCallRequest
 
 
 class _Context:
@@ -184,3 +184,28 @@ async def test_run_uses_tool_fallback_after_repeated_empty_post_tool_response() 
 
     assert result.outcome.value == "tool_fallback"
     assert "important result" in result.final_content
+
+
+async def test_provider_error_is_reported_as_a_provider_failure() -> None:
+    """A provider failure must never be dressed up as the model's own words."""
+
+    async def failing_chat(**kwargs):
+        raise ProviderError("invalid api key")
+
+    runner = TurnRunner(
+        context=_Context(),
+        tools=_Tools({}),
+        config=TurnRunnerConfig(4, 30, 3, 0.0, 100, None),
+        chat_callable=failing_chat,
+        stream_chat_callable=None,
+        get_model_for_job=lambda job: "test",
+        strip_think=lambda content: content,
+        tool_hint=lambda calls: "working",
+        is_empty_response=lambda content: not content or not content.strip(),
+    )
+
+    result = await runner.run([{"role": "user", "content": "hi"}])
+
+    assert result.outcome is TurnOutcome.PROVIDER_ERROR
+    assert result.final_content.startswith("Provider error: invalid api key")
+    assert "not a weak model" in result.final_content

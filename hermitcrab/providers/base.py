@@ -34,6 +34,19 @@ class LLMResponse:
         return len(self.tool_calls) > 0
 
 
+class ProviderError(Exception):
+    """A provider call failed.
+
+    ``transient`` failures are worth retrying; everything else (auth, unknown model, bad
+    request) belongs to the caller. Providers must raise this instead of returning the
+    failure as message content, which callers end up parsing as if the model said it.
+    """
+
+    def __init__(self, message: str, *, transient: bool = False) -> None:
+        super().__init__(message)
+        self.transient = transient
+
+
 @dataclass
 class TextDeltaEvent:
     """Streaming text delta emitted by a provider."""
@@ -66,6 +79,18 @@ class LLMProvider(ABC):
     """
 
     _CHAT_RETRY_DELAYS = (1, 2, 4)
+    # Configuration/permission failures don't become transient by retrying, and these win
+    # over the markers below — otherwise incidental text inside a litellm exception repr
+    # (it embeds the request context, including "connection") makes an auth error retry 4×.
+    _NON_TRANSIENT_ERROR_MARKERS = (
+        "authentication",
+        "unauthorized",
+        "invalid api key",
+        "invalid_request",
+        "permission denied",
+        "not found",
+        "bad request",
+    )
     _TRANSIENT_ERROR_MARKERS = (
         "429",
         "rate limit",
@@ -215,6 +240,8 @@ class LLMProvider(ABC):
     @classmethod
     def _is_transient_error(cls, content: str | None) -> bool:
         err = (content or "").lower()
+        if any(marker in err for marker in cls._NON_TRANSIENT_ERROR_MARKERS):
+            return False
         return any(marker in err for marker in cls._TRANSIENT_ERROR_MARKERS)
 
     async def chat_with_retry(
@@ -226,11 +253,11 @@ class LLMProvider(ABC):
         temperature: float = 0.7,
         reasoning_effort: str | None = None,
     ) -> LLMResponse:
-        """Call chat() with retry on transient provider failures."""
+        """Call chat(), retrying transient failures. Everything else raises ProviderError."""
         attempts = len(self._CHAT_RETRY_DELAYS) + 1
         for attempt, delay in enumerate(self._CHAT_RETRY_DELAYS, start=1):
             try:
-                response = await self.chat(
+                return await self.chat(
                     messages=messages,
                     tools=tools,
                     model=model,
@@ -240,51 +267,26 @@ class LLMProvider(ABC):
                 )
             except asyncio.CancelledError:
                 raise
-            except Exception as exc:
-                response = LLMResponse(
-                    content=f"Error calling LLM: {exc}",
-                    finish_reason="error",
+            except ProviderError as exc:
+                if not exc.transient:
+                    raise
+                logger.warning(
+                    "LLM transient error (attempt {}/{}), retrying in {}s: {}",
+                    attempt,
+                    attempts,
+                    delay,
+                    str(exc)[:120].lower(),
                 )
+                await asyncio.sleep(delay)
 
-            if response.finish_reason != "error":
-                return response
-            if not self._is_transient_error(response.content):
-                return response
-
-            logger.warning(
-                "LLM transient error (attempt {}/{}), retrying in {}s: {}",
-                attempt,
-                attempts,
-                delay,
-                (response.content or "")[:120].lower(),
-            )
-            await asyncio.sleep(delay)
-
-        try:
-            response = await self.chat(
-                messages=messages,
-                tools=tools,
-                model=model,
-                max_tokens=max_tokens,
-                temperature=temperature,
-                reasoning_effort=reasoning_effort,
-            )
-            if response.finish_reason == "error" and self._is_transient_error(response.content):
-                return LLMResponse(
-                    content="I hit a temporary provider error while generating the response. Please retry this request.",
-                    finish_reason="error",
-                )
-            return response
-        except asyncio.CancelledError:
-            raise
-        except Exception as exc:
-            content = f"Error calling LLM: {exc}"
-            if self._is_transient_error(content):
-                content = (
-                    "I hit a temporary provider error while generating the response. "
-                    "Please retry this request."
-                )
-            return LLMResponse(content=content, finish_reason="error")
+        return await self.chat(
+            messages=messages,
+            tools=tools,
+            model=model,
+            max_tokens=max_tokens,
+            temperature=temperature,
+            reasoning_effort=reasoning_effort,
+        )
 
     @abstractmethod
     def get_default_model(self) -> str:

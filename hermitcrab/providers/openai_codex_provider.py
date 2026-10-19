@@ -10,7 +10,7 @@ from typing import Any, AsyncGenerator
 
 import httpx
 
-from hermitcrab.providers.base import LLMProvider, LLMResponse, ToolCallRequest
+from hermitcrab.providers.base import LLMProvider, LLMResponse, ProviderError, ToolCallRequest
 from hermitcrab.providers.openai_codex_auth import (
     DEFAULT_CODEX_BASE_URL,
     codex_cloudflare_headers,
@@ -90,10 +90,7 @@ class OpenAICodexProvider(LLMProvider):
                 usage=usage,
             )
         except Exception as e:
-            return LLMResponse(
-                content=f"Error calling Codex: {str(e)}",
-                finish_reason="error",
-            )
+            raise ProviderError(str(e), transient=self._is_transient_error(str(e))) from e
 
     def get_default_model(self) -> str:
         return self.default_model

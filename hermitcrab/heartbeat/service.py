@@ -9,6 +9,8 @@ from typing import TYPE_CHECKING, Any, Callable, Coroutine
 
 from loguru import logger
 
+from hermitcrab.providers.base import ProviderError
+
 if TYPE_CHECKING:
     from hermitcrab.providers.base import LLMProvider
 
@@ -168,17 +170,22 @@ class HeartbeatService:
 
         Returns (action, tasks) where action is 'skip' or 'run'.
         """
-        response = await self.provider.chat(
-            messages=[
-                {"role": "system", "content": "You are a heartbeat agent. Call the heartbeat tool to report your decision."},
-                {"role": "user", "content": (
-                    "Review the following HEARTBEAT.md and decide whether there are active tasks.\n\n"
-                    f"{content}"
-                )},
-            ],
-            tools=_HEARTBEAT_TOOL,
-            model=self.model,
-        )
+        try:
+            response = await self.provider.chat(
+                messages=[
+                    {"role": "system", "content": "You are a heartbeat agent. Call the heartbeat tool to report your decision."},
+                    {"role": "user", "content": (
+                        "Review the following HEARTBEAT.md and decide whether there are active tasks.\n\n"
+                        f"{content}"
+                    )},
+                ],
+                tools=_HEARTBEAT_TOOL,
+                model=self.model,
+            )
+        except ProviderError as exc:
+            # A failed beat must not kill the loop; the next beat tries again.
+            logger.warning("Heartbeat skipped, provider error: {}", exc)
+            return "skip", ""
 
         if not response.has_tool_calls:
             return "skip", ""

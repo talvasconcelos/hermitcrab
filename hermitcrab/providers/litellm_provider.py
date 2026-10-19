@@ -25,6 +25,7 @@ from loguru import logger
 from hermitcrab.providers.base import (
     LLMProvider,
     LLMResponse,
+    ProviderError,
     ResponseDoneEvent,
     TextDeltaEvent,
     ToolCallEvent,
@@ -777,11 +778,8 @@ class LiteLLMProvider(LLMProvider):
             response = await acompletion(**kwargs)
             return self._parse_response(response, model=ollama_model)
         except Exception as e:
-            # Return error as content for graceful handling
-            return LLMResponse(
-                content=f"Error calling LLM: {str(e)}",
-                finish_reason="error",
-            )
+            # Surface it: chat_with_retry retries transient errors, everyone else reports.
+            raise ProviderError(str(e), transient=self._is_transient_error(str(e))) from e
 
     async def stream_chat(
         self,

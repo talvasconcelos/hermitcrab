@@ -14,6 +14,7 @@ from loguru import logger
 from hermitcrab.providers.base import (
     LLMProvider,
     LLMResponse,
+    ProviderError,
     ResponseDoneEvent,
     TextDeltaEvent,
     ToolCallEvent,
@@ -433,16 +434,17 @@ class OllamaProvider(LLMProvider):
                 ) as response:
                     if response.status_code != 200:
                         text = (await response.aread()).decode("utf-8", "ignore")
-                        return LLMResponse(
-                            content=f"Error calling Ollama: {text or response.reason_phrase}",
-                            finish_reason="error",
+                        raise ProviderError(
+                            f"Error calling Ollama ({response.status_code}): "
+                            f"{text or response.reason_phrase}",
+                            transient=response.status_code in {408, 429, 500, 502, 503, 504},
                         )
                     chunks = [line async for line in response.aiter_lines() if line]
+        except ProviderError:
+            raise
         except Exception as exc:
-            return LLMResponse(
-                content=f"Error calling Ollama: {_format_ollama_error(exc)}",
-                finish_reason="error",
-            )
+            message = _format_ollama_error(exc)
+            raise ProviderError(message, transient=self._is_transient_error(message)) from exc
 
         content, tool_calls, finish_reason, usage, reasoning = _consume_ndjson_bytes(
             [line.encode("utf-8") for line in chunks]
@@ -503,11 +505,11 @@ class OllamaProvider(LLMProvider):
                 ) as response:
                     if response.status_code != 200:
                         text = (await response.aread()).decode("utf-8", "ignore")
-                        yield TextDeltaEvent(
-                            delta=f"Error calling Ollama: {text or response.reason_phrase}"
+                        raise ProviderError(
+                            f"Error calling Ollama ({response.status_code}): "
+                            f"{text or response.reason_phrase}",
+                            transient=response.status_code in {408, 429, 500, 502, 503, 504},
                         )
-                        yield ResponseDoneEvent(finish_reason="error")
-                        return
 
                     async for line in response.aiter_lines():
                         if not line:
@@ -552,10 +554,11 @@ class OllamaProvider(LLMProvider):
                                     + (event.get("eval_count") or 0)
                                 ),
                             }
+        except ProviderError:
+            raise
         except Exception as exc:
-            yield TextDeltaEvent(delta=f"Error calling Ollama: {_format_ollama_error(exc)}")
-            yield ResponseDoneEvent(finish_reason="error")
-            return
+            message = _format_ollama_error(exc)
+            raise ProviderError(message, transient=self._is_transient_error(message)) from exc
 
         yield ResponseDoneEvent(
             finish_reason=finish_reason,

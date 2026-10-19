@@ -23,7 +23,13 @@ from hermitcrab.agent.pending_work import (
 from hermitcrab.agent.tool_call_recovery import coerce_inline_tool_calls, normalize_tool_calls
 from hermitcrab.agent.tools.policy import ToolPermissionLevel
 from hermitcrab.agent.tools.registry import ToolRegistry
-from hermitcrab.providers.base import LLMResponse, ResponseDoneEvent, TextDeltaEvent, ToolCallEvent
+from hermitcrab.providers.base import (
+    LLMResponse,
+    ProviderError,
+    ResponseDoneEvent,
+    TextDeltaEvent,
+    ToolCallEvent,
+)
 
 
 @dataclass(slots=True)
@@ -46,6 +52,7 @@ class TurnOutcome(str, Enum):
     TOOL_FALLBACK = "tool_fallback"
     MAX_ITERATIONS = "max_iterations"
     TIMEOUT = "timeout"
+    PROVIDER_ERROR = "provider_error"
     REPEATED_TOOL_CYCLE = "repeated_tool_cycle"
     DELEGATED = "delegated"
 
@@ -798,6 +805,17 @@ class TurnRunner:
             waiting_message="",
         )
 
+    @staticmethod
+    def _provider_error_message(exc: ProviderError) -> str:
+        """Report the provider failure as a failure — never as the model's words."""
+        detail = " ".join(str(exc).split())[:300]
+        retry_note = "Retried and still failing." if exc.transient else "Not retried."
+        return (
+            f"Provider error: {detail}\n\n"
+            f"{retry_note} This is a provider or configuration failure, not a weak model — "
+            "check `hermitcrab doctor` and `system/logs/hermitcrab.log` for details."
+        )
+
     async def _execute_tool_calls(
         self,
         *,
@@ -1051,6 +1069,11 @@ class TurnRunner:
                     on_progress=on_progress,
                     job_class=job_class,
                 )
+            except ProviderError as exc:
+                logger.error("Provider call failed (transient={}): {}", exc.transient, exc)
+                final_content = self._provider_error_message(exc)
+                outcome = TurnOutcome.PROVIDER_ERROR
+                break
             except TimeoutError:
                 logger.warning("Max loop time reached ({}s)", self.config.max_loop_seconds)
                 final_content = (

@@ -8,7 +8,7 @@ from typing import Any
 import json_repair
 from openai import AsyncOpenAI
 
-from hermitcrab.providers.base import LLMProvider, LLMResponse, ToolCallRequest
+from hermitcrab.providers.base import LLMProvider, LLMResponse, ProviderError, ToolCallRequest
 from hermitcrab.providers.utils import function_parts
 
 
@@ -53,7 +53,7 @@ class CustomProvider(LLMProvider):
         try:
             return self._parse(await self._client.chat.completions.create(**kwargs))
         except Exception as e:
-            return LLMResponse(content=f"Error: {e}", finish_reason="error")
+            raise ProviderError(str(e), transient=self._is_transient_error(str(e))) from e
 
     def _parse(self, response: Any) -> LLMResponse:
         choice = response.choices[0]
