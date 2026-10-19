@@ -155,5 +155,6 @@ def build_agent_loop_kwargs(
         "memory_context_max_items_per_category": config.agents.defaults.memory_context_max_items_per_category,
         "memory_context_max_item_chars": config.agents.defaults.memory_context_max_item_chars,
         "prompt_token_budget": prompt_token_budget,
+        "context_window": context_window,
         "reflection_config": _build_reflection_config(config),
     }

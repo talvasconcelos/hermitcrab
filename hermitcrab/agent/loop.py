@@ -44,6 +44,7 @@ from hermitcrab.agent.background_messages import (
     is_grounded_system_reply,
     summarize_subagent_completion,
 )
+from hermitcrab.agent.compaction import CompactionResult, compact_session, load_checkpoint
 from hermitcrab.agent.context import ContextBuilder
 from hermitcrab.agent.execution_state import ExecutionPhase, ExecutionStateTracker
 from hermitcrab.agent.journal import JournalStore
@@ -217,6 +218,7 @@ class AgentLoop:
         memory_context_max_items_per_category: int = 25,
         memory_context_max_item_chars: int = 600,
         prompt_token_budget: int = 6000,
+        context_window: int | None = None,
         system_root: Path | None = None,
         identity_name: str = "owner",
         identity_root: Path | None = None,
@@ -234,6 +236,7 @@ class AgentLoop:
         self.temperature = temperature
         self.max_tokens = max_tokens
         self.memory_window = memory_window
+        self.context_window = context_window
         self.inactivity_timeout_s = max(1, inactivity_timeout_s)
         self.llm_max_retries = max(0, llm_max_retries)
         self.llm_retry_base_delay_s = max(0.0, llm_retry_base_delay_s)
@@ -939,6 +942,37 @@ class AgentLoop:
             reasoning_effort=reasoning_effort,
         )
 
+    async def _compact_if_needed(
+        self,
+        session: Session,
+        session_key: str,
+        *,
+        force: bool = False,
+    ) -> CompactionResult:
+        """Condense older history once the prompt approaches the context window."""
+        if not self.context_window:
+            return CompactionResult(load_checkpoint(session))
+        _, model = self._resolve_interactive_model(session)
+        if not model:
+            return CompactionResult(load_checkpoint(session))
+        result = await compact_session(
+            session=session,
+            chat=self._chat_with_retry,
+            model=model,
+            context_window=self.context_window,
+            force=force,
+        )
+        if result.compacted and result.checkpoint is not None:
+            self.sessions.save(session)
+            self._audit_event(
+                "session.compacted",
+                session_key=session_key,
+                msg=None,
+                covered=result.checkpoint.covered,
+                summary_chars=len(result.checkpoint.summary),
+            )
+        return result
+
     async def _stream_chat(
         self,
         *,
@@ -1428,7 +1462,12 @@ class AgentLoop:
                 return slash_response
 
             history = session.get_history(max_messages=self.memory_window)
-            history_for_prompt = build_prompt_history(history)
+            compaction = await self._compact_if_needed(session, key)
+            history_for_prompt = build_prompt_history(
+                history,
+                checkpoint=compaction.checkpoint,
+                total_messages=len(session.messages),
+            )
             if not history_for_prompt:
                 archived_history = self.sessions.get_recent_archived_history(
                     key,
@@ -1615,6 +1654,15 @@ class AgentLoop:
             )
             return self._reply(msg, "New session started.")
 
+        if cmd == "/compact":
+            result = await self._compact_if_needed(session, session_key, force=True)
+            if not result.compacted or result.checkpoint is None:
+                return self._reply(msg, "Nothing new to compact.")
+            return self._reply(
+                msg,
+                f"Compacted {result.checkpoint.covered} messages into a checkpoint summary.",
+            )
+
         if cmd == "/help":
             return self._reply(
                 msg,
@@ -1626,6 +1674,7 @@ class AgentLoop:
                 "/model <name> — Switch the current conversation model\n"
                 "/model default — Reset to the default conversation model\n"
                 "/reflect — Run reflection on this conversation\n"
+                "/compact — Condense older history into a checkpoint summary\n"
                 "/help — Show chat commands\n\n"
                 "For CLI commands like status, doctor, or onboard, run them in the shell "
                 "as `hermitcrab status`, `hermitcrab doctor`, or `hermitcrab onboard`.",

@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
+from hermitcrab.agent.compaction import checkpoint_message, visible_after_checkpoint
 from hermitcrab.agent.message_preparation import clean_snippet
 from hermitcrab.utils.helpers import estimate_message_tokens
 
@@ -27,12 +28,20 @@ def build_prompt_history(
     history: list[dict[str, Any]],
     *,
     config: PromptHistoryConfig | None = None,
+    checkpoint: Any | None = None,
+    total_messages: int | None = None,
 ) -> list[dict[str, str]]:
-    """Shape raw history into a compact user-facing transcript for the next prompt."""
+    """Shape raw history into a compact user-facing transcript for the next prompt.
+
+    When a compaction checkpoint exists, the messages it covers are replaced by one
+    ``<compacted-summary>`` message and only the uncovered tail is shaped.
+    """
     cfg = config or PromptHistoryConfig()
+    prefix = [checkpoint_message(checkpoint)] if checkpoint is not None else []
+    history = visible_after_checkpoint(history, checkpoint, total_messages)
     turns = _split_turns(history)
     if not turns:
-        return _fallback_visible_messages(history, cfg)
+        return prefix + _fallback_visible_messages(history, cfg)
 
     preserve_count = min(len(turns), max(cfg.min_recent_turns, cfg.preserve_recent_turns))
     shaped = _shape_history_from_turns(turns, cfg, preserve_count=preserve_count)
@@ -50,7 +59,7 @@ def build_prompt_history(
     if estimate_message_tokens(shaped) > cfg.target_history_tokens:
         shaped = _enforce_history_budget(shaped, cfg.target_history_tokens)
 
-    return shaped or _fallback_visible_messages(history, cfg)
+    return prefix + (shaped or _fallback_visible_messages(history, cfg))
 
 
 def _shape_history_from_turns(
