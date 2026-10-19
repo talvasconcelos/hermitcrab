@@ -22,6 +22,12 @@ class PromptHistoryConfig:
     max_tool_result_chars: int = 160
     max_summary_chars: int = 1400
     target_history_tokens: int = 1200
+    # Reasoning traces are replayed for the last turns only, inside a fixed character
+    # budget. History sits after the cached system block, so this never invalidates the
+    # provider's cache breakpoint; bounding it also keeps the token cost predictable.
+    max_reasoning_chars: int = 1200
+    max_reasoning_turns: int = 2
+    reasoning_char_budget: int = 3000
 
 
 def build_prompt_history(
@@ -59,7 +65,31 @@ def build_prompt_history(
     if estimate_message_tokens(shaped) > cfg.target_history_tokens:
         shaped = _enforce_history_budget(shaped, cfg.target_history_tokens)
 
-    return prefix + (shaped or _fallback_visible_messages(history, cfg))
+    return _trim_reasoning(
+        prefix + (shaped or _fallback_visible_messages(history, cfg)),
+        cfg,
+    )
+
+
+def _trim_reasoning(
+    messages: list[dict[str, str]],
+    cfg: PromptHistoryConfig,
+) -> list[dict[str, str]]:
+    """Keep reasoning only for the most recent turns, inside a fixed char budget."""
+    budget = cfg.reasoning_char_budget
+    kept_turns = 0
+    for message in reversed(messages):
+        if message.get("role") != "assistant" or "reasoning_content" not in message:
+            continue
+        if kept_turns >= cfg.max_reasoning_turns or budget <= 0:
+            message.pop("reasoning_content", None)
+            continue
+        text = message["reasoning_content"]
+        if len(text) > budget:
+            message["reasoning_content"] = text[:budget]
+        budget -= len(message["reasoning_content"])
+        kept_turns += 1
+    return messages
 
 
 def _shape_history_from_turns(
@@ -118,12 +148,16 @@ def _shape_recent_turn(turn: list[dict[str, Any]], cfg: PromptHistoryConfig) -> 
             if message.get("tool_calls"):
                 continue
             if isinstance(content, str) and content.strip():
-                shaped.append(
-                    {
-                        "role": "assistant",
-                        "content": clean_snippet(content, max_chars=cfg.max_assistant_chars),
-                    }
-                )
+                shaped_message = {
+                    "role": "assistant",
+                    "content": clean_snippet(content, max_chars=cfg.max_assistant_chars),
+                }
+                reasoning = message.get("reasoning_content")
+                if isinstance(reasoning, str) and reasoning.strip():
+                    shaped_message["reasoning_content"] = clean_snippet(
+                        reasoning, max_chars=cfg.max_reasoning_chars
+                    )
+                shaped.append(shaped_message)
 
     if tool_summary and not any(item["role"] == "assistant" for item in shaped[-1:]):
         shaped.append({"role": "system", "content": tool_summary})

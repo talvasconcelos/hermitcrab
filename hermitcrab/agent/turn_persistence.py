@@ -26,7 +26,7 @@ class TurnPersistence:
         update_session_timer: Callable[[str], None],
     ) -> None:
         for message in messages[skip:]:
-            entry = {k: v for k, v in message.items() if k != "reasoning_content"}
+            entry = dict(message)
             if (
                 entry.get("role") == "assistant"
                 and isinstance(entry.get("tool_calls"), list)

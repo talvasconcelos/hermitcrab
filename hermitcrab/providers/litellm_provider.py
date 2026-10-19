@@ -42,6 +42,9 @@ from hermitcrab.providers.utils import function_parts
 
 # Standard OpenAI chat-completion message keys; extras (e.g. reasoning_content) are stripped for strict providers.
 _ALLOWED_MSG_KEYS = frozenset({"role", "content", "tool_calls", "tool_call_id", "name"})
+# Providers that accept an assistant message's reasoning trace back on replay. Strict
+# OpenAI-compatible endpoints reject the field, so it is opt-in per provider.
+_REASONING_REPLAY_PROVIDERS = frozenset({"deepseek", "moonshot", "ollama", "vllm"})
 # Ollama-specific message keys (multimodal support)
 _OLLAMA_MSG_KEYS = frozenset({"images"})
 _ALNUM = string.ascii_letters + string.digits
@@ -438,6 +441,14 @@ class LiteLLMProvider(LLMProvider):
                     return
 
     @staticmethod
+    def _replays_reasoning(resolved_model: str, provider_name: str | None) -> bool:
+        """Whether this request's provider accepts an assistant reasoning trace back."""
+        if provider_name and provider_name in _REASONING_REPLAY_PROVIDERS:
+            return True
+        spec = find_by_model(resolved_model)
+        return bool(spec and spec.name in _REASONING_REPLAY_PROVIDERS)
+
+    @staticmethod
     def _instruction_spec_for_request(
         *,
         resolved_model: str,
@@ -468,15 +479,23 @@ class LiteLLMProvider(LLMProvider):
 
     @staticmethod
     def _sanitize_messages(
-        messages: list[dict[str, Any]], is_ollama: bool = False
+        messages: list[dict[str, Any]],
+        is_ollama: bool = False,
+        allow_reasoning: bool = False,
     ) -> list[dict[str, Any]]:
         """Strip non-standard keys and ensure assistant messages have a content key.
 
         Args:
             messages: List of message dicts to sanitize
             is_ollama: If True, allow Ollama-specific keys like 'images'
+            allow_reasoning: If True, keep 'reasoning_content' for reasoning-capable providers
         """
-        allowed_keys = _ALLOWED_MSG_KEYS | _OLLAMA_MSG_KEYS if is_ollama else _ALLOWED_MSG_KEYS
+        allowed = set(_ALLOWED_MSG_KEYS)
+        if is_ollama:
+            allowed |= _OLLAMA_MSG_KEYS
+        if allow_reasoning:
+            allowed.add("reasoning_content")
+        allowed_keys = frozenset(allowed)
         sanitized = LLMProvider._sanitize_request_messages(messages, allowed_keys)
         id_map: dict[str, str] = {}
 
@@ -585,6 +604,7 @@ class LiteLLMProvider(LLMProvider):
             "messages": self._sanitize_messages(
                 self._sanitize_empty_content(messages),
                 is_ollama=is_ollama,
+                allow_reasoning=self._replays_reasoning(resolved_model, request_provider_name),
             ),
             "max_tokens": max_tokens,
             "temperature": temperature,

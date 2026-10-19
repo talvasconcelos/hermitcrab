@@ -117,7 +117,11 @@ def summarizer_messages(
     span: list[dict[str, Any]],
     prior: CompactionCheckpoint | None,
 ) -> list[dict[str, Any]]:
-    """Replay the span as-is (cache-preserving prefix) and append the instruction."""
+    """Replay the span as-is, then append the instruction.
+
+    The span is sent unshaped so a provider that caches the raw conversation prefix can
+    still hit it; shaping would rewrite the earlier messages and miss that cache.
+    """
     messages = list(span)
     if prior is not None:
         messages.insert(0, checkpoint_message(prior))
