@@ -77,7 +77,6 @@ Verify the channel is enabled.
 
 - Telegram: Check bot token with BotFather
 - Nostr: Check private key is valid (nsec or 64-char hex)
-- Email: Check IMAP/SMTP credentials work
 
 3. Restart the gateway:
 
@@ -89,7 +88,6 @@ systemctl --user restart hermitcrab-gateway
 
 - Telegram: Test `curl https://api.telegram.org`
 - Nostr: Test relay WebSocket connectivity
-- Email: Test IMAP/SMTP with a mail client
 
 5. Run with verbose logging:
 
@@ -242,7 +240,6 @@ print('Invariants OK')
 
 - Nostr: Valid private key
 - Telegram: Valid bot token
-- Email: Valid IMAP/SMTP settings
 
 ## Data loss suspected
 
@@ -304,7 +301,6 @@ systemctl --user stop hermitcrab-gateway
 - Regenerate provider API keys
 - Regenerate Nostr key pair
 - Regenerate Telegram bot token
-- Change email passwords
 
 3. Review audit trail:
 

@@ -94,38 +94,9 @@ Classic Telegram bot.
 
 - `telegram:<chat_id>`
 
-## Email
+## Email (decommissioned)
 
-IMAP inbound + SMTP outbound integration.
-
-### Setup
-
-1. Enable IMAP and SMTP on your email provider
-2. Generate an app-specific password (not your main password)
-3. Configure both inbound (IMAP) and outbound (SMTP) settings
-
-### Behavior
-
-- Polls IMAP every 30 seconds (configurable)
-- Auto-replies to inbound emails (configurable: `autoReplyEnabled`)
-- Marks processed emails as read (configurable: `markSeen`)
-- Truncates body at 12000 characters (configurable: `maxBodyChars`)
-- Prefixes outbound replies with "Re: " (configurable: `subjectPrefix`)
-
-### Access control
-
-`allowFrom` lists allowed sender addresses:
-
-- `[]` — allow all
-- `["trusted@example.com"]` — allowlist
-
-### Consent
-
-`consentGranted` must be `true`. This is an explicit owner permission to access mailbox data.
-
-### Session keys
-
-- `email:<sender_address>`
+The email channel no longer runs. `channels.email` keys still parse so existing configs load, but every value is ignored.
 
 ## Outbound message dispatch
 

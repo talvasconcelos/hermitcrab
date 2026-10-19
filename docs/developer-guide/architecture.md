@@ -33,8 +33,8 @@ hermitcrab/
 │   ├── base.py      # BaseChannel ABC
 │   ├── manager.py   # ChannelManager — channel coordination
 │   ├── nostr.py     # NostrChannel — NIP-04/NIP-17
-│   ├── telegram.py  # TelegramChannel
-│   └── email.py     # EmailChannel — IMAP/SMTP
+│   ├── nostr_nip17.py # NIP-17 DM transport
+│   └── telegram.py  # TelegramChannel
 ├── providers/       # LLM provider abstractions
 │   ├── base.py      # LLMProvider ABC
 │   ├── registry.py  # ProviderSpec registry (20+ providers)

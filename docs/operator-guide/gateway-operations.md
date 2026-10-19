@@ -6,7 +6,7 @@ Run and manage the long-running HermitCrab gateway service.
 
 The gateway is the always-on service that powers:
 
-- **Channel connections** — Nostr, Telegram, email listening
+- **Channel connections** — Nostr, Telegram
 - **Cron service** — scheduled job execution
 - **Heartbeat service** — periodic agent wake-ups for task review
 - **Reminder service** — filesystem-backed reminder delivery

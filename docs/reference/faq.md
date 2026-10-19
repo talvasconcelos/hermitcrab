@@ -76,7 +76,7 @@ Yes. HermitCrab connects to Nostr relays (WebSocket servers). Default relays are
 
 ### Can I restrict who messages my agent?
 
-Yes. Use `allowedPubkeys` for Nostr, `allowFrom` for Telegram and email. Unknown senders are denied by default.
+Yes. Use `allowedPubkeys` for Nostr and `allowFrom` for Telegram. Unknown senders are denied by default.
 
 ## Tools and security
 

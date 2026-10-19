@@ -228,7 +228,9 @@ Channel configuration and behavior.
 | `proxy` | `null` | HTTP/SOCKS5 proxy URL |
 | `replyToMessage` | `false` | Quote original message |
 
-### channels.email
+### channels.email (decommissioned)
+
+Parsed for backward compatibility; ignored at runtime — no email channel runs.
 
 | Field | Default | Description |
 |-------|---------|-------------|
