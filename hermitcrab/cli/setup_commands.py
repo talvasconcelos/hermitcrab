@@ -53,6 +53,21 @@ def onboard():
 
     bootstrap_standard_layout(config, announce=console.print)
 
+    from hermitcrab.cli.diagnostics import build_status_report
+
+    report = build_status_report(config_path)
+    if not report.ready_for_chat:
+        console.print(
+            f"\n[yellow]{__logo__} workspace is initialized, but hermitcrab is not ready yet.[/yellow]"
+        )
+        if report.selected_provider:
+            console.print(
+                f"Default provider: [cyan]{report.selected_provider}[/cyan] — not configured."
+            )
+        for step in report.next_steps:
+            console.print(f"  {step}")
+        raise typer.Exit(1)
+
     console.print(f"\n{__logo__} hermitcrab is ready!")
     for line in build_onboard_next_steps():
         console.print(line)

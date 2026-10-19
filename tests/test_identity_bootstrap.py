@@ -68,7 +68,10 @@ def test_onboard_creates_standard_identity_layout(monkeypatch, tmp_path) -> None
 
     result = runner.invoke(app, ["onboard"])
 
-    assert result.exit_code == 0
+    # The layout is created first; readiness is reported honestly afterwards, so a
+    # fresh config with no provider exits non-zero on purpose.
+    assert result.exit_code == 1
+    assert "not ready yet" in result.output
     assert config_path.exists()
     assert (home / ".hermitcrab" / "system" / "AGENTS.md").exists()
     assert (home / ".hermitcrab" / "system" / "TOOLS.md").exists()
