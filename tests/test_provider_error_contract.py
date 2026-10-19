@@ -6,6 +6,8 @@ text as model output, retries were decided by substring-matching the formatted s
 user was told the model "kept acknowledging" instead of being shown a configuration failure.
 """
 
+from types import SimpleNamespace
+
 import pytest
 
 from hermitcrab.providers.base import LLMProvider, LLMResponse, ProviderError
@@ -103,7 +105,13 @@ async def test_litellm_provider_raises_instead_of_fabricating_content(monkeypatc
     async def boom(**_kwargs):
         raise RuntimeError("invalid api key")
 
-    monkeypatch.setattr(module, "acompletion", boom)
+    fake_litellm = SimpleNamespace(
+        acompletion=boom,
+        api_base=None,
+        suppress_debug_info=True,
+        drop_params=True,
+    )
+    monkeypatch.setattr(module, "_litellm_module", lambda: fake_litellm)
     provider = module.LiteLLMProvider(
         api_key="sk-test",
         default_model="deepseek/deepseek-flash",

@@ -18,8 +18,6 @@ from dataclasses import dataclass, field
 from typing import Any, Literal
 
 import json_repair
-import litellm
-from litellm import acompletion
 from loguru import logger
 
 from hermitcrab.providers.base import (
@@ -39,6 +37,19 @@ from hermitcrab.providers.registry import (
     normalize_provider_name,
 )
 from hermitcrab.providers.utils import function_parts
+
+
+def _litellm_module():
+    """Import LiteLLM on demand.
+
+    ponytail: importing litellm costs ~26s of CLI startup and every command that touches
+    config pulls this provider module in. Keep it out of the import path until a provider
+    actually runs a request.
+    """
+    import litellm
+
+    return litellm
+
 
 # Standard OpenAI chat-completion message keys; extras (e.g. reasoning_content) are stripped for strict providers.
 _ALLOWED_MSG_KEYS = frozenset({"role", "content", "tool_calls", "tool_call_id", "name"})
@@ -100,6 +111,7 @@ class LiteLLMProvider(LLMProvider):
         if api_key:
             self._setup_env(api_key, api_base, default_model)
 
+        litellm = _litellm_module()
         if api_base:
             litellm.api_base = api_base
 
@@ -795,7 +807,7 @@ class LiteLLMProvider(LLMProvider):
         )
 
         try:
-            response = await acompletion(**kwargs)
+            response = await _litellm_module().acompletion(**kwargs)
             return self._parse_response(response, model=ollama_model)
         except Exception as e:
             # Surface it: chat_with_retry retries transient errors, everyone else reports.
@@ -826,7 +838,7 @@ class LiteLLMProvider(LLMProvider):
         reasoning_parts: list[str] = []
         tool_states: dict[int, _StreamingToolCallState] = {}
 
-        stream = await acompletion(**kwargs)
+        stream = await _litellm_module().acompletion(**kwargs)
         async for chunk in stream:
             chunk_usage = getattr(chunk, "usage", None)
             if chunk_usage:
