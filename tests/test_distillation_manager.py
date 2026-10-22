@@ -235,7 +235,7 @@ async def test_distillation_response_audits_parse_and_schema_failures(tmp_path):
     assert events[-1]["reason"] == "Content is required; Evidence is required"
 
 
-def test_correction_with_same_fact_title_updates_existing_fact_without_duplicate(tmp_path):
+def test_explicit_fact_correction_updates_existing_fact_without_duplicate(tmp_path):
     manager = make_manager(tmp_path)
     old = AtomicCandidate(
         type=CandidateType.FACT,
@@ -253,9 +253,37 @@ def test_correction_with_same_fact_title_updates_existing_fact_without_duplicate
     )
 
     manager.commit_candidate_to_memory(old)
+    [existing] = manager.memory.list_memories("facts")
+    correction.fact_corrects = existing.id
     manager.commit_candidate_to_memory(correction)
 
     facts = manager.memory.list_memories("facts")
     assert len(facts) == 1
     assert facts[0].content == "User prefers concise replies unless they ask for detail."
     assert facts[0].metadata["evidence"] == "Actually, keep replies concise unless I ask for detail."
+    assert facts[0].metadata["corrects"] == existing.id
+
+
+def test_distilled_near_duplicate_without_explicit_target_is_preserved(tmp_path):
+    manager = make_manager(tmp_path)
+    manager.commit_candidate_to_memory(
+        AtomicCandidate(
+            type=CandidateType.FACT,
+            title="Alice lends books",
+            content="Alice lends books to Bob.",
+            confidence=0.8,
+            evidence="Alice lends books to Bob.",
+        )
+    )
+    manager.commit_candidate_to_memory(
+        AtomicCandidate(
+            type=CandidateType.FACT,
+            title="Bob lends books",
+            content="Bob lends books to Alice.",
+            confidence=0.8,
+            evidence="Bob lends books to Alice.",
+        )
+    )
+
+    facts = manager.memory.list_memories("facts")
+    assert len(facts) == 2

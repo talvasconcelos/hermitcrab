@@ -398,6 +398,7 @@ class DistillationManager:
             "For TASK type: task_assignee (required), task_status, task_deadline, task_priority\n"
             "For GOAL type: goal_status, goal_priority, goal_horizon\n"
             "For DECISION type: decision_status, decision_rationale, decision_supersedes\n"
+            "For FACT corrections only: fact_corrects (id/title of the existing fact being corrected)\n"
             "Be conservative. Skip weak, duplicate, or speculative items."
         )
         return prompt

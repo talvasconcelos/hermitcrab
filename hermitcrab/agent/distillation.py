@@ -100,6 +100,7 @@ class AtomicCandidate:
 
     # For FACT:
     fact_source: str | None = None
+    fact_corrects: str | None = None  # Id/title of the fact this explicitly corrects
 
     # For REFLECTION:
     reflection_context: str | None = None
@@ -127,6 +128,7 @@ class AtomicCandidate:
                 "confidence": self.confidence,
                 "source": self.fact_source,
                 "evidence": self.evidence,
+                "corrects": self.fact_corrects,
             }
         elif self.type == CandidateType.DECISION:
             return {
@@ -223,6 +225,7 @@ class AtomicCandidate:
             "decision_rationale": self.decision_rationale,
             "decision_supersedes": self.decision_supersedes,
             "fact_source": self.fact_source,
+            "fact_corrects": self.fact_corrects,
             "reflection_context": self.reflection_context,
             "created_at": self.created_at.isoformat(),
             "extra": self.extra,
@@ -271,6 +274,7 @@ class AtomicCandidate:
             decision_rationale=data.get("decision_rationale"),
             decision_supersedes=data.get("decision_supersedes"),
             fact_source=data.get("fact_source"),
+            fact_corrects=data.get("fact_corrects"),
             reflection_context=data.get("reflection_context"),
             created_at=created_at,
             extra=data.get("extra", {}),
@@ -372,6 +376,10 @@ DISTILLATION_JSON_SCHEMA = {
                     "fact_source": {
                         "type": "string",
                         "description": "Source of the fact",
+                    },
+                    "fact_corrects": {
+                        "type": "string",
+                        "description": "Id/title of an existing fact this explicitly corrects",
                     },
                     # Reflection-specific fields
                     "reflection_context": {

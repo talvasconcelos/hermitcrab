@@ -184,7 +184,9 @@ class WriteFactTool(Tool):
         return (
             "Save a long-term fact to memory (user preferences, established truths, project context). "
             "Use wikilinks [[Like This]] to connect related memories when it makes sense "
-            "(e.g., 'User prefers [[Python]] for backend development')."
+            "(e.g., 'User prefers [[Python]] for backend development'). "
+            "When the user explicitly corrects an existing fact, pass that fact's id in 'corrects'; "
+            "otherwise write a new fact."
         )
 
     @property
@@ -207,6 +209,13 @@ class WriteFactTool(Tool):
                     "type": "string",
                     "description": "Source of the fact (e.g., 'user statement', 'web search')",
                 },
+                "corrects": {
+                    "type": "string",
+                    "description": (
+                        "Fact id or exact title this payload explicitly corrects. "
+                        "Omit for new facts; distinct facts are never merged automatically."
+                    ),
+                },
             },
             "required": ["title", "content"],
         }
@@ -218,6 +227,7 @@ class WriteFactTool(Tool):
         tags: list[str] | None = None,
         confidence: float | None = None,
         source: str | None = None,
+        corrects: str | None = None,
         **kwargs: Any,
     ) -> str:
         try:
@@ -227,6 +237,7 @@ class WriteFactTool(Tool):
                 tags=tags,
                 confidence=confidence,
                 source=source,
+                corrects=corrects,
             )
             action = item.metadata.get("_write_action", "created")
             if action == "updated_existing":
