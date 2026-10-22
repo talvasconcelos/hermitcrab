@@ -2,6 +2,14 @@
 
 All notable changes to HermitCrab.
 
+## [0.1.1b6] — 2026-10-22
+
+### Fixed
+
+- **OpenRouter/LiteLLM fresh installs** — declare LiteLLM's MCP integration requirements and require MCP 2.2+ so tool-calling requests can import `CacheableResult`. Adapt HermitCrab's MCP tool schemas and HTTP transport to the MCP 2 SDK.
+- **Provider retries** — missing modules and incompatible imports are reported immediately instead of being retried as connection failures.
+- **Release validation** — the real LiteLLM MCP bridge import no longer skips when FastAPI is installed. Added streaming/non-streaming SDK requests against a local HTTP endpoint and a real MCP subprocess tool round trip; verified the suite against both locked and freshly resolved dependencies.
+
 ## [0.1.0b6] — 2026-10-22
 
 ### Added

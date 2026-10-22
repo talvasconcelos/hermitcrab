@@ -90,6 +90,8 @@ class LLMProvider(ABC):
         "permission denied",
         "not found",
         "bad request",
+        "cannot import name",
+        "no module named",
     )
     _TRANSIENT_ERROR_MARKERS = (
         "429",

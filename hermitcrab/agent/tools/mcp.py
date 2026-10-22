@@ -4,7 +4,7 @@ import asyncio
 from contextlib import AsyncExitStack
 from typing import Any
 
-import httpx
+import httpx2
 from loguru import logger
 
 from hermitcrab.agent.tools.base import Tool
@@ -19,7 +19,7 @@ class MCPToolWrapper(Tool):
         self._original_name = tool_def.name
         self._name = f"mcp_{server_name}_{tool_def.name}"
         self._description = tool_def.description or tool_def.name
-        self._parameters = tool_def.inputSchema or {"type": "object", "properties": {}}
+        self._parameters = tool_def.input_schema or {"type": "object", "properties": {}}
         self._tool_timeout = tool_timeout
 
     @property
@@ -73,16 +73,15 @@ async def connect_mcp_servers(
             elif cfg.url:
                 from mcp.client.streamable_http import streamable_http_client
 
-                # Always provide an explicit httpx client so MCP HTTP transport does not
-                # inherit httpx's default 5s timeout and preempt the higher-level tool timeout.
+                # The tool timeout, rather than the HTTP client's default, bounds execution.
                 http_client = await server_stack.enter_async_context(
-                    httpx.AsyncClient(
+                    httpx2.AsyncClient(
                         headers=cfg.headers or None,
                         follow_redirects=True,
                         timeout=None,
                     )
                 )
-                read, write, _ = await server_stack.enter_async_context(
+                read, write = await server_stack.enter_async_context(
                     streamable_http_client(cfg.url, http_client=http_client)
                 )
             else:

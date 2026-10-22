@@ -98,6 +98,31 @@ def test_transient_classification_never_retries_configuration_failures(
     assert LLMProvider._is_transient_error(message) is expected
 
 
+@pytest.mark.parametrize("failure", [
+    "cannot import name 'CacheableResult' from 'mcp.types'",
+    "No module named 'fastapi'",
+])
+async def test_wrapped_dependency_failure_is_not_retried(monkeypatch, failure) -> None:
+    from hermitcrab.providers import litellm_provider as module
+
+    _no_backoff(monkeypatch)
+    calls = 0
+
+    async def boom(**kwargs):
+        nonlocal calls
+        calls += 1
+        raise RuntimeError(f"litellm.APIConnectionError: OpenrouterException - {failure}")
+
+    monkeypatch.setattr(module, "_litellm_module", lambda: SimpleNamespace(acompletion=boom))
+    provider = module.LiteLLMProvider(default_model="openrouter/openrouter/auto")
+
+    with pytest.raises(ProviderError) as excinfo:
+        await provider.chat_with_retry(messages=[{"role": "user", "content": "hi"}])
+
+    assert not excinfo.value.transient
+    assert calls == 1
+
+
 @pytest.mark.asyncio
 async def test_litellm_provider_raises_instead_of_fabricating_content(monkeypatch) -> None:
     from hermitcrab.providers import litellm_provider as module
