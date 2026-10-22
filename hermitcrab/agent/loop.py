@@ -1110,7 +1110,9 @@ class AgentLoop:
                     msg = await asyncio.wait_for(self.bus.consume_inbound(), timeout=1.0)
                     try:
                         response = await self.handle_inbound(msg)
-                    except BaseException as exc:
+                    except asyncio.CancelledError:
+                        raise
+                    except Exception as exc:
                         await self.bus.fail_inbound(msg, str(exc))
                         raise
                     else:

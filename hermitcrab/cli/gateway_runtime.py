@@ -335,7 +335,10 @@ async def run_gateway_inbound_router(
         """Complete durable inbound work only after the routed turn finishes."""
         try:
             await coro
-        except BaseException as exc:
+        except asyncio.CancelledError:
+            # Leave the row processing so the next startup reports it as uncertain.
+            raise
+        except Exception as exc:
             await bus.fail_inbound(msg, str(exc))
             raise
         else:
