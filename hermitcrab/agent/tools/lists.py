@@ -22,7 +22,9 @@ class ShowListTool(Tool):
     def description(self) -> str:
         return (
             "Show an updateable checklist (groceries, gift ideas, packing lists, etc.). "
-            "Use for 'show my list' or 'what do I still need?'."
+            "Use for 'show my list', 'what do I still need?', or tasks and chores on a checklist. "
+            "Use alongside memory task reads when checking what work remains; checklist items "
+            "are stored separately from memory tasks."
         )
 
     @property
