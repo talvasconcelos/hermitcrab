@@ -4,7 +4,7 @@ from typing import Any
 
 from loguru import logger
 
-from hermitcrab.agent.memory import MemoryItem, MemoryStore
+from hermitcrab.agent.memory import MemoryCategory, MemoryItem, MemoryStore, TaskStatus
 from hermitcrab.agent.tools.base import Tool
 
 _MAX_MEMORY_ITEM_CHARS = 400
@@ -29,6 +29,13 @@ def _format_memory_items(items: list[MemoryItem], *, limit: int | None = None) -
     lines: list[str] = []
     for item in items:
         lines.append(f"[{item.category.value}] {item.title} (id={item.id})")
+        if item.category == MemoryCategory.TASKS:
+            lines.append(
+                f"Status: {item.metadata.get('status', TaskStatus.OPEN.value)} | "
+                f"Assignee: {item.metadata.get('assignee', '')}"
+            )
+            if item.metadata.get("deadline"):
+                lines.append(f"Deadline: {item.metadata['deadline']}")
         if item.content:
             lines.append(_truncate(item.content))
     return "\n".join(lines)
@@ -48,7 +55,9 @@ class ReadMemoryTool(Tool):
     def description(self) -> str:
         return (
             "Read memory items from one category. "
-            "Use this when you need user-specific or project-specific long-term context."
+            "Use this when you need user-specific or project-specific long-term context. "
+            "The tasks category does not contain checklist items. For broad questions about "
+            "open tasks or things left to do, also check relevant checklists with list_show."
         )
 
     @property
@@ -405,7 +414,10 @@ class WriteTaskTool(Tool):
     @property
     def description(self) -> str:
         return (
-            "Save a task to memory (action items, todos, things to do). "
+            "Create a task in memory (action items, todos, things to do). "
+            "New tasks start open. "
+            "To complete or change an existing task, use update_task_status with its ID from "
+            "read_memory or search_memory; rewriting a task's content creates a separate task. "
             "Use only when someone should actually do or track the item. "
             "Do not use for reference notes or checklists/shopping lists that should live in the first-class lists surface. "
             "Use wikilinks [[Like This]] to connect to related [[Goals]], [[Decisions]], or other [[Tasks]]. "
@@ -430,8 +442,8 @@ class WriteTaskTool(Tool):
                 },
                 "status": {
                     "type": "string",
-                    "enum": ["open", "in_progress", "done", "deferred"],
-                    "description": "Task status",
+                    "enum": ["open"],
+                    "description": "New tasks start open; use update_task_status for status changes",
                 },
                 "deadline": {
                     "type": "string",
@@ -458,6 +470,8 @@ class WriteTaskTool(Tool):
         **kwargs: Any,
     ) -> str:
         try:
+            if status != "open":
+                return "Error: Use update_task_status with an existing task ID to change its status."
             item = self.memory.write_task(
                 title=title,
                 content=content,
@@ -470,6 +484,45 @@ class WriteTaskTool(Tool):
             return f"Task saved: {item.title} (assigned to {assignee})"
         except Exception as e:
             return f"Error saving task: {str(e)}"
+
+
+class UpdateTaskStatusTool(Tool):
+    """Update an existing task without recreating it from model-generated content."""
+
+    def __init__(self, memory: MemoryStore):
+        self.memory = memory
+
+    @property
+    def name(self) -> str:
+        return "update_task_status"
+
+    @property
+    def description(self) -> str:
+        return (
+            "Change an existing task's status by its exact ID from read_memory or search_memory. "
+            "Use to mark tasks done, in progress, deferred, or open. Preserves task content and ID. "
+            "For multiple tasks, call once per task ID."
+        )
+
+    @property
+    def parameters(self) -> dict[str, Any]:
+        return {
+            "type": "object",
+            "properties": {
+                "task_id": {"type": "string", "minLength": 1, "description": "Exact task ID"},
+                "status": {"type": "string", "enum": [status.value for status in TaskStatus]},
+            },
+            "required": ["task_id", "status"],
+        }
+
+    async def execute(self, task_id: str, status: str, **kwargs: Any) -> str:
+        try:
+            item = self.memory.update_task_status(task_id, status)
+            if item is None:
+                return f"Error updating task: task ID {task_id!r} not found"
+            return f"Task updated: {item.title} (id={item.id}, status={item.metadata['status']})"
+        except Exception as e:
+            return f"Error updating task: {str(e)}"
 
 
 class WriteReflectionTool(Tool):

@@ -83,6 +83,9 @@ _DEFAULT_TOOL_METADATA: dict[str, ToolMetadata] = {
     "write_decision": ToolMetadata(ToolPermissionLevel.WORKSPACE_WRITE, False, ("memory", "write")),
     "write_goal": ToolMetadata(ToolPermissionLevel.WORKSPACE_WRITE, False, ("memory", "write")),
     "write_task": ToolMetadata(ToolPermissionLevel.WORKSPACE_WRITE, False, ("memory", "write")),
+    "update_task_status": ToolMetadata(
+        ToolPermissionLevel.WORKSPACE_WRITE, False, ("memory", "write")
+    ),
     "write_reflection": ToolMetadata(
         ToolPermissionLevel.WORKSPACE_WRITE, False, ("memory", "write")
     ),
