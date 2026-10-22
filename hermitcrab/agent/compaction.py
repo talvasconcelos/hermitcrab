@@ -29,20 +29,22 @@ CHECKPOINT_INSTRUCTION = """You are now acting as a compaction engine for this A
 Output EXACTLY the Markdown structure below: keep every section, in order. Use terse bullets, not prose paragraphs. Write "(none)" for an empty section — never drop a section.
 
 ## Primary Request and Intent
-## Key Technical Concepts
-## Files and Code
-## Errors and Fixes
-## Pending Jobs
+## Commitments, Tasks, and Deadlines
+## Preferences and Corrections
+## People and Relationships
+## Open Questions
+## Key Details and Decisions
 ## Current Work
 ## Next Step
-## Critical Context
 
 Rules:
-- Preserve exact file paths, commands, error strings, identifiers, numeric values, and function signatures.
+- Capture what the user wants, has promised, and has explicitly corrected; these outrank incidental detail.
+- Preserve exact file paths, commands, error strings, identifiers, numeric values, and function signatures when the work depends on them. Retain technical detail only when it is essential.
+- Keep unresolved questions and the next step explicit.
 - Capture user feedback and explicit corrections faithfully.
 - Do NOT mention this summarization request or that the context was compacted.
 - Output only the checkpoint text: do not call any tool.
-- If the conversation already contains a <compacted-summary> block, it is a PRIOR checkpoint: preserve still-true facts, drop stale ones, and merge newer information into one consolidated summary.
+- If the conversation already contains a <compacted-summary> block, it is a PRIOR checkpoint: preserve still-true commitments, preferences, and corrections, drop stale facts, and merge newer information into one consolidated summary.
 """
 
 
@@ -97,10 +99,34 @@ def visible_after_checkpoint(
     return history[cut:]
 
 
-def needs_compaction(raw_history: list[dict[str, Any]], context_window: int) -> bool:
+def _visible_prompt_tokens(
+    raw_history: list[dict[str, Any]],
+    checkpoint: CompactionCheckpoint | None,
+) -> int:
+    """Estimate the prompt actually sent: checkpoint plus uncovered history."""
+    if checkpoint is None:
+        return estimate_message_tokens(_chat_messages(raw_history))
+    covered = max(0, checkpoint.covered)
+    tail = _chat_messages(raw_history[covered:])
+    return estimate_message_tokens([checkpoint_message(checkpoint), *tail])
+
+
+def needs_compaction(
+    raw_history: list[dict[str, Any]],
+    context_window: int,
+    *,
+    checkpoint: CompactionCheckpoint | None = None,
+) -> bool:
+    """Return True when the visible prompt, not the raw log, is near the window.
+
+    Measuring the raw log re-summarizes history a checkpoint already covers and pays
+    for the same context repeatedly.
+    """
     if context_window <= 0:
         return False
-    return estimate_message_tokens(raw_history) >= int(context_window * THRESHOLD_RATIO)
+    return _visible_prompt_tokens(raw_history, checkpoint) >= int(
+        context_window * THRESHOLD_RATIO
+    )
 
 
 def _retain_cut(messages: list[dict[str, Any]], *, covered: int, retain_tokens: int) -> int:
@@ -143,7 +169,7 @@ async def compact_session(
     messages: list[dict[str, Any]] = session.messages
     if covered >= len(messages):
         return CompactionResult(prior)
-    if not force and not needs_compaction(_chat_messages(messages), context_window):
+    if not force and not needs_compaction(messages, context_window, checkpoint=prior):
         return CompactionResult(prior)
 
     cut = _retain_cut(

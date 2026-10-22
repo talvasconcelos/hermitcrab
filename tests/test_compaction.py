@@ -89,6 +89,15 @@ def test_summarizer_replays_the_span_and_merges_a_prior_checkpoint() -> None:
     assert merged[-1]["content"] == CHECKPOINT_INSTRUCTION
 
 
+def test_checkpoint_instruction_prioritizes_user_context_over_code() -> None:
+    assert "## Primary Request and Intent" in CHECKPOINT_INSTRUCTION
+    assert "## Commitments, Tasks, and Deadlines" in CHECKPOINT_INSTRUCTION
+    assert "## Preferences and Corrections" in CHECKPOINT_INSTRUCTION
+    assert "## Open Questions" in CHECKPOINT_INSTRUCTION
+    assert "Files and Code" not in CHECKPOINT_INSTRUCTION
+    assert "technical detail only when it is essential" in CHECKPOINT_INSTRUCTION
+
+
 async def test_compact_session_stores_a_checkpoint_without_touching_the_log() -> None:
     messages = _messages(40, chars=400)
     session = _Session(messages)
@@ -171,3 +180,44 @@ def test_checkpoint_message_is_always_tagged(covered: int) -> None:
     assert message["role"] == "user"
     assert message["content"].startswith(f"<{COMPACTED_SUMMARY_TAG}>")
     assert message["content"].rstrip().endswith(f"</{COMPACTED_SUMMARY_TAG}>")
+
+
+def test_needs_compaction_ignores_history_the_checkpoint_covers() -> None:
+    messages = _messages(100, chars=400)
+    checkpoint = CompactionCheckpoint(summary="Short summary.", covered=90, created_at="")
+
+    assert needs_compaction(messages, 10_000) is True
+    assert needs_compaction(messages, 10_000, checkpoint=checkpoint) is False
+
+
+async def test_follow_up_turns_do_not_resummarize_covered_history() -> None:
+    messages = _messages(100, chars=400)
+    session = _Session(messages)
+
+    async def chat(**kwargs):
+        return _Response("## Primary Request and Intent\n- compacted once")
+
+    first = await compact_session(
+        session=session,
+        chat=chat,
+        model="test-model",
+        context_window=10_000,
+    )
+    assert first.compacted is True
+    covered = first.checkpoint.covered
+    assert covered > 0
+
+    session.messages.extend(_messages(4, chars=400))
+
+    async def chat_should_not_run(**kwargs):
+        raise AssertionError("covered history must not be summarized again")
+
+    second = await compact_session(
+        session=session,
+        chat=chat_should_not_run,
+        model="test-model",
+        context_window=10_000,
+    )
+
+    assert second.compacted is False
+    assert load_checkpoint(session).covered == covered
