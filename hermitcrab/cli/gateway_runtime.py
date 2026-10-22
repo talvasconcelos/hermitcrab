@@ -329,6 +329,16 @@ async def run_gateway_inbound_router(
 
     pending_tasks: set[asyncio.Task[None]] = set()
 
+    async def run_with_ack(coro: Any, msg: Any) -> None:
+        """Complete durable inbound work only after the routed turn finishes."""
+        try:
+            await coro
+        except BaseException as exc:
+            await bus.fail_inbound(msg, str(exc))
+            raise
+        else:
+            await bus.ack_inbound(msg)
+
     async def handle_routed_message(msg: Any) -> None:
         route = resolve_gateway_identity_route(
             msg,
@@ -391,7 +401,7 @@ async def run_gateway_inbound_router(
         while True:
             try:
                 msg = await asyncio.wait_for(bus.consume_inbound(), timeout=1.0)
-                task = asyncio.create_task(handle_routed_message(msg))
+                task = asyncio.create_task(run_with_ack(handle_routed_message(msg), msg))
                 track_task(task)
             except asyncio.TimeoutError:
                 continue

@@ -1108,7 +1108,13 @@ class AgentLoop:
             while self._running:
                 try:
                     msg = await asyncio.wait_for(self.bus.consume_inbound(), timeout=1.0)
-                    response = await self.handle_inbound(msg)
+                    try:
+                        response = await self.handle_inbound(msg)
+                    except BaseException as exc:
+                        await self.bus.fail_inbound(msg, str(exc))
+                        raise
+                    else:
+                        await self.bus.ack_inbound(msg)
                     if response is not None:
                         await self.bus.publish_outbound(response)
                     elif msg.channel == "cli":

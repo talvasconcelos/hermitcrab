@@ -68,6 +68,7 @@ def gateway(
     from loguru import logger
 
     from hermitcrab.agent.loop import AgentLoop
+    from hermitcrab.bus.inbox import InboundInbox
     from hermitcrab.bus.queue import MessageBus
     from hermitcrab.channels.manager import ChannelManager
     from hermitcrab.heartbeat.service import HeartbeatService
@@ -85,7 +86,8 @@ def gateway(
     config = load_runtime_config()
     if config.workspace_path != config.admin_workspace_path:
         raise RuntimeError("admin workspace invariant failed: workspace_path must equal admin_workspace_path")
-    bus = MessageBus()
+    inbox = InboundInbox(config.system_root_path / "inbox" / "inbound.sqlite3")
+    bus = MessageBus(inbox=inbox)
     provider = make_provider(config, console)
     session_manager = create_session_manager(config.owner_identity_root_path)
     routing_active = identity_routing_active(config)
@@ -165,6 +167,11 @@ def gateway(
 
     async def run():
         try:
+            recovered = await bus.recover_inbound()
+            if recovered:
+                console.print(
+                    f"[yellow]Recovered {recovered} pending inbound message(s)[/yellow]"
+                )
             await identity_state.start_cron_services()
             await identity_state.start_heartbeat_services()
             await timeout_monitor.start()

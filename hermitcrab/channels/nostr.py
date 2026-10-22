@@ -823,6 +823,8 @@ class NostrChannel(BaseChannel):
                 len(content or ""),
             )
 
+            if canonical_id:
+                metadata["canonical_id"] = canonical_id
             session_key = self._session_key_for_sender(sender_pubkey, metadata)
             await self._handle_inbound_message(
                 session_key=session_key,
