@@ -2,6 +2,30 @@
 
 All notable changes to HermitCrab.
 
+## [0.1.0b6] — 2026-10-22
+
+### Added
+
+- **Context compaction** — DSH-style checkpoint summarization folds an older span into one `<compacted-summary>` message. The raw session log is kept intact, and the checkpoint is persisted in session metadata.
+- **Durable inbound work** — channel events are recorded in a SQLite inbox before they are queued. Pending work is replayed after a restart; a turn interrupted by a crash is marked `uncertain` and is not repeated blindly.
+- **Delivery ledger** — due reminders are recorded in a SQLite outbox with attempts, errors, and stable status (`queued`, `sending`, `sent`, `failed`, `uncertain`).
+- **Known limitations** — [docs/known-limitations.md](known-limitations.md) states the exact Nostr offline catch-up and recovery bounds.
+
+### Changed
+
+- **Compaction trigger** measures the checkpoint plus uncovered history instead of the raw log, so follow-up turns do not re-summarize history a checkpoint already covers.
+- **Compaction checkpoint template** emphasizes user intent, commitments, preferences, corrections, and open questions; technical detail is retained only when the work depends on it.
+- **Nostr and agent logs** record event ids and message lengths instead of conversation content.
+- **Fact corrections** require an explicit target (`write_fact(corrects=...)`); title or word overlap alone no longer rewrites a fact.
+- Refreshed `uv.lock` for the beta6 dependency set and release metadata.
+
+### Fixed
+
+- **Memory** — distinct, negated, or reversed facts are preserved instead of being merged by token coverage. Fact confidence now survives a write/read round trip.
+- **Reminders** — a reminder advances only after the target channel accepts the notification. Failed deliveries retry up to a bound and remain visible in frontmatter and logs.
+- **Nostr** — receipt is acknowledged only after durable inbound storage; sending raises when no relay accepted the message.
+- **Telegram/Nostr** — send failures are no longer swallowed.
+
 ## [0.1.0b5.post1] — 2026-09-04
 
 ### Fixed
