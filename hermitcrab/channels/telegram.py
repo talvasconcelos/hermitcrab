@@ -13,7 +13,7 @@ from telegram.request import HTTPXRequest
 
 from hermitcrab.bus.events import OutboundMessage
 from hermitcrab.bus.queue import MessageBus
-from hermitcrab.channels.base import BaseChannel
+from hermitcrab.channels.base import BaseChannel, ChannelDeliveryError, DeliveryReceipt
 from hermitcrab.config.schema import TelegramConfig
 
 
@@ -225,19 +225,17 @@ class TelegramChannel(BaseChannel):
             return "audio"
         return "document"
 
-    async def send(self, msg: OutboundMessage) -> None:
+    async def send(self, msg: OutboundMessage) -> DeliveryReceipt:
         """Send a message through Telegram."""
         if not self._app:
-            logger.warning("Telegram bot not running")
-            return
+            raise ChannelDeliveryError("Telegram bot is not running")
 
         self._stop_typing(msg.chat_id)
 
         try:
             chat_id = int(msg.chat_id)
-        except ValueError:
-            logger.error("Invalid chat_id: {}", msg.chat_id)
-            return
+        except ValueError as exc:
+            raise ChannelDeliveryError(f"Invalid chat_id: {msg.chat_id}") from exc
 
         reply_params = None
         if self.config.reply_to_message:
@@ -246,6 +244,8 @@ class TelegramChannel(BaseChannel):
                 reply_params = ReplyParameters(
                     message_id=reply_to_message_id, allow_sending_without_reply=True
                 )
+
+        sent_any = False
 
         # Send media files
         for media_path in msg.media or []:
@@ -265,31 +265,46 @@ class TelegramChannel(BaseChannel):
                 )
                 with open(media_path, "rb") as f:
                     await sender(chat_id=chat_id, **{param: f}, reply_parameters=reply_params)
+                sent_any = True
             except Exception as e:
                 filename = media_path.rsplit("/", 1)[-1]
                 logger.error("Failed to send media {}: {}", media_path, e)
-                await self._app.bot.send_message(
-                    chat_id=chat_id,
-                    text=f"[Failed to send: {filename}]",
-                    reply_parameters=reply_params,
-                )
+                try:
+                    await self._app.bot.send_message(
+                        chat_id=chat_id,
+                        text=f"[Failed to send: {filename}]",
+                        reply_parameters=reply_params,
+                    )
+                    sent_any = True
+                except Exception as notice_error:
+                    logger.error("Failed to send media failure notice: {}", notice_error)
 
         # Send text content
-        if msg.content and msg.content != "[empty message]":
+        sent_text = False
+        has_text = bool(msg.content and msg.content != "[empty message]")
+        if has_text:
             for chunk in _split_message(msg.content):
                 try:
                     html = _markdown_to_telegram_html(chunk)
                     await self._app.bot.send_message(
                         chat_id=chat_id, text=html, parse_mode="HTML", reply_parameters=reply_params
                     )
+                    sent_text = True
                 except Exception as e:
                     logger.warning("HTML parse failed, falling back to plain text: {}", e)
                     try:
                         await self._app.bot.send_message(
                             chat_id=chat_id, text=chunk, reply_parameters=reply_params
                         )
+                        sent_text = True
                     except Exception as e2:
                         logger.error("Error sending Telegram message: {}", e2)
+
+        if has_text and not sent_text:
+            raise ChannelDeliveryError("Telegram did not accept the message")
+        if msg.media and not sent_any:
+            raise ChannelDeliveryError("Telegram did not accept any media")
+        return DeliveryReceipt(True)
 
     async def _on_start(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Handle /start command."""

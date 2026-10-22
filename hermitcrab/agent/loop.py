@@ -100,6 +100,7 @@ from hermitcrab.agent.tools.mcp import connect_mcp_servers
 from hermitcrab.agent.tools.memory import (
     ReadMemoryTool,
     SearchMemoryTool,
+    UpdateTaskStatusTool,
     WriteDecisionTool,
     WriteFactTool,
     WriteGoalTool,
@@ -394,6 +395,7 @@ class AgentLoop:
         self.tools.register(WriteDecisionTool(self.memory))
         self.tools.register(WriteGoalTool(self.memory))
         self.tools.register(WriteTaskTool(self.memory))
+        self.tools.register(UpdateTaskStatusTool(self.memory))
         self.tools.register(WriteReflectionTool(self.memory))
 
         # Knowledge base tools (explicit retrieval only, never auto-loaded)
@@ -1108,7 +1110,15 @@ class AgentLoop:
             while self._running:
                 try:
                     msg = await asyncio.wait_for(self.bus.consume_inbound(), timeout=1.0)
-                    response = await self.handle_inbound(msg)
+                    try:
+                        response = await self.handle_inbound(msg)
+                    except asyncio.CancelledError:
+                        raise
+                    except Exception as exc:
+                        await self.bus.fail_inbound(msg, str(exc))
+                        raise
+                    else:
+                        await self.bus.ack_inbound(msg)
                     if response is not None:
                         await self.bus.publish_outbound(response)
                     elif msg.channel == "cli":
@@ -1241,8 +1251,12 @@ class AgentLoop:
         if msg.channel == "system":
             return await self._process_system_message(msg)
 
-        preview = msg.content[:80] + "..." if len(msg.content) > 80 else msg.content
-        logger.info("Processing message from {}:{}: {}", msg.channel, msg.sender_id, preview)
+        logger.info(
+            "Processing message from {}:{} (chars={})",
+            msg.channel,
+            msg.sender_id,
+            len(msg.content or ""),
+        )
         return await self._process_user_message(
             msg, session_key=session_key, on_progress=on_progress
         )
@@ -1522,8 +1536,12 @@ class AgentLoop:
                     turn_result.outcome = TurnOutcome.EMPTY_REPLY
 
             self._record_final_execution_state(key, final_content, turn_result.outcome)
-            preview = final_content[:120] + "..." if len(final_content) > 120 else final_content
-            logger.info("Response to {}:{}: {}", msg.channel, msg.sender_id, preview)
+            logger.info(
+                "Response to {}:{} (chars={})",
+                msg.channel,
+                msg.sender_id,
+                len(final_content or ""),
+            )
 
             self._background_jobs.save_turn(
                 session,
@@ -1537,7 +1555,9 @@ class AgentLoop:
                 result_messages=turn_result.messages,
                 tools_used=turn_result.tools_used,
             )
-            self._update_pending_work(session, msg, turn_result)
+            self._update_pending_work(
+                session, msg, turn_result, resumed_pending_work=build_result.resumed_pending_work
+            )
             self.sessions.save(session)
 
             if message_tool := self.tools.get("message"):
@@ -1899,6 +1919,8 @@ class AgentLoop:
         session: Session,
         msg: InboundMessage,
         result: TurnResult,
+        *,
+        resumed_pending_work: PendingWork | None = None,
     ) -> None:
         """Persist unresolved actionable work at the coordinator layer."""
         pending = PendingWork.from_metadata(session.metadata)
@@ -1955,7 +1977,9 @@ class AgentLoop:
             outcome == TurnOutcome.COMPLETED
             and result.tools_used
             and (
-                has_structured_payload(msg.content) or relates_to_pending_work(pending, msg.content)
+                resumed_pending_work is not None
+                or has_structured_payload(msg.content)
+                or relates_to_pending_work(pending, msg.content)
             )
         ):
             session.metadata.pop("pending_work", None)

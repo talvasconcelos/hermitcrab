@@ -4,7 +4,10 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
+import pytest
+
 from hermitcrab.agent.loop import AgentLoop
+from hermitcrab.agent.tools.policy import get_default_tool_metadata
 from hermitcrab.agent.turn_runner import TurnOutcome, TurnRunner, TurnRunnerConfig
 from hermitcrab.providers.base import LLMResponse, ProviderError, ToolCallRequest
 
@@ -30,6 +33,9 @@ class _Tools:
     def get_definitions(self):
         return [{"type": "function"}]
 
+    def get_metadata(self, name):
+        return get_default_tool_metadata(name)
+
     def has(self, name):
         return True
 
@@ -37,8 +43,10 @@ class _Tools:
         return self.results[name]
 
 
-def _runner(responses, tool_results=None):
+def _runner(responses, tool_results=None, *, memory_authority="NO"):
     async def chat(**kwargs):
+        if kwargs.get("tools") == []:
+            return LLMResponse(content=memory_authority)
         return responses.pop(0)
 
     return TurnRunner(
@@ -221,6 +229,206 @@ async def test_run_uses_tool_fallback_after_repeated_empty_post_tool_response() 
 
     assert result.outcome.value == "tool_fallback"
     assert "important result" in result.final_content
+
+
+async def test_task_update_fallback_keeps_unverified_work_pending() -> None:
+    from hermitcrab.agent.pending_work import PendingWork
+    from hermitcrab.bus.events import InboundMessage
+    from hermitcrab.session.manager import Session
+
+    runner = _runner(
+        [
+            LLMResponse(
+                content=None,
+                tool_calls=[ToolCallRequest("one", "update_task_status", {
+                    "task_id": "1234", "status": "done",
+                })],
+            ),
+            LLMResponse(content=None),
+            LLMResponse(content=None),
+        ],
+        {"update_task_status": "Task updated: School trip prep (id=1234, status=done)"},
+    )
+    request = "mark the school trip task done please"
+    result = await runner.run([{"role": "user", "content": request}])
+
+    assert result.outcome == TurnOutcome.TOOL_FALLBACK
+    assert "status=done" in result.final_content
+    assert "before confirming the full request was complete" in result.final_content
+    session = Session(key="cli:direct")
+    AgentLoop._update_pending_work(
+        None, session, InboundMessage(channel="cli", sender_id="user", chat_id="direct",
+                                     content=request), result,
+    )
+    assert PendingWork.from_metadata(session.metadata) is not None
+
+
+async def test_partial_batch_fallback_does_not_complete_the_request(tmp_path) -> None:
+    from hermitcrab.agent.memory import MemoryStore
+    from hermitcrab.agent.tools.memory import ReadMemoryTool, UpdateTaskStatusTool
+    from hermitcrab.agent.tools.registry import ToolRegistry
+
+    store = MemoryStore(tmp_path)
+    first = store.write_task("First", "First task.", "tal")
+    second = store.write_task("Second", "Second task.", "tal")
+    registry = ToolRegistry()
+    registry.register(ReadMemoryTool(store))
+    registry.register(UpdateTaskStatusTool(store))
+    runner = _runner([
+        LLMResponse(content=None, tool_calls=[
+            ToolCallRequest("read", "read_memory", {"category": "tasks"}),
+        ]),
+        LLMResponse(content=None, tool_calls=[
+            ToolCallRequest("update", "update_task_status", {"task_id": first.id, "status": "done"}),
+        ]),
+        LLMResponse(content=None),
+        LLMResponse(content=None),
+    ])
+    runner.tools = registry
+
+    result = await runner.run([{"role": "user", "content": "Mark all my tasks done please"}])
+
+    assert store.read_memory("tasks", id=first.id)[0].metadata["status"] == "done"
+    assert store.read_memory("tasks", id=second.id)[0].metadata["status"] == "open"
+    assert result.outcome == TurnOutcome.TOOL_FALLBACK
+    assert "before confirming the full request was complete" in result.final_content
+    assert f"id={first.id}, status=done" in result.final_content
+
+
+def test_fallback_reports_successes_and_failures_together() -> None:
+    text = _runner([])._build_tool_result_fallback(tool_results=[
+        ("update_task_status", "Task updated: First (id=first, status=done)"),
+        ("update_task_status", "Error updating task: unknown ID"),
+    ])
+
+    assert "id=first, status=done" in text
+    assert "Error updating task: unknown ID" in text
+    assert not text.startswith("Done")
+
+
+@pytest.mark.parametrize("user_request", ["mark them done please", "can you mark them done?", "yes"])
+@pytest.mark.parametrize("memory_authority", ["YES", ""])
+async def test_read_only_results_cannot_support_completion_claims(user_request, memory_authority) -> None:
+    runner = _runner([
+        LLMResponse(content=None, tool_calls=[
+            ToolCallRequest("read", "read_memory", {"category": "tasks"}),
+        ]),
+        LLMResponse(content="All open tasks marked done."),
+        LLMResponse(content="All open tasks marked done."),
+    ], {"read_memory": "[tasks] First (id=first)\nStatus: open | Assignee: tal"},
+        memory_authority=memory_authority)
+
+    result = await runner.run([{"role": "user", "content": user_request}])
+
+    assert result.outcome == TurnOutcome.INCOMPLETE_ACTION
+    assert result.tools_used == ["read_memory"]
+    assert result.final_content != "All open tasks marked done."
+
+
+async def test_read_only_completion_claim_can_be_repaired_with_a_write() -> None:
+    runner = _runner([
+        LLMResponse(content=None, tool_calls=[
+            ToolCallRequest("read", "read_memory", {"category": "tasks"}),
+        ]),
+        LLMResponse(content="All open tasks marked done."),
+        LLMResponse(content=None, tool_calls=[
+            ToolCallRequest("write", "update_task_status", {"task_id": "first", "status": "done"}),
+        ]),
+        LLMResponse(content="The task is now marked done."),
+    ], {
+        "read_memory": "[tasks] First (id=first)\nStatus: open | Assignee: tal",
+        "update_task_status": "Task updated: First (id=first, status=done)",
+    }, memory_authority="YES")
+
+    result = await runner.run([{"role": "user", "content": "mark them done please"}])
+
+    assert result.outcome == TurnOutcome.COMPLETED
+    assert result.tools_used == ["read_memory", "update_task_status"]
+
+
+async def test_failed_write_does_not_support_a_completion_claim() -> None:
+    runner = _runner([
+        LLMResponse(content=None, tool_calls=[
+            ToolCallRequest("write", "update_task_status", {"task_id": "missing", "status": "done"}),
+        ]),
+        LLMResponse(content="All open tasks marked done."),
+        LLMResponse(content="All open tasks marked done."),
+    ], {"update_task_status": "Error updating task: unknown ID"}, memory_authority="YES")
+
+    result = await runner.run([{"role": "user", "content": "mark them done please"}])
+
+    assert result.outcome == TurnOutcome.INCOMPLETE_ACTION
+
+
+async def test_read_only_state_report_remains_valid() -> None:
+    runner = _runner([
+        LLMResponse(content=None, tool_calls=[
+            ToolCallRequest("read", "read_memory", {"category": "tasks"}),
+        ]),
+        LLMResponse(content="You have no open tasks. The task was already done."),
+    ], {"read_memory": "[tasks] First (id=first)\nStatus: done | Assignee: tal"})
+
+    result = await runner.run([{"role": "user", "content": "what are my open tasks?"}])
+
+    assert result.outcome == TurnOutcome.COMPLETED
+    assert result.tools_used == ["read_memory"]
+
+
+async def test_authority_classifier_allows_for_hidden_reasoning_tokens() -> None:
+    captured = {}
+    runner = _runner([])
+
+    async def chat(**kwargs):
+        captured.update(kwargs)
+        return LLMResponse(content="NO", usage={"completion_tokens": 76})
+
+    runner.chat_callable = chat
+    requires_write = await runner._classify_memory_authority_requirement(
+        current_request="what are my open tasks?", assistant_content="You have two open tasks.",
+        model="test", job_class=None, require_write=True,
+    )
+
+    assert not requires_write
+    assert captured["max_tokens"] >= 128
+
+
+async def test_checklist_follow_up_uses_conversation_target(tmp_path) -> None:
+    from hermitcrab.agent.lists import ListStore
+    from hermitcrab.agent.prompt_history import build_prompt_history
+    from hermitcrab.agent.tools.lists import SetListItemStatusTool, ShowListTool
+    from hermitcrab.agent.tools.registry import ToolRegistry
+
+    lists = ListStore(tmp_path)
+    lists.add_items("weekend-prep", ["vacuum living room", "water plants"])
+    registry = ToolRegistry()
+    registry.register(SetListItemStatusTool(lists))
+    history = build_prompt_history([
+        {"role": "user", "content": "get my weekend list"},
+        {"role": "tool", "name": "list_show",
+         "content": await ShowListTool(lists).execute(list_name="weekend-prep")},
+        {"role": "assistant", "content": "Your weekend list: vacuum living room, water plants."},
+    ])
+    runner = _runner([
+        LLMResponse(content=None, tool_calls=[ToolCallRequest("one", "list_set_item_status", {
+            "list_name": "weekend-prep", "items": ["vacuum living room"], "done": True,
+        })]),
+        LLMResponse(content="Marked vacuum living room done."),
+    ])
+    runner.tools = registry
+
+    result = await runner.run([
+        *history, {"role": "user", "content": "already vacuumed, mark it done please"},
+    ])
+
+    assert result.outcome == TurnOutcome.COMPLETED
+    assert result.tools_used == ["list_set_item_status"]
+    stored = lists.find_list("weekend-prep")
+    assert stored.completed_count == 1
+    assert stored.remaining_count == 1
+    assert (await registry.execute("list_set_item_status", {
+        "items": ["water plants"], "done": True,
+    })).startswith("Error")
+    assert lists.find_list("weekend-prep").remaining_count == 1
 
 
 async def test_provider_error_is_reported_as_a_provider_failure() -> None:

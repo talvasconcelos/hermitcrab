@@ -31,6 +31,7 @@ Do not blur them:
 | `write_decision` | User-confirmed locked choices only (immutable) |
 | `write_goal` | Objectives to achieve |
 | `write_task` | Action items (requires `assignee`) |
+| `update_task_status` | Change an existing task's status using its ID from memory reads |
 | `write_reflection` | Meta-observations (append-only) |
 
 ### Category Rules

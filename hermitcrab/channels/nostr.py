@@ -16,7 +16,11 @@ from websockets.asyncio.client import ClientConnection
 
 from hermitcrab.bus.events import OutboundMessage
 from hermitcrab.bus.queue import MessageBus
-from hermitcrab.channels.base import BaseChannel
+from hermitcrab.channels.base import (
+    BaseChannel,
+    ChannelDeliveryError,
+    DeliveryReceipt,
+)
 from hermitcrab.channels.nostr_nip17 import (
     NIP17_GIFT_WRAP_KIND,
     NIP17Error,
@@ -499,13 +503,15 @@ class NostrChannel(BaseChannel):
             "No configured or published kind 10050 relays found; using bootstrap relays for this run"
         )
 
-    async def _publish_event_to_relays(self, event: Any, relay_urls: list[str]) -> None:
+    async def _publish_event_to_relays(self, event: Any, relay_urls: list[str]) -> bool:
         publish_msg = event.to_message()
+        published = False
         for relay_url in relay_urls:
             ws = await self._connection_for_relay(relay_url)
             if ws is not None:
                 try:
                     await ws.send(publish_msg)
+                    published = True
                     continue
                 except Exception as e:
                     logger.warning("Failed to publish to {}: {}", relay_url, e)
@@ -520,8 +526,10 @@ class NostrChannel(BaseChannel):
                     ping_timeout=20,
                 ) as temp_ws:
                     await temp_ws.send(publish_msg)
+                    published = True
             except Exception as e:
                 logger.warning("Failed temporary publish to {}: {}", relay_url, e)
+        return published
 
     async def _relay_targets_for_nip17_recipient(self, recipient_pubkey: str) -> list[str]:
         discovered = await self._discover_recipient_relays(recipient_pubkey)
@@ -816,8 +824,15 @@ class NostrChannel(BaseChannel):
                 if len(self._seen_event_ids) > self._MAX_SEEN_EVENTS:
                     self._seen_event_ids.clear()
 
-            logger.info("Received DM from {}...: {}...", sender_pubkey[:8], content[:50] if content else "(empty)")
+            logger.info(
+                "Received DM from {}... (event={}, chars={})",
+                sender_pubkey[:8],
+                (event_id or "")[:8] or "unknown",
+                len(content or ""),
+            )
 
+            if canonical_id:
+                metadata["canonical_id"] = canonical_id
             session_key = self._session_key_for_sender(sender_pubkey, metadata)
             await self._handle_inbound_message(
                 session_key=session_key,
@@ -1005,22 +1020,24 @@ class NostrChannel(BaseChannel):
             self._ws_connections.clear()
         logger.info("Nostr channel stopped")
 
-    async def send(self, msg: OutboundMessage) -> None:
+    async def send(self, msg: OutboundMessage) -> DeliveryReceipt:
         if not self._running:
-            logger.warning("Nostr channel not running")
-            return
+            raise ChannelDeliveryError("Nostr channel is not running")
 
         recipient_pubkey = msg.chat_id
         content = msg.content.strip()
         if not content or content.lower() in {"thinking...", "thinking..", "thinking.", "thinking"}:
-            return
+            return DeliveryReceipt(True, detail="nothing to send")
 
         try:
             recipient_pubkey = self._normalize_pubkey_to_hex(recipient_pubkey)
             chunks = _split_message(content)
+            delivered_chunks = 0
+            event_ids: list[str] = []
             for index, chunk in enumerate(chunks, start=1):
                 publish_attempts = 0
                 relay_attempts = 0
+                chunk_delivered = False
                 if self._protocol() == "nip17":
                     events = build_nip17_message(
                         sender_private_key_hex=self._hex_priv,
@@ -1040,6 +1057,9 @@ class NostrChannel(BaseChannel):
                     events = [event]
 
                 for event in events:
+                    event_id = getattr(event, "id", "") or ""
+                    if event_id:
+                        event_ids.append(str(event_id))
                     if self._protocol() == "nip17":
                         event_recipient = self._extract_p_tag_pubkey(event.tags)
                         if event_recipient is None:
@@ -1050,7 +1070,8 @@ class NostrChannel(BaseChannel):
                             continue
                         publish_attempts += 1
                         relay_attempts += len(relay_targets)
-                        await self._publish_event_to_relays(event, relay_targets)
+                        if await self._publish_event_to_relays(event, relay_targets):
+                            chunk_delivered = True
                     else:
                         publish_msg = event.to_message()
                         connections = await self._connection_snapshot()
@@ -1059,23 +1080,37 @@ class NostrChannel(BaseChannel):
                         for relay_url, ws in connections:
                             try:
                                 await ws.send(publish_msg)
+                                chunk_delivered = True
                             except Exception as e:
                                 logger.warning("Failed to publish to {}: {}", relay_url, e)
                                 await self._remove_connection_if_same(relay_url, ws)
 
+                if chunk_delivered:
+                    delivered_chunks += 1
                 logger.info(
-                    "Published DM chunk attempt {}/{} to {}... (protocol={}, events_attempted={}, relay_targets={}, chars={})",
+                    "Published DM chunk attempt {}/{} to {}... (protocol={}, events_attempted={}, relay_targets={}, delivered={}, chars={})",
                     index,
                     len(chunks),
                     recipient_pubkey[:8],
                     self._protocol(),
                     publish_attempts,
                     relay_attempts,
+                    chunk_delivered,
                     len(chunk),
                 )
                 await asyncio.sleep(1)
+
+            if delivered_chunks == 0:
+                raise ChannelDeliveryError(
+                    "Nostr relays did not accept any DM chunk",
+                    receipt=DeliveryReceipt(False, event_ids, "no relay accepted the message"),
+                )
+            return DeliveryReceipt(True, event_ids)
+        except ChannelDeliveryError:
+            raise
         except Exception as e:
             logger.error("Failed to send Nostr DM: {}", e)
+            raise ChannelDeliveryError(f"Failed to send Nostr DM: {e}") from e
 
     async def _handle_inbound_message(self, session_key: str, content: str, metadata: dict[str, Any] | None = None) -> None:
         sender_pubkey = self._sender_pubkey_from_session_key(session_key)

@@ -25,6 +25,13 @@ def _parse_iso_datetime(value: str) -> datetime:
     return dt.astimezone(timezone.utc)
 
 
+def _as_int(value: Any) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return 0
+
+
 @dataclass(slots=True)
 class ReminderItem:
     """Stored reminder artifact plus its compiled cron linkage."""
@@ -47,6 +54,10 @@ class ReminderItem:
     remind_offset_minutes: int | None = None
     next_due_at: str = ""
     last_triggered_at: str = ""
+    delivery_status: str = ""
+    delivery_attempts: int = 0
+    delivery_id: str = ""
+    last_delivery_error: str = ""
     created_at: str = ""
     updated_at: str = ""
     metadata: dict[str, Any] = field(default_factory=dict)
@@ -85,6 +96,10 @@ class ReminderItem:
             ),
             next_due_at=str(meta.get("next_due_at") or ""),
             last_triggered_at=str(meta.get("last_triggered_at") or ""),
+            delivery_status=str(meta.get("delivery_status") or ""),
+            delivery_attempts=_as_int(meta.get("delivery_attempts")),
+            delivery_id=str(meta.get("delivery_id") or ""),
+            last_delivery_error=str(meta.get("last_delivery_error") or ""),
             created_at=str(meta.get("created_at") or ""),
             updated_at=str(meta.get("updated_at") or ""),
             metadata=meta,
@@ -107,6 +122,10 @@ class ReminderItem:
                 "remind_offset_minutes": self.remind_offset_minutes,
                 "next_due_at": self.next_due_at,
                 "last_triggered_at": self.last_triggered_at,
+                "delivery_status": self.delivery_status,
+                "delivery_attempts": self.delivery_attempts,
+                "delivery_id": self.delivery_id,
+                "last_delivery_error": self.last_delivery_error,
                 "created_at": self.created_at,
                 "updated_at": self.updated_at,
                 "journal": journal_day_wikilink(self.created_at or self.updated_at),
@@ -156,6 +175,13 @@ class ReminderStore:
             raise ValueError(f"reminder next-due verification failed for {item.file_path}")
         if loaded.last_triggered_at != item.last_triggered_at:
             raise ValueError(f"reminder last-triggered verification failed for {item.file_path}")
+        if (
+            loaded.delivery_status != item.delivery_status
+            or loaded.delivery_attempts != item.delivery_attempts
+            or loaded.delivery_id != item.delivery_id
+            or loaded.last_delivery_error != item.last_delivery_error
+        ):
+            raise ValueError(f"reminder delivery-state verification failed for {item.file_path}")
 
     @staticmethod
     def _compute_next_due_at(
@@ -298,7 +324,14 @@ class ReminderStore:
                 due.append(item)
         return due
 
-    def mark_triggered(self, item: ReminderItem, *, triggered_at: datetime | None = None) -> ReminderItem:
+    def mark_triggered(
+        self,
+        item: ReminderItem,
+        *,
+        triggered_at: datetime | None = None,
+        delivery_id: str = "",
+        delivery_status: str = "sent",
+    ) -> ReminderItem:
         when = triggered_at or _utcnow()
         schedule = self._build_schedule(
             schedule_kind=item.schedule_kind,
@@ -308,6 +341,10 @@ class ReminderStore:
             tz=item.tz or None,
         )
         item.last_triggered_at = when.isoformat()
+        item.delivery_status = delivery_status
+        item.delivery_attempts = 0
+        item.delivery_id = delivery_id
+        item.last_delivery_error = ""
         if item.schedule_kind == "at":
             item.enabled = False
             item.status = "completed"
@@ -317,6 +354,44 @@ class ReminderStore:
             item.enabled = bool(item.next_due_at)
             item.status = "active" if item.enabled else "completed"
         item.updated_at = when.isoformat()
+        item.file_path.write_text(frontmatter.dumps(item.to_post()), encoding="utf-8")
+        self._verify_reminder_write(item)
+        return item
+
+    def mark_delivery_failed(
+        self,
+        item: ReminderItem,
+        error: str,
+        *,
+        max_attempts: int,
+        delivery_id: str = "",
+    ) -> ReminderItem:
+        """Record a failed delivery without consuming the reminder.
+
+        The reminder stays due so the service can retry until ``max_attempts``. After
+        that it remains active with ``delivery_status=failed`` for the user to inspect.
+        """
+        item.delivery_attempts += 1
+        item.delivery_id = delivery_id or item.delivery_id
+        item.last_delivery_error = error[:500]
+        item.delivery_status = "failed" if item.delivery_attempts >= max_attempts else "retrying"
+        item.updated_at = _utcnow().isoformat()
+        item.file_path.write_text(frontmatter.dumps(item.to_post()), encoding="utf-8")
+        self._verify_reminder_write(item)
+        return item
+
+    def mark_delivery_uncertain(
+        self,
+        item: ReminderItem,
+        error: str,
+        *,
+        delivery_id: str = "",
+    ) -> ReminderItem:
+        """Record an unknown delivery outcome without retrying the notification."""
+        item.delivery_status = "uncertain"
+        item.delivery_id = delivery_id or item.delivery_id
+        item.last_delivery_error = error[:500]
+        item.updated_at = _utcnow().isoformat()
         item.file_path.write_text(frontmatter.dumps(item.to_post()), encoding="utf-8")
         self._verify_reminder_write(item)
         return item

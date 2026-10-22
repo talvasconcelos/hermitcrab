@@ -39,6 +39,7 @@ class GatewayIdentityRuntimeState:
     cron_services: dict[str, Any]
     heartbeat_services: dict[str, Any]
     reminder_services: dict[str, Any]
+    delivery_store: Any = None
     cron_services_running: bool = False
     heartbeat_services_running: bool = False
     reminder_services_running: bool = False
@@ -188,6 +189,7 @@ class GatewayIdentityRuntimeState:
             on_notify=self.on_reminder_notify,
             interval_s=self.reminder_interval_s,
             enabled=True,
+            delivery_store=self.delivery_store,
         )
         self.reminder_services[identity_key] = service
         if self.reminder_services_running:
@@ -329,6 +331,19 @@ async def run_gateway_inbound_router(
 
     pending_tasks: set[asyncio.Task[None]] = set()
 
+    async def run_with_ack(coro: Any, msg: Any) -> None:
+        """Complete durable inbound work only after the routed turn finishes."""
+        try:
+            await coro
+        except asyncio.CancelledError:
+            # Leave the row processing so the next startup reports it as uncertain.
+            raise
+        except Exception as exc:
+            await bus.fail_inbound(msg, str(exc))
+            raise
+        else:
+            await bus.ack_inbound(msg)
+
     async def handle_routed_message(msg: Any) -> None:
         route = resolve_gateway_identity_route(
             msg,
@@ -391,7 +406,7 @@ async def run_gateway_inbound_router(
         while True:
             try:
                 msg = await asyncio.wait_for(bus.consume_inbound(), timeout=1.0)
-                task = asyncio.create_task(handle_routed_message(msg))
+                task = asyncio.create_task(run_with_ack(handle_routed_message(msg), msg))
                 track_task(task)
             except asyncio.TimeoutError:
                 continue

@@ -109,6 +109,10 @@ class MemoryItem:
         elif self.category == MemoryCategory.FACTS:
             if "source" in self.metadata:
                 post.metadata["source"] = self.metadata["source"]
+            if self.metadata.get("confidence") is not None:
+                post.metadata["confidence"] = self.metadata["confidence"]
+            if "corrects" in self.metadata:
+                post.metadata["corrects"] = self.metadata["corrects"]
         elif self.category == MemoryCategory.DECISIONS:
             post.metadata["status"] = self.metadata.get("status", "active")
             if "supersedes" in self.metadata:
@@ -235,81 +239,62 @@ class MemoryStore:
         """Normalize text for duplicate detection."""
         return " ".join(value.casefold().split())
 
-    def _fact_token_coverage(
-        self, title: str, content: str, candidate: MemoryItem
-    ) -> tuple[float, set[str], int]:
-        """Measure how much of an incoming fact is covered by an existing candidate."""
-        incoming_tokens = self._tokenize_search(content)
-        if not incoming_tokens:
-            return 0.0, set(), 0
-
-        candidate_tokens = self._tokenize_search(
-            " ".join([candidate.title, candidate.content, " ".join(candidate.tags)])
-        )
-        overlap = incoming_tokens & candidate_tokens
-        return len(overlap) / len(incoming_tokens), overlap, len(incoming_tokens)
+    @staticmethod
+    def _coerce_confidence(value: Any) -> float | None:
+        """Return a stored confidence clamped to 0.0-1.0, or ``None`` when unusable."""
+        if isinstance(value, bool) or value is None:
+            return None
+        if isinstance(value, str):
+            try:
+                value = float(value.strip())
+            except ValueError:
+                return None
+        if not isinstance(value, (int, float)):
+            return None
+        return min(1.0, max(0.0, float(value)))
 
     def _merge_fact_metadata(
         self,
         existing: MemoryItem,
         *,
-        title: str,
-        content: str,
         tags: list[str] | None,
         confidence: float | None,
         source: str | None,
         evidence: str | None = None,
     ) -> MemoryItem:
-        """Merge a new fact payload into an existing fact item."""
-        normalized_existing_content = self._normalize_text(existing.content)
-        normalized_new_content = self._normalize_text(content)
+        """Merge metadata into an exact duplicate fact without rewriting its content."""
         merged_tags = list(dict.fromkeys([*existing.tags, *(tags or [])]))
+        updates: dict[str, Any] = {"tags": merged_tags}
+        if source is not None:
+            updates["source"] = source
+        if evidence is not None:
+            updates["evidence"] = evidence
+        if confidence is not None:
+            updates["confidence"] = confidence
 
-        updated_content = existing.content
-        if (
-            normalized_new_content
-            and normalized_existing_content
-            and normalized_new_content != normalized_existing_content
-        ):
-            # Keep the longer version only when one side is clearly an expansion of the other.
-            # Otherwise prefer the newest content so corrections can replace stale facts.
-            if (
-                normalized_existing_content in normalized_new_content
-                or normalized_new_content in normalized_existing_content
-            ):
-                if len(normalized_new_content) > len(normalized_existing_content):
-                    updated_content = content.strip()
-            else:
-                updated_content = content.strip()
-        elif len(normalized_new_content) > len(normalized_existing_content):
-            updated_content = content.strip()
-
-        updated_title = existing.title
-        if len(title.strip()) > len(existing.title.strip()):
-            updated_title = title.strip()
-
-        merged_source = source or existing.metadata.get("source")
-        merged_evidence = evidence or existing.metadata.get("evidence")
-        existing_confidence = existing.metadata.get("confidence")
-        if isinstance(existing_confidence, (int, float)) and confidence is not None:
-            merged_confidence = max(float(existing_confidence), confidence)
-        else:
-            merged_confidence = confidence if confidence is not None else existing_confidence
-
-        updated = self.update_memory(
-            MemoryCategory.FACTS,
-            existing.id,
-            title=updated_title,
-            content=updated_content,
-            tags=merged_tags,
-            source=merged_source,
-            confidence=merged_confidence,
-            evidence=merged_evidence,
-        )
+        updated = self.update_memory(MemoryCategory.FACTS, existing.id, **updates)
         if updated is None:
             raise ValueError(f"Failed to update existing fact: {existing.id}")
-        updated.metadata["_write_action"] = "updated_existing"
+        updated.metadata["_write_action"] = "reused_existing"
         return updated
+
+    def _find_fact_correction_target(
+        self,
+        corrects: str,
+        facts: list[MemoryItem],
+    ) -> MemoryItem | None:
+        """Resolve an explicit correction target by id or exact title."""
+        target = next((fact for fact in facts if fact.id == corrects), None)
+        if target is not None:
+            return target
+
+        normalized = self._normalize_text(corrects)
+        by_title = [fact for fact in facts if self._normalize_text(fact.title) == normalized]
+        if len(by_title) > 1:
+            raise ValueError(
+                f"Correction target {corrects!r} is ambiguous; pass the fact id instead"
+            )
+        return by_title[0] if by_title else None
 
     def _resolve_existing_fact(
         self,
@@ -320,65 +305,57 @@ class MemoryStore:
         confidence: float | None,
         source: str | None,
         evidence: str | None = None,
+        corrects: str | None = None,
     ) -> MemoryItem | None:
-        """Return an existing fact to reuse/update when the new payload is redundant."""
-        normalized_title = self._normalize_text(title)
-        normalized_content = self._normalize_text(content)
+        """Return an existing fact only for an exact duplicate or an explicit correction.
+
+        Near-duplicates, negations, and reversed relationships are stored as separate
+        items. Token overlap is never authority to overwrite distinct knowledge.
+        """
         facts = self.read_memory(MemoryCategory.FACTS)
         if not facts:
             return None
+        confidence = self._coerce_confidence(confidence)
 
-        # Exact title match should behave like an upsert.
-        for fact in facts:
-            if self._normalize_text(fact.title) == normalized_title:
-                return self._merge_fact_metadata(
-                    fact,
-                    title=title,
-                    content=content,
-                    tags=tags,
-                    confidence=confidence,
-                    source=source,
-                    evidence=evidence,
-                )
-
-        scored_candidates: list[tuple[float, MemoryItem, set[str], int]] = []
-        for fact in facts:
-            coverage, overlap, token_count = self._fact_token_coverage(title, content, fact)
-            min_overlap = 2
-            if token_count >= 4 and coverage >= 0.25 and len(overlap) >= min_overlap:
-                scored_candidates.append((coverage, fact, overlap, token_count))
-
-        if not scored_candidates:
-            return None
-
-        scored_candidates.sort(key=lambda item: (item[0], item[1].updated_at), reverse=True)
-        best_coverage, best_fact, _, token_count = scored_candidates[0]
-
-        # One existing fact already covers the new payload closely enough.
-        if token_count >= 4 and best_coverage >= 0.9:
-            updated = best_fact
-            if self._normalize_text(best_fact.content) != normalized_content:
-                updated = self._merge_fact_metadata(
-                    best_fact,
-                    title=title,
-                    content=content,
-                    tags=tags,
-                    confidence=confidence,
-                    source=source,
-                    evidence=evidence,
-                )
-            updated.metadata["_write_action"] = "reused_existing"
+        if corrects and corrects.strip():
+            target = self._find_fact_correction_target(corrects.strip(), facts)
+            if target is None:
+                raise ValueError(f"No fact matched correction target: {corrects!r}")
+            updates: dict[str, Any] = {"corrects": target.id}
+            if tags is not None:
+                updates["tags"] = list(dict.fromkeys([*target.tags, *tags]))
+            if source is not None:
+                updates["source"] = source
+            if evidence is not None:
+                updates["evidence"] = evidence
+            if confidence is not None:
+                updates["confidence"] = confidence
+            updated = self.update_memory(
+                MemoryCategory.FACTS,
+                target.id,
+                title=title.strip() or target.title,
+                content=content.strip(),
+                **updates,
+            )
+            if updated is None:
+                raise ValueError(f"Failed to correct existing fact: {target.id}")
+            updated.metadata["_write_action"] = "updated_existing"
             return updated
 
-        # Multiple existing facts collectively cover the new payload. Prefer not to create
-        # another summary file that repeats the same facts in a different grouping.
-        incoming_tokens = self._tokenize_search(content)
-        covered_tokens: set[str] = set()
-        for _, fact, overlap, _ in scored_candidates[:3]:
-            covered_tokens.update(overlap)
-        if len(incoming_tokens) >= 4 and len(covered_tokens) / len(incoming_tokens) >= 0.8:
-            best_fact.metadata["_write_action"] = "reused_existing"
-            return best_fact
+        normalized_title = self._normalize_text(title)
+        normalized_content = self._normalize_text(content)
+        for fact in facts:
+            if (
+                self._normalize_text(fact.title) == normalized_title
+                and self._normalize_text(fact.content) == normalized_content
+            ):
+                return self._merge_fact_metadata(
+                    fact,
+                    tags=tags,
+                    confidence=confidence,
+                    source=source,
+                    evidence=evidence,
+                )
 
         return None
 
@@ -510,6 +487,11 @@ class MemoryStore:
         elif category == MemoryCategory.FACTS:
             if "source" in meta:
                 extra_meta["source"] = meta["source"]
+            confidence = self._coerce_confidence(meta.get("confidence"))
+            if confidence is not None:
+                extra_meta["confidence"] = confidence
+            if meta.get("corrects"):
+                extra_meta["corrects"] = meta["corrects"]
 
         # Decision metadata
         elif category == MemoryCategory.DECISIONS:
@@ -606,6 +588,7 @@ class MemoryStore:
         confidence: float | None = None,
         source: str | None = None,
         evidence: str | None = None,
+        corrects: str | None = None,
     ) -> MemoryItem:
         """
         Write a new fact to memory.
@@ -613,18 +596,25 @@ class MemoryStore:
         Facts are long-term truths. Written only if explicitly stated or
         unambiguous. May be updated only if contradicted. Rarely deleted.
 
+        Distinct facts are never merged by word overlap. Pass ``corrects`` with an
+        explicit fact id (or exact title) when replacing an existing fact.
+
         Args:
             title: Short descriptive title.
             content: Fact content.
             tags: Optional tags for categorization.
-            confidence: Confidence level (0.0-1.0).
+            confidence: Confidence level (0.0-1.0); clamped when stored.
             source: Source of the fact.
+            evidence: Evidence for the fact.
+            corrects: Id or exact title of the fact this payload corrects.
 
         Returns:
-            The created MemoryItem.
+            The created or updated MemoryItem.
         """
         if not content.strip():
             raise ValueError("Fact content cannot be empty")
+        if not title.strip():
+            raise ValueError("Fact title cannot be empty")
 
         existing = self._resolve_existing_fact(
             title=title,
@@ -633,6 +623,7 @@ class MemoryStore:
             confidence=confidence,
             source=source,
             evidence=evidence,
+            corrects=corrects,
         )
         if existing is not None:
             logger.info("Reused existing fact: {}", existing.title)
@@ -647,7 +638,7 @@ class MemoryStore:
             updated_at=datetime.now(timezone.utc),
             tags=tags or [],
             metadata={
-                "confidence": confidence,
+                "confidence": self._coerce_confidence(confidence),
                 "source": source,
                 "evidence": evidence,
             },
@@ -1460,7 +1451,7 @@ class MemoryStore:
     def _get_fact_metadata(self, item: MemoryItem) -> list[str]:
         """Get metadata lines for fact items."""
         meta_lines: list[str] = []
-        if item.metadata.get("confidence"):
+        if item.metadata.get("confidence") is not None:
             meta_lines.append(f"Confidence: {item.metadata['confidence']}")
         if item.metadata.get("source"):
             meta_lines.append(f"Source: {item.metadata['source']}")

@@ -17,7 +17,6 @@ from hermitcrab.agent.message_preparation import is_placeholder_assistant_reply
 from hermitcrab.agent.pending_work import (
     has_structured_payload,
     is_runtime_context_message,
-    is_short_follow_up,
     looks_like_confirmation,
 )
 from hermitcrab.agent.tool_call_recovery import coerce_inline_tool_calls, normalize_tool_calls
@@ -183,90 +182,21 @@ class TurnRunner:
         """Treat empty or placeholder assistant text as missing final output."""
         return self.is_empty_response(content) or is_placeholder_assistant_reply(content)
 
-    @staticmethod
-    def _build_successful_write_fallback(tool_name: str, tool_result: str) -> str | None:
-        """Turn successful write-style tool results into user-facing final replies."""
-        result = tool_result.strip()
-        if not result:
-            return None
-
-        simple_prefixes = {
-            "write_task": ("Task saved:",),
-            "write_goal": ("Goal saved:",),
-            "write_fact": ("Fact saved:", "Fact updated:", "Fact already covered:"),
-            "write_decision": ("Decision saved:",),
-            "write_reflection": ("Reflection saved:",),
-        }
-        valid_prefixes = simple_prefixes.get(tool_name, ())
-        if valid_prefixes and any(result.startswith(prefix) for prefix in valid_prefixes):
-            return f"Done — {result}"
-        if tool_name == "knowledge_ingest" and result.startswith("Knowledge item ingested:"):
-            lines = [line.strip() for line in result.splitlines() if line.strip()]
-            path_line = lines[0].replace("Knowledge item ingested:", "Saved to").strip()
-            title_line = next((line for line in lines[1:] if line.startswith("Title:")), None)
-            category_line = next((line for line in lines[1:] if line.startswith("Category:")), None)
-            parts = ["Done — saved the knowledge note.", path_line]
-            if title_line:
-                parts.append(title_line)
-            if category_line:
-                parts.append(category_line)
-            return "\n".join(parts)
-        if tool_name == "list_add_items" and result.startswith("Checklist updated:"):
-            return f"Done — updated the checklist.\n{result}"
-        if tool_name == "list_set_item_status" and result.startswith("Updated checklist:"):
-            return f"Done — updated the checklist item status.\n{result}"
-        if tool_name == "list_remove_items" and result.startswith("Updated checklist:"):
-            return f"Done — removed item(s) from the checklist.\n{result}"
-        if tool_name == "list_delete" and result.startswith("Deleted checklist:"):
-            return f"Done — deleted the checklist.\n{result}"
-        return None
-
     def _build_tool_result_fallback(
         self,
         *,
-        request_text: str | None,
         tool_results: list[tuple[str, str]],
     ) -> str | None:
-        usable = [
-            (name, result)
-            for name, result in tool_results
-            if not self._is_tool_error_result(result)
-        ]
-        if not usable:
+        if not tool_results:
             return None
-
-        latest_name, latest_result = usable[-1]
-        request_snippet = None
-        if isinstance(request_text, str) and request_text.strip():
-            request_snippet = " ".join(request_text.strip().split())
-
-        if write_fallback := self._build_successful_write_fallback(latest_name, latest_result):
-            return write_fallback
-
-        if latest_name in {"read_memory", "search_memory"}:
-            prefix = "I checked memory"
-        elif latest_name == "list_dir":
-            prefix = "I checked the directory contents"
-        elif latest_name == "read_file":
-            prefix = "I checked the file"
-        elif latest_name == "exec":
-            prefix = "I ran the requested command"
-        else:
-            prefix = f"I completed the `{latest_name}` step"
-
-        if request_snippet:
-            prefix += f" for: {request_snippet}"
-
-        if len(usable) == 1:
-            return f"{prefix}, but the model stopped before writing the final answer.\n\n{self._trim_tool_result(latest_result)}"
-
         lines = [
-            f"{prefix}, but the model stopped before writing the final answer.",
+            "The model stopped before confirming the full request was complete. "
+            "Some changes may already be saved; check the current state before retrying.",
             "",
-            "Here are the latest grounded tool results:",
+            "Latest tool results:",
         ]
-        for name, result in usable[-3:]:
-            lines.append(f"- `{name}`: {self._trim_tool_result(result, max_chars=280)}")
+        for name, result in tool_results[-3:]:
+            lines.append(f"- `{name}`: {self._trim_tool_result(result)}")
         return "\n".join(lines)
 
     @staticmethod
@@ -318,63 +248,6 @@ class TurnRunner:
     def _normalize_grounding_text(text: str | None) -> str:
         """Canonicalize free text for grounding checks across minor formatting differences."""
         return " ".join(re.findall(r"[a-z0-9]+", (text or "").lower()))
-
-    @classmethod
-    def _value_is_grounded_in_request(cls, value: str | None, request_text: str | None) -> bool:
-        """Check whether a tool argument is directly grounded in the user's request text."""
-        grounded_value = cls._normalize_grounding_text(value)
-        grounded_request = cls._normalize_grounding_text(request_text)
-        if not grounded_value or not grounded_request:
-            return False
-        if grounded_value in grounded_request:
-            return True
-
-        value_tokens = set(grounded_value.split())
-        request_tokens = set(grounded_request.split())
-        return bool(value_tokens) and value_tokens.issubset(request_tokens)
-
-    @classmethod
-    def _build_ambiguous_list_mutation_clarification(
-        cls,
-        *,
-        request_text: str | None,
-        tool_calls: list[Any],
-    ) -> str | None:
-        """Require clarification before mutating checklist state from underspecified requests."""
-        if not (isinstance(request_text, str) and is_short_follow_up(request_text)):
-            return None
-        if has_structured_payload(request_text):
-            return None
-        if request_text.strip().endswith("?"):
-            return None
-
-        mutating_list_tools = {
-            "list_add_items",
-            "list_set_item_status",
-            "list_remove_items",
-            "list_delete",
-        }
-        for tool_call in tool_calls:
-            if tool_call.name not in mutating_list_tools:
-                continue
-            arguments = tool_call.arguments if isinstance(tool_call.arguments, dict) else {}
-            list_name = arguments.get("list_name")
-            if not isinstance(list_name, str) or not list_name.strip():
-                return "Which checklist do you want me to update?"
-            if cls._value_is_grounded_in_request(list_name, request_text):
-                continue
-
-            items = arguments.get("items")
-            if isinstance(items, list):
-                grounded_items = [item for item in items if isinstance(item, str) and item.strip()]
-            else:
-                grounded_items = []
-            item_hint = ""
-            if grounded_items:
-                preview = ", ".join(grounded_items[:2])
-                item_hint = f" for {preview}"
-            return f"Which checklist do you want me to update{item_hint}?"
-        return None
 
     @staticmethod
     def _exec_approval_reason(result: str | None) -> str | None:
@@ -562,6 +435,7 @@ class TurnRunner:
         assistant_content: str | None,
         model: str,
         job_class: Any,
+        require_write: bool = False,
     ) -> bool:
         """Use model judgment for ambiguous memory-write intents instead of language markers."""
         if not isinstance(current_request, str):
@@ -570,11 +444,11 @@ class TurnRunner:
         reply = " ".join((assistant_content or "").strip().split())
         if not request or not reply:
             return False
-        if request.endswith("?"):
+        if not require_write and request.endswith("?"):
             return False
-        if has_structured_payload(request):
+        if not require_write and has_structured_payload(request):
             return False
-        if len(request) < 20 or len(request) > 400:
+        if not require_write and (len(request) < 20 or len(request) > 400):
             return False
 
         prompt = (
@@ -597,6 +471,15 @@ class TurnRunner:
             f"User request: {request}\n"
             f"Assistant reply: {reply}"
         )
+        if require_write:
+            prompt = (
+                "Does this assistant reply claim that it saved or changed durable memory, "
+                "a task, or a checklist in this turn? Return YES or NO only. "
+                "Answer YES for a claimed change or completed update. "
+                "Answer NO for reporting existing state, a clarification, a proposal, "
+                "or explaining that the change could not be made.\n"
+                f"User request: {request}\nAssistant reply: {reply}"
+            )
 
         try:
             response = await self.chat_callable(
@@ -604,15 +487,17 @@ class TurnRunner:
                 tools=[],
                 model=model,
                 temperature=0.0,
-                max_tokens=8,
+                max_tokens=256,  # Some providers still spend tokens on reasoning when disabled.
                 job_class=job_class,
                 reasoning_effort="none",
             )
         except Exception as exc:
             logger.debug("Memory-authority classifier failed: {}", exc)
-            return False
+            return require_write
 
         answer = (response.content or "").strip().lower()
+        if require_write:
+            return answer.rstrip(".! ") != "no"
         return answer.startswith("yes")
 
     def _append_missing_tool_results(
@@ -1107,18 +992,6 @@ class TurnRunner:
             )
 
             if response.has_tool_calls:
-                clarification = self._build_ambiguous_list_mutation_clarification(
-                    request_text=action_request_text,
-                    tool_calls=response.tool_calls,
-                )
-                if clarification:
-                    logger.info(
-                        "Blocked ambiguous checklist mutation and requested clarification"
-                    )
-                    final_content = clarification
-                    outcome = TurnOutcome.BLOCKED
-                    break
-
                 tool_signature = self._tool_cycle_signature(response.tool_calls)
                 if tool_signature == last_tool_signature:
                     repeated_tool_cycles += 1
@@ -1242,12 +1115,16 @@ class TurnRunner:
                 outcome = TurnOutcome.INCOMPLETE_ACTION
                 break
 
-            if not tools_used:
+            successful_tools = [
+                name for name, result in tool_results if not self._is_tool_error_result(result)
+            ]
+            if not self._used_workspace_write_tool(successful_tools):
                 requires_memory_authority = await self._classify_memory_authority_requirement(
                     current_request=current_request,
                     assistant_content=final_content,
                     model=model,
                     job_class=job_class,
+                    require_write=bool(tools_used),
                 )
                 if requires_memory_authority:
                     memory_authority_reprompt_count += 1
@@ -1263,7 +1140,9 @@ class TurnRunner:
                                 "content": (
                                     "This reply is not authoritative enough yet. If the user asked "
                                     "to save, update, correct, or confirm durable memory, use the typed "
-                                    "memory tools before answering definitively. If this is about "
+                                    "memory tools before answering definitively. Read-only results "
+                                    "and failed writes do not prove that a change was saved. "
+                                    "If this is about "
                                     "previously stored information, check memory before claiming "
                                     "the fact is missing. If no memory tool is actually needed, "
                                     "answer directly and explain why."
@@ -1325,7 +1204,6 @@ class TurnRunner:
                     continue
 
                 tool_result_fallback = self._build_tool_result_fallback(
-                    request_text=current_request,
                     tool_results=tool_results,
                 )
                 if tool_result_fallback:

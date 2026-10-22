@@ -2,6 +2,10 @@
 
 from __future__ import annotations
 
+from unittest.mock import AsyncMock
+
+import pytest
+from loguru import logger
 from pynostr.key import PrivateKey
 
 from hermitcrab.bus.queue import MessageBus
@@ -87,3 +91,28 @@ def test_nip04_event_with_missing_id_is_rejected() -> None:
 
     assert sender_pubkey is None
     assert content is None
+
+
+@pytest.mark.asyncio
+async def test_inbound_dm_log_records_length_not_content() -> None:
+    sender_priv = PrivateKey()
+    channel_priv = PrivateKey()
+    channel = NostrChannel(
+        NostrConfig(private_key=channel_priv.hex(), protocol="nip04", allowed_pubkeys=["*"]),
+        MessageBus(),
+    )
+    channel._handle_inbound_message = AsyncMock()
+    secret = "the vault code is 1234 and must not reach logs"
+    event = _signed_nip04_event(sender_priv, channel.our_pubkey_hex, secret)
+
+    records: list[str] = []
+    sink_id = logger.add(lambda message: records.append(str(message)), level="INFO")
+    try:
+        await channel._handle_event("wss://relay.example", event)
+    finally:
+        logger.remove(sink_id)
+
+    logged = "".join(records)
+    assert secret not in logged
+    assert "vault code" not in logged
+    assert f"chars={len(secret)}" in logged
