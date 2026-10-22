@@ -315,6 +315,7 @@ class MemoryStore:
         facts = self.read_memory(MemoryCategory.FACTS)
         if not facts:
             return None
+        confidence = self._coerce_confidence(confidence)
 
         if corrects and corrects.strip():
             target = self._find_fact_correction_target(corrects.strip(), facts)
