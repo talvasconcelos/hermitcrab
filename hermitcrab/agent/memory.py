@@ -242,7 +242,14 @@ class MemoryStore:
     @staticmethod
     def _coerce_confidence(value: Any) -> float | None:
         """Return a stored confidence clamped to 0.0-1.0, or ``None`` when unusable."""
-        if isinstance(value, bool) or not isinstance(value, (int, float)):
+        if isinstance(value, bool) or value is None:
+            return None
+        if isinstance(value, str):
+            try:
+                value = float(value.strip())
+            except ValueError:
+                return None
+        if not isinstance(value, (int, float)):
             return None
         return min(1.0, max(0.0, float(value)))
 
