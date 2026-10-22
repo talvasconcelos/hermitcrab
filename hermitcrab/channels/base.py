@@ -1,12 +1,30 @@
 """Base channel interface for chat platforms."""
 
 from abc import ABC, abstractmethod
+from dataclasses import dataclass, field
 from typing import Any
 
 from loguru import logger
 
 from hermitcrab.bus.events import InboundMessage, OutboundMessage
 from hermitcrab.bus.queue import MessageBus
+
+
+@dataclass(slots=True)
+class DeliveryReceipt:
+    """Outcome of handing one outbound message to a platform."""
+
+    delivered: bool
+    event_ids: list[str] = field(default_factory=list)
+    detail: str = ""
+
+
+class ChannelDeliveryError(RuntimeError):
+    """Raised when a channel could not hand a message to the platform."""
+
+    def __init__(self, message: str, *, receipt: DeliveryReceipt | None = None) -> None:
+        super().__init__(message)
+        self.receipt = receipt
 
 
 class BaseChannel(ABC):
@@ -49,9 +67,12 @@ class BaseChannel(ABC):
         pass
 
     @abstractmethod
-    async def send(self, msg: OutboundMessage) -> None:
+    async def send(self, msg: OutboundMessage) -> DeliveryReceipt | None:
         """
         Send a message through this channel.
+
+        Implementations should return a receipt, or raise ``ChannelDeliveryError``
+        when the platform did not accept the message. Silence is not success.
 
         Args:
             msg: The message to send.

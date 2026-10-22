@@ -39,6 +39,7 @@ class GatewayIdentityRuntimeState:
     cron_services: dict[str, Any]
     heartbeat_services: dict[str, Any]
     reminder_services: dict[str, Any]
+    delivery_store: Any = None
     cron_services_running: bool = False
     heartbeat_services_running: bool = False
     reminder_services_running: bool = False
@@ -188,6 +189,7 @@ class GatewayIdentityRuntimeState:
             on_notify=self.on_reminder_notify,
             interval_s=self.reminder_interval_s,
             enabled=True,
+            delivery_store=self.delivery_store,
         )
         self.reminder_services[identity_key] = service
         if self.reminder_services_running:

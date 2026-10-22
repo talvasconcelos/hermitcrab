@@ -291,7 +291,7 @@ async def test_nip17_send_publishes_only_recipient_wrap(monkeypatch: pytest.Monk
     )
     channel._running = True
     channel._relay_targets_for_nip17_recipient = AsyncMock(return_value=["wss://relay.example"])
-    channel._publish_event_to_relays = AsyncMock()
+    channel._publish_event_to_relays = AsyncMock(return_value=True)
     monkeypatch.setattr("hermitcrab.channels.nostr.build_nip17_message", fake_build_nip17_message)
 
     await channel.send(
@@ -305,6 +305,41 @@ async def test_nip17_send_publishes_only_recipient_wrap(monkeypatch: pytest.Monk
     assert calls
     assert calls[0]["include_sender_copy"] is False
     channel._publish_event_to_relays.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_nip17_send_raises_when_no_relay_accepts_the_event(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FakeEvent:
+        id = "event-id"
+        tags = [["p", _pubkey()]]
+
+        def to_message(self) -> str:
+            return "event"
+
+    from hermitcrab.channels.base import ChannelDeliveryError
+
+    channel = NostrChannel(
+        NostrConfig(private_key=_private_key(), protocol="nip17"),
+        MessageBus(),
+    )
+    channel._running = True
+    channel._relay_targets_for_nip17_recipient = AsyncMock(return_value=["wss://relay.example"])
+    channel._publish_event_to_relays = AsyncMock(return_value=False)
+    monkeypatch.setattr(
+        "hermitcrab.channels.nostr.build_nip17_message",
+        lambda **kwargs: [FakeEvent()],
+    )
+
+    with pytest.raises(ChannelDeliveryError):
+        await channel.send(
+            OutboundMessage(
+                channel="nostr",
+                chat_id=_pubkey(),
+                content="hello",
+            )
+        )
 
 
 def test_nostr_message_split_keeps_medium_replies_together() -> None:

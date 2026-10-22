@@ -69,6 +69,7 @@ def gateway(
 
     from hermitcrab.agent.loop import AgentLoop
     from hermitcrab.bus.inbox import InboundInbox
+    from hermitcrab.bus.outbox import DeliveryStore
     from hermitcrab.bus.queue import MessageBus
     from hermitcrab.channels.manager import ChannelManager
     from hermitcrab.heartbeat.service import HeartbeatService
@@ -112,17 +113,24 @@ def gateway(
     )
 
     channels = ChannelManager(config, bus, audit_event=agent.audit_event)
+    delivery_store = DeliveryStore(config.system_root_path / "outbox" / "delivery.sqlite3")
 
     async def on_reminder_notify(item, content: str) -> None:
-        """Deliver a due reminder to its persisted channel target."""
+        """Deliver a due reminder and raise when the channel did not accept it."""
         from hermitcrab.bus.events import OutboundMessage
+        from hermitcrab.channels.base import ChannelDeliveryError
 
         if item.channel == "cli":
             return
 
-        await bus.publish_outbound(
+        channel = channels.get_channel(item.channel)
+        if channel is None:
+            raise ChannelDeliveryError(f"Channel '{item.channel}' is not available")
+        receipt = await channel.send(
             OutboundMessage(channel=item.channel, chat_id=item.chat_id, content=content)
         )
+        if receipt is not None and not receipt.delivered:
+            raise ChannelDeliveryError(receipt.detail or "delivery was not accepted")
 
     hb_cfg = config.gateway.heartbeat
     identity_state = GatewayIdentityRuntimeState(
@@ -141,6 +149,7 @@ def gateway(
         cron_services={},
         heartbeat_services={},
         reminder_services={},
+        delivery_store=delivery_store,
     )
     admin_cron.conflict_finder = lambda schedule, now_ms: identity_state.find_cron_conflicts(
         schedule,
