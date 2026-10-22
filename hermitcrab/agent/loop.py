@@ -1241,8 +1241,12 @@ class AgentLoop:
         if msg.channel == "system":
             return await self._process_system_message(msg)
 
-        preview = msg.content[:80] + "..." if len(msg.content) > 80 else msg.content
-        logger.info("Processing message from {}:{}: {}", msg.channel, msg.sender_id, preview)
+        logger.info(
+            "Processing message from {}:{} (chars={})",
+            msg.channel,
+            msg.sender_id,
+            len(msg.content or ""),
+        )
         return await self._process_user_message(
             msg, session_key=session_key, on_progress=on_progress
         )
@@ -1522,8 +1526,12 @@ class AgentLoop:
                     turn_result.outcome = TurnOutcome.EMPTY_REPLY
 
             self._record_final_execution_state(key, final_content, turn_result.outcome)
-            preview = final_content[:120] + "..." if len(final_content) > 120 else final_content
-            logger.info("Response to {}:{}: {}", msg.channel, msg.sender_id, preview)
+            logger.info(
+                "Response to {}:{} (chars={})",
+                msg.channel,
+                msg.sender_id,
+                len(final_content or ""),
+            )
 
             self._background_jobs.save_turn(
                 session,

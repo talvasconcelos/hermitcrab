@@ -816,7 +816,12 @@ class NostrChannel(BaseChannel):
                 if len(self._seen_event_ids) > self._MAX_SEEN_EVENTS:
                     self._seen_event_ids.clear()
 
-            logger.info("Received DM from {}...: {}...", sender_pubkey[:8], content[:50] if content else "(empty)")
+            logger.info(
+                "Received DM from {}... (event={}, chars={})",
+                sender_pubkey[:8],
+                (event_id or "")[:8] or "unknown",
+                len(content or ""),
+            )
 
             session_key = self._session_key_for_sender(sender_pubkey, metadata)
             await self._handle_inbound_message(
