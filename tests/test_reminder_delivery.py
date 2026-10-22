@@ -175,3 +175,38 @@ async def test_uncertain_outbox_record_is_not_resent(tmp_path: Path) -> None:
     assert updated.delivery_status == "uncertain"
     assert updated.status == "active"
     outbox.close()
+
+
+@pytest.mark.asyncio
+async def test_send_interrupted_mid_flight_is_not_repeated(tmp_path: Path) -> None:
+    store = _store(tmp_path)
+    outbox = DeliveryStore(tmp_path / "outbox.sqlite3")
+    calls: list[int] = []
+
+    async def notify(item, content: str) -> None:
+        calls.append(1)
+
+    service = ReminderService(
+        store,
+        on_notify=notify,
+        delivery_store=outbox,
+        max_delivery_attempts=3,
+    )
+    item = store.get_reminder("Dentist")
+    record = outbox.enqueue(
+        dedupe_key=service._delivery_key(item),
+        kind="reminder",
+        channel=item.channel,
+        chat_id=item.chat_id,
+        content="Reminder: Dentist\nDentist at 10",
+    )
+    # begin_attempt leaves the row "sending" if the process dies before the result.
+    assert outbox.begin_attempt(record.id) is True
+
+    assert await service.tick(now=DUE_AT) == 0
+    assert calls == []
+    updated = store.get_reminder("Dentist")
+    assert updated.delivery_status == "uncertain"
+    assert updated.status == "active"
+    assert outbox.get(record.id).status == "uncertain"
+    outbox.close()

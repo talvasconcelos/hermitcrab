@@ -9,7 +9,13 @@ from datetime import datetime
 from loguru import logger
 
 from hermitcrab.agent.reminders import ReminderItem, ReminderStore
-from hermitcrab.bus.outbox import STATUS_SENT, STATUS_UNCERTAIN, DeliveryRecord, DeliveryStore
+from hermitcrab.bus.outbox import (
+    STATUS_SENDING,
+    STATUS_SENT,
+    STATUS_UNCERTAIN,
+    DeliveryRecord,
+    DeliveryStore,
+)
 
 
 class ReminderService:
@@ -115,6 +121,18 @@ class ReminderService:
                         delivery_status="sent",
                     )
                     delivered += 1
+                    continue
+                if delivery.status == STATUS_SENDING:
+                    # The previous process died mid-send; the relay may have accepted it.
+                    error = "interrupted during send"
+                    self.delivery_store.mark_uncertain(delivery.id, error)
+                    self.store.mark_delivery_uncertain(
+                        item, error, delivery_id=str(delivery.id)
+                    )
+                    logger.warning(
+                        "Reminder '{}' was interrupted mid-send; marked uncertain",
+                        item.title,
+                    )
                     continue
                 if delivery.status == STATUS_UNCERTAIN:
                     self.store.mark_delivery_uncertain(
