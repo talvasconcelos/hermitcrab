@@ -65,6 +65,10 @@ Sender pubkeys can be mapped to specific identities via `identityBindings`. See 
 - NIP-04 is stable
 - NIP-17 DM behavior continues to improve
 - Relay discovery can fail on less-popular relays; fallback to configured relays handles this
+- Offline catch-up is bounded, not mailbox-like. NIP-04 rejects events older than
+  process start; NIP-17 startup catch-up skips rumors older than process start and
+  does not paginate beyond the per-relay query limits. See
+  [Known limitations](../known-limitations.md) for the exact contract.
 
 ## Telegram
 

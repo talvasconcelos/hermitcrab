@@ -43,6 +43,7 @@ Move your HermitCrab root anywhere — your agent picks up exactly where it left
 | [Manual migration](operator-guide/migration.md) | Move data from older layouts |
 | [Observability and audit](operator-guide/observability-audit.md) | Monitor health and inspect decisions |
 | [Incident playbook](operator-guide/incident-playbook.md) | Step-by-step recovery when things go wrong |
+| [Known limitations](known-limitations.md) | Offline catch-up, delivery, and recovery bounds |
 
 ### Reference
 
