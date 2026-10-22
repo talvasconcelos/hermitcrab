@@ -221,3 +221,26 @@ async def test_follow_up_turns_do_not_resummarize_covered_history() -> None:
 
     assert second.compacted is False
     assert load_checkpoint(session).covered == covered
+
+
+async def test_forced_compaction_keeps_the_latest_user_correction_verbatim() -> None:
+    messages = _messages(100, chars=400)
+    correction = "Correction: Bob, not Alice, borrowed the book."
+    messages[-1] = {"role": "user", "content": correction}
+    session = _Session(messages)
+
+    async def chat(**kwargs):
+        return _Response("## Primary Request and Intent\n- earlier work")
+
+    result = await compact_session(
+        session=session,
+        chat=chat,
+        model="test-model",
+        context_window=10_000,
+        force=True,
+    )
+
+    assert result.compacted is True
+    assert result.checkpoint is not None
+    visible = visible_after_checkpoint(messages, result.checkpoint)
+    assert any(message["content"] == correction for message in visible)
