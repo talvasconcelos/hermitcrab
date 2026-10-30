@@ -33,3 +33,19 @@ def test_cron_job_explicit_tz_is_preserved(tmp_path) -> None:
     )
 
     assert job.schedule.tz == "America/New_York"
+
+
+def test_cron_add_result_reports_timezone_and_next_run(tmp_path) -> None:
+    from hermitcrab.agent.tools.cron import CronTool
+
+    service = CronService(tmp_path / "cron" / "jobs.json", identity_name="owner")
+    tool = CronTool(service)
+    tool.set_context("cli", "direct")
+
+    result = tool._add_job("Morning brief", None, "0 9 * * *", "America/New_York", None)
+
+    assert "Created job 'Morning brief'" in result
+    assert "America/New_York" in result
+    assert "Next run: " in result
+    assert "T09:00" in result
+
