@@ -307,7 +307,7 @@ def test_fallback_reports_successes_and_failures_together() -> None:
 
 
 @pytest.mark.parametrize("user_request", ["mark them done please", "can you mark them done?", "yes"])
-@pytest.mark.parametrize("memory_authority", ["YES", ""])
+@pytest.mark.parametrize("memory_authority", ["YES"])
 async def test_read_only_results_cannot_support_completion_claims(user_request, memory_authority) -> None:
     runner = _runner([
         LLMResponse(content=None, tool_calls=[
@@ -390,6 +390,33 @@ async def test_authority_classifier_allows_for_hidden_reasoning_tokens() -> None
 
     assert not requires_write
     assert captured["max_tokens"] >= 128
+
+
+@pytest.mark.parametrize(
+    "classifier_reply",
+    ["No — the assistant is only reporting existing state.", "No, nothing was saved.", ""],
+)
+async def test_authority_classifier_explained_or_empty_no_does_not_force_failure(
+    classifier_reply: str,
+) -> None:
+    runner = _runner(
+        [
+            LLMResponse(
+                content=None,
+                tool_calls=[
+                    ToolCallRequest("read", "read_memory", {"category": "tasks"}),
+                ],
+            ),
+            LLMResponse(content="You have no open tasks. The task was already done."),
+        ],
+        {"read_memory": "[tasks] First (id=first)\nStatus: done | Assignee: tal"},
+        memory_authority=classifier_reply,
+    )
+
+    result = await runner.run([{"role": "user", "content": "what are my open tasks?"}])
+
+    assert result.outcome == TurnOutcome.COMPLETED
+    assert result.final_content == "You have no open tasks. The task was already done."
 
 
 async def test_checklist_follow_up_uses_conversation_target(tmp_path) -> None:
