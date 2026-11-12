@@ -497,8 +497,23 @@ class TurnRunner:
 
         answer = (response.content or "").strip().lower()
         if require_write:
-            return answer.rstrip(".! ") != "no"
+            decision = self._leading_yes_no_decision(answer)
+            if decision is None:
+                logger.warning(
+                    "Memory-authority classifier returned no explicit decision; treating as no: {}",
+                    answer[:120],
+                )
+                return False
+            return decision
         return answer.startswith("yes")
+
+    @staticmethod
+    def _leading_yes_no_decision(answer: str) -> bool | None:
+        """Parse a leading YES/NO, tolerating trailing explanations (``no — reporting state``)."""
+        match = re.match(r"[^a-z0-9]*(yes|no)\b", answer)
+        if not match:
+            return None
+        return match.group(1) == "yes"
 
     def _append_missing_tool_results(
         self,

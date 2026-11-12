@@ -2,6 +2,15 @@
 
 All notable changes to HermitCrab.
 
+## [Unreleased]
+
+### Fixed
+
+- **Exec approvals** — quoted metacharacters (`"*.md"`, `?` in URLs) no longer count as shell syntax, and plain `|`, `;`, `&&`, and `||` pipelines run as argv without a shell, so ordinary agent commands no longer prompt for approval. Redirects, substitutions, expansions, globs, and destructive commands still require approval. A blocked command that differs from an already-approved exact command now reports the approved command so the model can retry it in the same turn.
+- **Memory verification** — the memory-authority classifier reads a leading YES/NO and treats verbose or empty answers as NO, so read-only turns no longer end with the false "could not verify or update that memory authoritatively" failure.
+- **Cron** — creating a job reports the resolved schedule timezone and next run so the agent can echo them back accurately.
+- **Find safety** — `find -delete`, `find -exec`, and `find -ok` are classified destructive and require approval.
+
 ## [0.1.1b6] — 2026-10-22
 
 ### Fixed

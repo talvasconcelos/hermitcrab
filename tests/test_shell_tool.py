@@ -137,12 +137,12 @@ async def test_execute_runs_simple_command_via_argv() -> None:
 
 
 @pytest.mark.asyncio
-async def test_execute_blocks_shell_syntax_without_approval() -> None:
+async def test_execute_blocks_real_shell_features_without_approval() -> None:
     tool = ExecTool()
 
-    result = await tool.execute("echo ok; echo bad")
+    result = await tool.execute("echo $(printf hi)")
 
-    assert "requires explicit approval" in result
+    assert "shell syntax requires explicit approval" in result
 
 
 @pytest.mark.asyncio
@@ -205,3 +205,120 @@ def test_exec_description_is_dynamic_for_unrestricted_mode(tmp_path: Path) -> No
 
     assert "full system access" in tool.description
     assert "dangerous" in tool.description
+
+
+def test_quoted_metacharacters_do_not_require_shell() -> None:
+    assert not ExecTool._requires_shell('find . -name "*.py" -o -name "*.md"')
+    assert not ExecTool._requires_shell("grep 'a;b' notes.md")
+    assert not ExecTool._requires_shell('curl "https://example.com/search?q=a&b"')
+    assert not ExecTool._requires_shell(r"echo a\;b")
+    assert ExecTool._requires_shell("find . -name '*.py' | head")
+    assert ExecTool._requires_shell('echo "$HOME"')
+    assert ExecTool._requires_shell("ls *.py")
+    assert ExecTool._requires_shell("echo 'unterminated")
+
+
+@pytest.mark.asyncio
+async def test_quoted_glob_command_runs_without_approval(tmp_path: Path) -> None:
+    (tmp_path / "notes.md").write_text("hello", encoding="utf-8")
+    tool = ExecTool()
+
+    result = await tool.execute(f'find {tmp_path} -name "*.md"')
+
+    assert "requires explicit approval" not in result
+    assert "notes.md" in result
+
+
+@pytest.mark.asyncio
+async def test_approved_command_mismatch_names_the_approved_command(tmp_path: Path) -> None:
+    victim = tmp_path / "victim.md"
+    victim.write_text("x", encoding="utf-8")
+    tool = ExecTool()
+    tool.allow_destructive_command(f"rm {victim}")
+
+    result = await tool.execute(f"rm -f {victim}")
+
+    assert "already approved for this turn" in result
+    assert f"`rm {victim}`" in result
+
+
+@pytest.mark.asyncio
+async def test_approved_destructive_command_runs_and_consumes_the_approval(tmp_path: Path) -> None:
+    victim = tmp_path / "victim.md"
+    victim.write_text("x", encoding="utf-8")
+    tool = ExecTool()
+    tool.allow_destructive_command(f"rm -f {victim}")
+
+    result = await tool.execute(f"rm -f {victim}")
+
+    assert not victim.exists()
+    assert "requires explicit approval" not in result
+
+
+def test_plain_argv_chain_rejects_shell_features() -> None:
+    assert ExecTool._parse_plain_argv_chain("echo hi | head -1") is not None
+    assert ExecTool._parse_plain_argv_chain("echo $HOME") is None
+    assert ExecTool._parse_plain_argv_chain("ls *.py") is None
+    assert ExecTool._parse_plain_argv_chain("echo hi > out.txt") is None
+    assert ExecTool._parse_plain_argv_chain("cat < notes.md") is None
+    assert ExecTool._parse_plain_argv_chain("echo hi &") is None
+    assert ExecTool._parse_plain_argv_chain('r""m -rf victim') is None
+    assert ExecTool._parse_plain_argv_chain("echo 'unterminated") is None
+    assert ExecTool._parse_plain_argv_chain("echo hi;; echo bad") is None
+
+
+@pytest.mark.asyncio
+async def test_plain_pipeline_runs_without_approval() -> None:
+    tool = ExecTool()
+
+    result = await tool.execute("echo hello | tr a-z A-Z")
+
+    assert "HELLO" in result
+    assert "requires explicit approval" not in result
+
+
+@pytest.mark.asyncio
+async def test_plain_chain_honors_and_or_and_sequence_semantics() -> None:
+    tool = ExecTool()
+
+    result = await tool.execute("false && echo skipped || echo fallback; echo done")
+
+    assert "skipped" not in result
+    assert "fallback" in result
+    assert "done" in result
+
+
+@pytest.mark.asyncio
+async def test_plain_pipeline_preserves_quoted_arguments() -> None:
+    tool = ExecTool()
+
+    result = await tool.execute("printf '%s\\n' 'a b' | tr ' ' '_'")
+
+    assert "a_b" in result
+
+
+@pytest.mark.asyncio
+async def test_destructive_pipeline_stays_blocked() -> None:
+    tool = ExecTool()
+
+    result = await tool.execute("echo ok; rm -rf /tmp/hermitcrab-not-deleted")
+
+    assert "destructive command requires explicit approval" in result
+
+
+def test_plain_argv_chain_marks_conditional_operators() -> None:
+    chain = ExecTool._parse_plain_argv_chain("echo a | head -1 && echo b; echo c")
+
+    assert chain is not None
+    assert chain[0][0] is None
+    assert chain[0][1] == [["echo", "a"], ["head", "-1"]]
+    assert chain[1][0] == "&&"
+    assert chain[1][1] == [["echo", "b"]]
+    assert chain[2][0] == ";"
+    assert chain[2][1] == [["echo", "c"]]
+
+
+def test_find_actions_require_destructive_approval() -> None:
+    assert ExecTool._classify_command_risk("find . -name '*.tmp' -delete") == "destructive"
+    assert ExecTool._classify_command_risk("find . -type f -exec rm {} +") == "destructive"
+    assert ExecTool._classify_command_risk("find . -name '*.py'") == "read_only"
